@@ -72,6 +72,51 @@ class FakeProcessor:
         return self.tokenizer.apply_chat_template(*args, **kwargs)
 
 
+class FastMaskTokenizer(FakeTokenizer):
+    def apply_chat_template(
+        self,
+        messages,
+        *,
+        tokenize=False,
+        add_generation_prompt=False,
+        tools=None,
+        return_dict=False,
+        return_assistant_tokens_mask=False,
+        **kwargs,
+    ):
+        rendered = super().apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=add_generation_prompt,
+            tools=tools,
+            **kwargs,
+        )
+        if not tokenize:
+            return rendered
+        encoded = self(rendered)
+        assistant_masks = [0] * len(encoded["input_ids"])
+        cursor = 0
+        if tools:
+            tool_names = ",".join(tool["function"]["name"] for tool in tools)
+            cursor += len(f"<tools>{tool_names}</tools>")
+        for message in messages:
+            segment = super().apply_chat_template([message], tokenize=False, tools=[])
+            next_cursor = cursor + len(segment)
+            if message["role"] == "assistant":
+                for index in range(cursor, next_cursor):
+                    assistant_masks[index] = 1
+            cursor = next_cursor
+        if return_dict:
+            output = {
+                "input_ids": encoded["input_ids"],
+                "attention_mask": encoded["attention_mask"],
+            }
+            if return_assistant_tokens_mask:
+                output["assistant_masks"] = assistant_masks
+            return output
+        return encoded["input_ids"]
+
+
 def test_format_and_mask_supervises_only_assistant_turns_across_multi_turn_conversation():
     tokenizer = FakeTokenizer()
     dataset = Dataset.from_list(
@@ -198,3 +243,25 @@ def test_format_and_mask_supports_processor_objects_with_nested_text_tokenizer()
     supervised_text = processor.tokenizer.decode([token for token in row["labels"] if token != -100])
     assert supervised_text == "<assistant><think>think</think>world</assistant>"
     assert "\033[31m" in training_data.preview()
+
+
+def test_format_and_mask_uses_fast_assistant_mask_path_when_supported():
+    tokenizer = FastMaskTokenizer()
+    dataset = Dataset.from_list(
+        [
+            {
+                "messages": [
+                    {"role": "user", "content": "hello"},
+                    {"role": "assistant", "content": "world", "reasoning_content": "think"},
+                ],
+                "tools": [],
+            }
+        ]
+    )
+
+    training_data = format_and_mask(dataset, tokenizer)
+
+    row = training_data[0]
+    assert row["assistant_masks"] == [0] * len("<user>hello</user>") + [1] * len("<assistant><think>think</think>world</assistant>")
+    supervised_text = tokenizer.decode([token for token in row["labels"] if token != -100])
+    assert supervised_text == "<assistant><think>think</think>world</assistant>"
