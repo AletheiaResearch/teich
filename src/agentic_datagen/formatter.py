@@ -321,11 +321,9 @@ def format_and_mask(
     template_kwargs = _validate_chat_template_kwargs(chat_template_kwargs)
     text_tokenizer = _resolve_text_tokenizer(tokenizer)
     renderer = _resolve_chat_template_renderer(tokenizer, text_tokenizer)
-    rows: list[dict[str, Any]] = []
-    preview_rows: list[dict[str, Any]] = []
 
-    for row in dataset:
-        masked_row, preview_row = _mask_row(
+    def _map_row(row: dict[str, Any]) -> dict[str, Any]:
+        masked_row, _ = _mask_row(
             row,
             renderer,
             text_tokenizer,
@@ -334,19 +332,21 @@ def format_and_mask(
             template_kwargs,
             max_length,
         )
-        rows.append(masked_row)
-        preview_rows.append(preview_row)
+        return masked_row
 
-    training_data = Dataset.from_list(rows)
+    training_data = dataset.map(
+        _map_row,
+        remove_columns=dataset.column_names,
+        desc="Formatting and masking conversations",
+    )
 
     def preview(index: int = 0) -> str:
-        if not preview_rows:
+        if training_data.num_rows == 0:
             raise IndexError("Cannot preview an empty dataset")
-        if index < 0 or index >= len(preview_rows):
-            raise IndexError(f"Preview index {index} is out of range for dataset of size {len(preview_rows)}")
-        row = preview_rows[index]
+        if index < 0 or index >= training_data.num_rows:
+            raise IndexError(f"Preview index {index} is out of range for dataset of size {training_data.num_rows}")
+        row = training_data[index]
         return _build_preview(text_tokenizer, row["input_ids"], row["labels"])
 
     training_data.preview = preview
-    training_data._preview_rows = preview_rows
     return training_data
