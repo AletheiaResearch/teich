@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datasets import Dataset
+import pytest
 
 from teich import format_and_mask
 
@@ -592,3 +593,37 @@ def test_format_and_mask_masks_qwen_generation_prompt_prefix_but_supervises_gene
     assert "<|im_start|>assistant\n<think>\n" in masked_text
     assert "first request" in masked_text
     assert tokenizer.render_count == 3
+
+
+def test_format_and_mask_skips_rows_with_empty_message_lists():
+    tokenizer = FakeTokenizer()
+    dataset = Dataset.from_list(
+        [
+            {"messages": [], "tools": []},
+            {
+                "messages": [
+                    {"role": "user", "content": "hello"},
+                    {"role": "assistant", "content": "world"},
+                ],
+                "tools": [],
+            },
+        ]
+    )
+
+    training_data = format_and_mask(dataset, tokenizer)
+
+    assert training_data.num_rows == 1
+    assert training_data[0]["text"] == "<user>hello</user><assistant>world</assistant>"
+
+
+def test_format_and_mask_raises_when_all_rows_have_empty_message_lists():
+    tokenizer = FakeTokenizer()
+    dataset = Dataset.from_list(
+        [
+            {"messages": [], "tools": []},
+            {"messages": [], "tools": []},
+        ]
+    )
+
+    with pytest.raises(ValueError, match="no non-empty conversations"):
+        format_and_mask(dataset, tokenizer)

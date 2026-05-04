@@ -761,6 +761,16 @@ def format_and_mask(
     renderer = _resolve_chat_template_renderer(tokenizer, text_tokenizer)
     assistant_prompt_prefix_cache: dict[str, tuple[str, ...]] = {}
 
+    if messages_column not in dataset.column_names:
+        raise TypeError(f"Dataset is missing required '{messages_column}' column")
+
+    usable_dataset = dataset.filter(
+        lambda row: isinstance(row.get(messages_column), list) and len(row[messages_column]) > 0,
+        desc="Filtering empty conversations",
+    )
+    if usable_dataset.num_rows == 0:
+        raise ValueError("Dataset contains no non-empty conversations to format and mask.")
+
     def _map_row(row: dict[str, Any]) -> dict[str, Any]:
         masked_row, _ = _mask_row(
             row,
@@ -774,9 +784,9 @@ def format_and_mask(
         )
         return masked_row
 
-    training_data = dataset.map(
+    training_data = usable_dataset.map(
         _map_row,
-        remove_columns=dataset.column_names,
+        remove_columns=usable_dataset.column_names,
         desc="Formatting and masking conversations",
     )
 
