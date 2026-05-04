@@ -33,7 +33,7 @@ pip install teich
 
 Requirements for trace generation:
 - Docker
-- OpenAI API key (or local OpenAI-compatible endpoint)
+- OpenAI/OpenRouter API key (or local OpenAI-compatible endpoint)
 
 The Python utilities work without Docker if you already have traces.
 
