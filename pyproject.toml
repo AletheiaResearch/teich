@@ -1,7 +1,7 @@
 [project]
 name = "teich"
-version = "0.1.1a3"
-description = "Generate agent training data from Codex and Pi traces"
+version = "0.1.1a4"
+description = "Turn coding agent sessions into training data"
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.10"

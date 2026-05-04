@@ -9,6 +9,13 @@ from typing import Any
 from datasets import Dataset
 
 
+_GEMMA_TURN_START_PATTERN = re.compile(r"<\|turn>(model|user|system)\n")
+_GEMMA_ASSISTANT_TURN_PREFIX = "<|turn>model\n"
+_GEMMA_THOUGHT_PREFIX = "<|channel>thought\n"
+_GEMMA_TOOL_RESPONSE_START = "<|tool_response>"
+_GEMMA_TOOL_RESPONSE_END = "<tool_response|>"
+
+
 def _resolve_chat_template_renderer(tokenizer: Any, text_tokenizer: Any) -> Any:
     if hasattr(text_tokenizer, "apply_chat_template"):
         return text_tokenizer
@@ -141,6 +148,13 @@ def _chat_template_supports_assistant_mask(renderer: Any) -> bool:
     return bool(re.search(r"\{%-?\s*generation\s*-?%\}", template))
 
 
+def _chat_template_looks_like_gemma(renderer: Any) -> bool:
+    template = getattr(renderer, "chat_template", None)
+    if not isinstance(template, str):
+        return False
+    return "<|turn>model" in template and "<|tool_response>" in template
+
+
 def _has_user_message(messages: list[dict[str, Any]]) -> bool:
     return any(isinstance(message, dict) and message.get("role") == "user" for message in messages)
 
@@ -211,6 +225,114 @@ def _update_labels_with_diff(
             else:
                 labels.extend([-100] * (j2 - j1))
     return labels
+
+
+def _subtract_spans(
+    spans: list[tuple[int, int]],
+    excluded_spans: list[tuple[int, int]],
+) -> list[tuple[int, int]]:
+    if not spans or not excluded_spans:
+        return spans
+    remaining: list[tuple[int, int]] = []
+    excluded_index = 0
+    ordered_exclusions = sorted(excluded_spans)
+    for start, end in sorted(spans):
+        cursor = start
+        while excluded_index < len(ordered_exclusions) and ordered_exclusions[excluded_index][1] <= cursor:
+            excluded_index += 1
+        scan_index = excluded_index
+        while scan_index < len(ordered_exclusions):
+            excluded_start, excluded_end = ordered_exclusions[scan_index]
+            if excluded_start >= end:
+                break
+            if cursor < excluded_start:
+                remaining.append((cursor, min(end, excluded_start)))
+            cursor = max(cursor, excluded_end)
+            if cursor >= end:
+                break
+            scan_index += 1
+        if cursor < end:
+            remaining.append((cursor, end))
+    return _merge_spans([(start, end) for start, end in remaining if start < end])
+
+
+def _find_delimited_spans(text: str, start_token: str, end_token: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    cursor = 0
+    while True:
+        start = text.find(start_token, cursor)
+        if start < 0:
+            break
+        end = text.find(end_token, start + len(start_token))
+        if end < 0:
+            break
+        spans.append((start, end + len(end_token)))
+        cursor = end + len(end_token)
+    return spans
+
+
+def _gemma_like_supervised_spans(text: str) -> list[tuple[int, int]]:
+    turn_matches = list(_GEMMA_TURN_START_PATTERN.finditer(text))
+    if not turn_matches:
+        return []
+    tool_response_spans = _find_delimited_spans(text, _GEMMA_TOOL_RESPONSE_START, _GEMMA_TOOL_RESPONSE_END)
+    supervised_spans: list[tuple[int, int]] = []
+    for index, match in enumerate(turn_matches):
+        if match.group(1) != "model":
+            continue
+        block_start = match.start()
+        block_end = turn_matches[index + 1].start() if index + 1 < len(turn_matches) else len(text)
+        supervised_start = block_start + len(_GEMMA_ASSISTANT_TURN_PREFIX)
+        if text.startswith(_GEMMA_THOUGHT_PREFIX, supervised_start):
+            supervised_start += len(_GEMMA_THOUGHT_PREFIX)
+        if supervised_start < block_end:
+            supervised_spans.append((supervised_start, block_end))
+    return _subtract_spans(supervised_spans, tool_response_spans)
+
+
+def _gemma_mask_row(
+    renderer: Any,
+    text_tokenizer: Any,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    chat_template_kwargs: dict[str, Any],
+    max_length: int | None,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    if not _chat_template_looks_like_gemma(renderer):
+        return None
+    if not _supports_offsets(text_tokenizer):
+        return None
+    formatted_text = _render_chat(renderer, messages, tools, chat_template_kwargs)
+    supervised_spans = _gemma_like_supervised_spans(formatted_text)
+    if not supervised_spans:
+        return None
+    encoded = _tokenize_text_with_offsets(text_tokenizer, formatted_text)
+    if encoded is None:
+        return None
+    input_ids, attention_mask, offsets = encoded
+    labels = _labels_from_offsets(input_ids, offsets, supervised_spans)
+    assistant_masks = [0 if label == -100 else 1 for label in labels]
+    if 1 not in assistant_masks:
+        return None
+    if max_length is not None:
+        input_ids = input_ids[:max_length]
+        attention_mask = attention_mask[:max_length]
+        assistant_masks = assistant_masks[:max_length]
+        labels = labels[:max_length]
+    return (
+        {
+            "text": formatted_text,
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "assistant_masks": assistant_masks,
+            "labels": labels,
+        },
+        {
+            "text": formatted_text,
+            "input_ids": input_ids,
+            "labels": labels,
+        },
+    )
 
 
 def _fast_mask_row(
@@ -663,6 +785,10 @@ def _mask_row(
     fast_path = _fast_mask_row(renderer, text_tokenizer, messages, tools, chat_template_kwargs, max_length)
     if fast_path is not None:
         return fast_path
+
+    gemma_path = _gemma_mask_row(renderer, text_tokenizer, messages, tools, chat_template_kwargs, max_length)
+    if gemma_path is not None:
+        return gemma_path
 
     offset_path = _offset_mask_row(
         renderer,
