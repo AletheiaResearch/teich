@@ -34,6 +34,43 @@ app = typer.Typer(
 )
 
 
+def _has_non_empty_trace_outputs(traces_dir: Path) -> bool:
+    if not traces_dir.exists():
+        return False
+    for path in traces_dir.rglob("*.jsonl"):
+        if not path.is_file():
+            continue
+        try:
+            if "partials" in path.relative_to(traces_dir).parts:
+                continue
+        except ValueError:
+            pass
+        if path.stat().st_size > 0:
+            return True
+    return False
+
+
+def _write_output_metadata(cfg: Config) -> Path:
+    return write_traces_readme(
+        cfg.output.traces_dir,
+        pretty_name=cfg.output.pretty_name,
+        tags=cfg.get_dataset_tags(),
+        model_id=cfg.model.model,
+        repo_id=cfg.get_publish_repo_id(),
+        tools=snapshot_configured_tools(cfg),
+    )
+
+
+def _try_write_partial_output_metadata(cfg: Config) -> Path | None:
+    if not _has_non_empty_trace_outputs(cfg.output.traces_dir):
+        return None
+    try:
+        return _write_output_metadata(cfg)
+    except Exception as exc:
+        console.print(f"[yellow]Warning: failed to write README for partial outputs: {exc}[/yellow]")
+        return None
+
+
 def _publish_dataset_to_hub(cfg: Config) -> str:
     repo_id = cfg.get_publish_repo_id()
     if not repo_id:
@@ -120,6 +157,9 @@ def generate(
         )
     if not pending_prompt_inputs:
         console.print("[green]All configured prompts already have completed outputs. Nothing to run.[/green]")
+        readme_path = _try_write_partial_output_metadata(cfg)
+        if readme_path:
+            console.print(f"[green]Wrote README: {readme_path}[/green]")
         return
     console.print(
         f"[blue]Processing {len(pending_prompt_inputs)} prompts with concurrency {effective_concurrency}...[/blue]\n"
@@ -147,16 +187,7 @@ def generate(
                 prompt_inputs=pending_prompt_inputs,
                 resume=resume,
             )
-        dataset_tags = cfg.get_dataset_tags()
-        tools = snapshot_configured_tools(cfg)
-        readme_path = write_traces_readme(
-            cfg.output.traces_dir,
-            pretty_name=cfg.output.pretty_name,
-            tags=dataset_tags,
-            model_id=cfg.model.model,
-            repo_id=cfg.get_publish_repo_id(),
-            tools=tools,
-        )
+        readme_path = _write_output_metadata(cfg)
         totals = reporter.snapshot_totals()
 
         console.print(f"\n[bold green]Success! Generated {len(results)} JSONL files:[/bold green]")
@@ -177,9 +208,15 @@ def generate(
             console.print(f"[green]Published dataset: {repo_url}[/green]")
 
     except KeyboardInterrupt:
+        readme_path = _try_write_partial_output_metadata(cfg)
+        if readme_path:
+            console.print(f"\n[green]Wrote README for partial outputs: {readme_path}[/green]")
         console.print("\n[yellow]Interrupted. Completed outputs remain on disk.[/yellow]")
         raise typer.Exit(130)
     except Exception as e:
+        readme_path = _try_write_partial_output_metadata(cfg)
+        if readme_path:
+            console.print(f"\n[green]Wrote README for partial outputs: {readme_path}[/green]")
         console.print(f"\n[red]Error: {e}[/red]")
         raise typer.Exit(1)
 
@@ -339,7 +376,7 @@ def init(
 
     console.print(f"\n[bold green]Initialized in {path.absolute()}[/bold green]")
     console.print("\n[yellow]Next:[/yellow]")
-    console.print("1. Set TEICH_API_KEY / OPENAI_API_KEY in env or config.yaml")
+    console.print("1. Set TEICH_API_KEY, OPENROUTER_API_KEY, or OPENAI_API_KEY in env or config.yaml")
     console.print("2. Add prompt rows to prompts.csv")
     console.print("3. Run: [cyan]uvx teich generate -c config.yaml[/cyan]")
 
@@ -350,7 +387,7 @@ CONFIG_TEMPLATE = '''# Teich configuration
 # 1. Choose agent.provider: codex, pi, or chat
 # 2. Set model.model to the model you want to run
 # 3. Keep prompts in prompts.csv, or add inline prompts below
-# 4. Prefer TEICH_API_KEY / OPENAI_API_KEY in your environment for secrets
+# 4. Prefer TEICH_API_KEY / OPENROUTER_API_KEY / OPENAI_API_KEY in your environment for secrets
 # 5. Run: uvx teich generate -c config.yaml
 
 agent:
@@ -392,6 +429,8 @@ model:
 #
 # You can also put secrets in env vars instead of committing them here:
 #   TEICH_API_KEY=...
+#   OPENROUTER_API_KEY=...
+#   OPENAI_API_KEY=...
 #   TEICH_BASE_URL=...
 #   TEICH_PROVIDER=...
 #   TEICH_MODEL=...

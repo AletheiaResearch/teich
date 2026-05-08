@@ -16,6 +16,17 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 GITHUB_REPO_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 
+def _api_key_env_aliases(provider: str | None) -> list[str]:
+    normalized = provider.strip().lower() if isinstance(provider, str) else ""
+    aliases = ["TEICH_API_KEY"]
+    if normalized == "openrouter":
+        aliases.append("OPENROUTER_API_KEY")
+    if normalized == "openai":
+        aliases.append("OPENAI_API_KEY")
+    aliases.append("OPENAI_API_KEY")
+    return list(dict.fromkeys(aliases))
+
+
 def _get_env_alias(*names: str) -> str | None:
     for name in names:
         value = os.getenv(name)
@@ -204,6 +215,8 @@ class Config(BaseModel):
             TEICH_MODEL - Override model ID
             TEICH_BASE_URL - Override API base URL
             TEICH_API_KEY - Override API key
+            OPENROUTER_API_KEY - Override API key for OpenRouter configs
+            OPENAI_API_KEY - Override API key for OpenAI configs and legacy configs
             TEICH_PROVIDER - Override provider name
         """
         with open(path, "r", encoding="utf-8") as f:
@@ -225,7 +238,8 @@ class Config(BaseModel):
             data.setdefault("model", {})["model"] = model_env
         if base_url_env := _get_env_alias("TEICH_BASE_URL"):
             data.setdefault("api", {})["base_url"] = base_url_env
-        if api_key_env := _get_env_alias("TEICH_API_KEY"):
+        provider_for_env = data.get("api", {}).get("provider") if isinstance(data.get("api"), dict) else None
+        if api_key_env := _get_env_alias(*_api_key_env_aliases(provider_for_env)):
             data.setdefault("api", {})["api_key"] = api_key_env
         if provider_env := _get_env_alias("TEICH_PROVIDER"):
             data.setdefault("api", {})["provider"] = provider_env
@@ -234,7 +248,7 @@ class Config(BaseModel):
 
     def get_api_key(self) -> str | None:
         """Get effective API key (from api config or global)."""
-        return self.api.api_key or self.openai_api_key
+        return self.api.api_key or self.openai_api_key or _get_env_alias(*_api_key_env_aliases(self.api.provider))
 
     def get_effective_model(self) -> str:
         """Get effective model identifier."""

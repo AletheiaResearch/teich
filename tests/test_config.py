@@ -29,6 +29,8 @@ def test_config_from_yaml(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("TEICH_MODEL", raising=False)
     monkeypatch.delenv("TEICH_BASE_URL", raising=False)
     monkeypatch.delenv("TEICH_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("TEICH_PROVIDER", raising=False)
 
     config_file = tmp_path / "config.yaml"
@@ -79,6 +81,24 @@ openai_api_key: sk-test123
     assert config.timeout_seconds == 300
     assert config.openai_api_key == "sk-test123"
     assert config.prompts == ["Build a todo app", "Create a python script"]
+
+
+def test_openrouter_api_key_env_alias(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("TEICH_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-test")
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("""
+api:
+  provider: openrouter
+prompts:
+  - Hello
+""")
+
+    config = Config.from_yaml(config_file)
+
+    assert config.api.api_key == "sk-or-v1-test"
+    assert Config(api={"provider": "openrouter"}).get_api_key() == "sk-or-v1-test"
 
 
 def test_config_generates_chat_dataset_tags():

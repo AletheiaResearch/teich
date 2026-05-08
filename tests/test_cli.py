@@ -201,6 +201,44 @@ api:
         assert "skipping 1 configured prompts" in result.output
 
 
+def test_generate_command_writes_readme_for_partial_outputs_on_failure(tmp_path: Path):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(f"""
+agent:
+  provider: chat
+model:
+  model: gpt-4.1-mini
+prompts:
+  - Hello
+  - Who are you?
+output:
+  traces_dir: {tmp_path}/output
+api:
+  provider: openai
+  api_key: sk-test
+  wire_api: responses
+""")
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "chat.jsonl").write_text(
+        json.dumps({"prompt": "Hello", "response": "Hi", "messages": [{"role": "assistant", "content": "Hi"}]})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with patch('teich.cli.ChatRunner') as mock_runner:
+        mock_instance = MagicMock()
+        mock_instance.run_all.side_effect = RuntimeError("boom")
+        mock_runner.return_value = mock_instance
+
+        result = runner.invoke(app, ["generate", "-c", str(config_file)])
+
+        assert result.exit_code == 1
+        assert "Wrote README for partial outputs" in result.output
+        assert "Error: boom" in result.output
+        assert (output_dir / "README.md").exists()
+
+
 def test_generate_command_publishes_dataset_when_publish_repo_is_configured(tmp_path: Path):
     config_file = tmp_path / "config.yaml"
     config_file.write_text(f"""

@@ -237,7 +237,20 @@ SessionProgressCallback = Callable[[SessionProgressUpdate], None]
 
 
 def _prompt_completion_key(prompt: str) -> str:
+    prompt = _unwrap_teich_prompt_file(prompt)
     return "\n".join(prompt.replace("\r\n", "\n").replace("\r", "\n").strip().splitlines())
+
+
+def _unwrap_teich_prompt_file(prompt: str) -> str:
+    normalized = prompt.strip()
+    match = re.fullmatch(
+        r'<file\s+name=["\'][^"\']*\.teich-prompt\.txt["\']>\s*(?P<prompt>.*?)\s*</file>',
+        normalized,
+        flags=re.DOTALL,
+    )
+    if match:
+        return match.group("prompt")
+    return prompt
 
 
 def _message_text(content: Any) -> str:
@@ -299,6 +312,11 @@ def completed_prompt_keys_from_outputs(traces_dir: Path) -> set[str]:
     for path in sorted(traces_dir.rglob("*.jsonl")):
         if not path.is_file():
             continue
+        try:
+            if "partials" in path.relative_to(traces_dir).parts:
+                continue
+        except ValueError:
+            pass
         try:
             structured_rows = _structured_rows_from_jsonl(path)
             if structured_rows is not None:
@@ -457,21 +475,7 @@ class DockerRuntimeRunner:
             self._terminate_process(process, container_name)
 
     def _preserve_partial_session_files(self, session_dir: Path, session_id: str, prefix: str) -> list[Path]:
-        session_files = sorted(path for path in session_dir.rglob("*.jsonl") if path.is_file())
-        if not session_files:
-            return []
-        destination_dir = self.config.output.traces_dir / "partials"
-        destination_dir.mkdir(parents=True, exist_ok=True)
-        preserved: list[Path] = []
-        for index, source_path in enumerate(session_files, start=1):
-            destination = destination_dir / f"{prefix}-{session_id[:8]}-{index}-{source_path.name}"
-            counter = 1
-            while destination.exists():
-                destination = destination_dir / f"{prefix}-{session_id[:8]}-{index}_{counter}-{source_path.name}"
-                counter += 1
-            shutil.copy2(source_path, destination)
-            preserved.append(destination)
-        return preserved
+        return []
 
     @staticmethod
     def _copy_workspace_snapshot(workspace: Path, destination: Path) -> None:
@@ -864,6 +868,7 @@ class DockerRuntimeRunner:
                 except Exception as exc:
                     with result_lock:
                         errors.append(exc)
+                    stop_event.set()
                 else:
                     with result_lock:
                         results_by_index[prompt_index] = result
@@ -1154,6 +1159,7 @@ class CodexRunner(DockerRuntimeRunner):
             "docker",
             "run",
             "--rm",
+            "-i",
             "--name",
             container_name,
             "--user",
@@ -1738,12 +1744,6 @@ class ChatRunner(DockerRuntimeRunner):
             handle.flush()
             os.fsync(handle.fileno())
 
-    @staticmethod
-    def _initialize_chat_output_file(destination: Path) -> None:
-        with destination.open("w", encoding="utf-8") as handle:
-            handle.flush()
-            os.fsync(handle.fileno())
-
     def run_all(
         self,
         max_concurrency: int = 1,
@@ -1757,8 +1757,6 @@ class ChatRunner(DockerRuntimeRunner):
 
         destination = self.config.output.traces_dir / "chat.jsonl" if resume else self._resolve_output_path("chat.jsonl")
         destination.parent.mkdir(parents=True, exist_ok=True)
-        if not resume or not destination.exists():
-            self._initialize_chat_output_file(destination)
         total_prompts = len(prompt_inputs)
         worker_count = max(1, min(max_concurrency, total_prompts))
         append_lock = threading.Lock()
@@ -1768,6 +1766,8 @@ class ChatRunner(DockerRuntimeRunner):
         errors: list[Exception] = []
         error_lock = threading.Lock()
         stop_event = threading.Event()
+        running: dict[int, tuple[PromptInput, datetime, float]] = {}
+        running_lock = threading.Lock()
 
         def emit_queued(prompt_index: int, prompt_input: PromptInput) -> None:
             if progress_callback:
@@ -1788,8 +1788,17 @@ class ChatRunner(DockerRuntimeRunner):
                     prompt_index, prompt_input = prompt_queue.get_nowait()
                 except queue.Empty:
                     return
+                if stop_event.is_set():
+                    prompt_queue.task_done()
+                    return
                 try:
                     emit_queued(prompt_index, prompt_input)
+                    with running_lock:
+                        running[prompt_index] = (
+                            prompt_input,
+                            datetime.now(timezone.utc),
+                            time.monotonic() + self.config.timeout_seconds,
+                        )
                     self._run_chat_prompt_task(
                         f"prompt-{prompt_index}",
                         prompt_index,
@@ -1802,7 +1811,10 @@ class ChatRunner(DockerRuntimeRunner):
                 except Exception as exc:
                     with error_lock:
                         errors.append(exc)
+                    stop_event.set()
                 finally:
+                    with running_lock:
+                        running.pop(prompt_index, None)
                     prompt_queue.task_done()
 
         threads = [
@@ -1813,6 +1825,37 @@ class ChatRunner(DockerRuntimeRunner):
             thread.start()
         try:
             while any(thread.is_alive() for thread in threads):
+                now = time.monotonic()
+                timed_out: tuple[int, PromptInput, datetime] | None = None
+                with running_lock:
+                    for prompt_index, (prompt_input, started_at, deadline) in running.items():
+                        if now >= deadline:
+                            timed_out = (prompt_index, prompt_input, started_at)
+                            break
+                if timed_out is not None:
+                    prompt_index, prompt_input, started_at = timed_out
+                    error = RuntimeError(
+                        f"Chat prompt {prompt_index} timed out after {self.config.timeout_seconds}s: "
+                        f"{self._prompt_preview(prompt_input.prompt)}"
+                    )
+                    with error_lock:
+                        errors.append(error)
+                    stop_event.set()
+                    if progress_callback:
+                        progress_callback(
+                            SessionProgressUpdate(
+                                prompt_id=f"prompt-{prompt_index}",
+                                prompt_index=prompt_index,
+                                total_prompts=total_prompts,
+                                prompt=prompt_input.prompt,
+                                prompt_preview=self._prompt_preview(prompt_input.prompt),
+                                status="failed",
+                                started_at=started_at,
+                                finished_at=datetime.now(timezone.utc),
+                                error=str(error),
+                            )
+                        )
+                    break
                 for thread in threads:
                     thread.join(timeout=0.1)
         except KeyboardInterrupt:
@@ -2092,12 +2135,20 @@ class PiRunner(DockerRuntimeRunner):
         empty_tool_calls = 0
         empty_tool_results = 0
         empty_argument_validation_errors = 0
+        runtime_errors: list[str] = []
         for event in events:
             if event.get("type") != "message":
                 continue
             payload = event.get("message")
             if not isinstance(payload, dict):
                 continue
+            stop_reason = payload.get("stopReason")
+            error_message = payload.get("errorMessage")
+            if stop_reason == "error" or (isinstance(error_message, str) and error_message.strip()):
+                if isinstance(error_message, str) and error_message.strip():
+                    runtime_errors.append(error_message.strip())
+                else:
+                    runtime_errors.append("model/provider returned stopReason=error")
             role = payload.get("role")
             if role == "assistant":
                 content = payload.get("content")
@@ -2120,6 +2171,12 @@ class PiRunner(DockerRuntimeRunner):
                     empty_tool_results += 1
                 if text.startswith("Validation failed for tool ") and "Received arguments:\n{}" in text:
                     empty_argument_validation_errors += 1
+        if runtime_errors:
+            raise RuntimeError(
+                "Pi session ended with model/provider error: "
+                f"{runtime_errors[0]}. "
+                "This trace was not exported because the model/provider did not produce a successful assistant response."
+            )
         if not empty_tool_calls and not empty_tool_results and not empty_argument_validation_errors:
             return
         raise RuntimeError(

@@ -105,6 +105,7 @@ def test_run_session_command_generation():
         assert "docker" in cmd
         assert "run" in cmd
         assert "--rm" in cmd
+        assert "-i" in cmd
         assert "--name" in cmd
         assert "teich-codex-test-session-123" in cmd
         assert "-e" in cmd
@@ -210,7 +211,7 @@ def test_run_process_removes_named_container_on_failure():
     )
 
 
-def test_codex_run_session_preserves_partial_trace_on_failure(tmp_path: Path):
+def test_codex_run_session_discards_partial_trace_on_failure(tmp_path: Path):
     config = Config(output={"traces_dir": tmp_path / "output", "sandbox_dir": tmp_path / "sandbox"})
 
     with patch.object(CodexRunner, '_ensure_image'):
@@ -236,9 +237,7 @@ def test_codex_run_session_preserves_partial_trace_on_failure(tmp_path: Path):
         with pytest.raises(RuntimeError, match="boom"):
             runner.run_session("Test prompt", "test-session")
 
-    partials = sorted((tmp_path / "output" / "partials").glob("codex-test-ses*-partial.jsonl"))
-    assert len(partials) == 1
-    assert "Test prompt" in partials[0].read_text(encoding="utf-8")
+    assert not (tmp_path / "output" / "partials").exists()
 
 
 def test_run_all_with_no_prompts():
@@ -389,16 +388,13 @@ def test_run_all_queues_prompts_lazily_as_workers_free_up(tmp_path: Path):
     assert all(thread_name.startswith("teich-prompt-worker-") for thread_name in queued_update_thread_names)
 
 
-def test_run_all_preserves_completed_agent_trace_files_when_later_prompt_fails(tmp_path: Path):
+def test_run_all_stops_claiming_agent_prompts_after_failure(tmp_path: Path):
     config = Config(prompts=["Prompt 1", "Prompt 2", "Prompt 3"], max_concurrency=1)
 
     with patch.object(CodexRunner, '_ensure_image'):
         runner = CodexRunner(config)
 
-    trace_paths = {
-        "Prompt 1": tmp_path / "first.jsonl",
-        "Prompt 3": tmp_path / "third.jsonl",
-    }
+    trace_paths = {"Prompt 1": tmp_path / "first.jsonl"}
 
     def fake_run_session(
         prompt: str,
@@ -418,9 +414,8 @@ def test_run_all_preserves_completed_agent_trace_files_when_later_prompt_fails(t
             runner.run_all(max_concurrency=1)
 
     assert trace_paths["Prompt 1"].exists()
-    assert trace_paths["Prompt 3"].exists()
     assert json.loads(trace_paths["Prompt 1"].read_text(encoding="utf-8")) == {"prompt": "Prompt 1"}
-    assert json.loads(trace_paths["Prompt 3"].read_text(encoding="utf-8")) == {"prompt": "Prompt 3"}
+    assert not (tmp_path / "third.jsonl").exists()
 
 
 def test_run_all_propagates_keyboard_interrupt_without_waiting_for_agent_workers(tmp_path: Path):
@@ -1039,7 +1034,7 @@ def test_pi_runner_resolves_pi_executable_from_path():
     assert PiRunner._resolve_pi_executable() == "@mariozechner/pi-coding-agent"
 
 
-def test_pi_run_session_preserves_partial_trace_on_failure(tmp_path: Path):
+def test_pi_run_session_discards_partial_trace_on_failure(tmp_path: Path):
     config = Config(agent={"provider": "pi"}, output={"traces_dir": tmp_path / "output", "sandbox_dir": tmp_path / "sandbox"})
 
     with patch.object(PiRunner, '_ensure_image'):
@@ -1068,9 +1063,7 @@ def test_pi_run_session_preserves_partial_trace_on_failure(tmp_path: Path):
         with pytest.raises(RuntimeError, match="boom"):
             runner.run_session("Test prompt", "test-session")
 
-    partials = sorted((tmp_path / "output" / "partials").glob("pi-test-ses*-partial.jsonl"))
-    assert len(partials) == 1
-    assert "Test prompt" in partials[0].read_text(encoding="utf-8")
+    assert not (tmp_path / "output" / "partials").exists()
 
 
 def test_chat_runner_writes_structured_dataset_row_from_responses_api(tmp_path: Path):
@@ -1166,8 +1159,7 @@ def test_chat_runner_run_all_marks_api_error_as_failed_and_does_not_append_row(t
     assert [update.status for update in updates] == ["queued", "running", "failed"]
     assert updates[-1].error and "Rate limit exceeded" in updates[-1].error
     destination = tmp_path / "output" / "chat.jsonl"
-    assert destination.exists()
-    assert destination.read_text(encoding="utf-8") == ""
+    assert not destination.exists()
 
 
 def test_chat_runner_run_all_preserves_completed_rows_when_later_response_is_invalid_json(tmp_path: Path):
@@ -1447,6 +1439,38 @@ def test_resume_detects_completed_codex_and_pi_traces(tmp_path: Path):
     assert [item.prompt for item in pending] == ["Write tests"]
 
 
+def test_resume_unwraps_teich_prompt_file_wrapper_from_completed_traces(tmp_path: Path):
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(parents=True)
+    (output_dir / "pi.jsonl").write_text(
+        '{"type":"session","id":"pi-1"}\n'
+        '{"type":"message","message":{"role":"user","content":[{"type":"text","text":"<file name=\\"/workspace/.teich-prompt.txt\\">\\nFix bug\\n</file>"}]}}\n'
+        '{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"Fixed"}]}}\n',
+        encoding="utf-8",
+    )
+    prompt_inputs = [PromptInput(prompt="Fix bug"), PromptInput(prompt="Write tests")]
+
+    pending = pending_prompt_inputs_for_resume(prompt_inputs, output_dir)
+
+    assert [item.prompt for item in pending] == ["Write tests"]
+
+
+def test_resume_ignores_partial_trace_directory(tmp_path: Path):
+    output_dir = tmp_path / "output"
+    partials_dir = output_dir / "partials"
+    partials_dir.mkdir(parents=True)
+    (partials_dir / "partial.jsonl").write_text(
+        '{"type":"message","message":{"role":"user","content":[{"type":"text","text":"Fix bug"}]}}\n'
+        '{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"Fixed"}]}}\n',
+        encoding="utf-8",
+    )
+    prompt_inputs = [PromptInput(prompt="Fix bug")]
+
+    pending = pending_prompt_inputs_for_resume(prompt_inputs, output_dir)
+
+    assert [item.prompt for item in pending] == ["Fix bug"]
+
+
 def test_chat_runner_resume_appends_existing_chat_file(tmp_path: Path):
     config = Config(
         agent={"provider": "chat"},
@@ -1474,7 +1498,7 @@ def test_chat_runner_resume_appends_existing_chat_file(tmp_path: Path):
     assert [row["prompt"] for row in rows] == ["Hello", "Who are you?"]
 
 
-def test_chat_runner_continues_claiming_new_prompts_after_failure(tmp_path: Path):
+def test_chat_runner_stops_claiming_new_prompts_after_failure(tmp_path: Path):
     config = Config(
         agent={"provider": "chat"},
         model=ModelConfig(model="gpt-4.1-mini"),
@@ -1502,7 +1526,34 @@ def test_chat_runner_continues_claiming_new_prompts_after_failure(tmp_path: Path
         with pytest.raises(RuntimeError, match="boom"):
             runner.run_all(max_concurrency=2)
 
-    assert set(claimed) == {"prompt-1", "prompt-2", "prompt-3", "prompt-4"}
+    assert set(claimed) == {"prompt-1", "prompt-2"}
+
+
+def test_chat_run_all_times_out_hung_worker_without_waiting_forever(tmp_path: Path):
+    config = Config(
+        agent={"provider": "chat"},
+        model=ModelConfig(model="gpt-4.1-mini"),
+        api=APIConfig(provider="openai", api_key="sk-test", wire_api="responses"),
+        prompts=["hung"],
+        output={"traces_dir": tmp_path / "output"},
+        timeout_seconds=1,
+    )
+    runner = ChatRunner(config)
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocked_task(*args, **kwargs):
+        started.set()
+        release.wait(timeout=5)
+
+    try:
+        with patch.object(runner, '_run_chat_prompt_task', side_effect=blocked_task):
+            start = time.monotonic()
+            with pytest.raises(RuntimeError, match="timed out"):
+                runner.run_all(max_concurrency=1)
+            assert time.monotonic() - start < 3
+    finally:
+        release.set()
 
 
 def test_chat_run_all_propagates_keyboard_interrupt_without_waiting_for_workers(tmp_path: Path):
