@@ -35,7 +35,44 @@ def _dataset_from_rows(rows: list[dict]) -> Dataset:
     return Dataset.from_list(rows, features=features)
 
 
+def _normalize_tools_snapshot(tools: Any) -> list[dict[str, Any]]:
+    if isinstance(tools, list):
+        return [tool for tool in tools if isinstance(tool, dict)]
+    return []
+
+
+def _load_tools_snapshot_from_readme(root: Path) -> list[dict[str, Any]]:
+    readme_path = root / "README.md"
+    if not readme_path.is_file():
+        return []
+    try:
+        readme = readme_path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    summary = "<summary>Training-ready tool schema snapshot</summary>"
+    summary_index = readme.find(summary)
+    if summary_index < 0:
+        return []
+    fence_start = readme.find("```json", summary_index)
+    if fence_start < 0:
+        return []
+    json_start = readme.find("\n", fence_start)
+    if json_start < 0:
+        return []
+    fence_end = readme.find("```", json_start + 1)
+    if fence_end < 0:
+        return []
+    try:
+        tools = json.loads(readme[json_start:fence_end].strip())
+    except json.JSONDecodeError:
+        return []
+    return _normalize_tools_snapshot(tools)
+
+
 def _load_tools_snapshot(root: Path) -> list[dict[str, Any]]:
+    tools_from_readme = _load_tools_snapshot_from_readme(root)
+    if tools_from_readme:
+        return tools_from_readme
     candidates = [root / "tools.json"]
     if root.is_dir():
         candidates.extend(path for path in root.rglob("tools.json") if path.is_file())
@@ -46,8 +83,9 @@ def _load_tools_snapshot(root: Path) -> list[dict[str, Any]]:
             tools = json.loads(candidate.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if isinstance(tools, list):
-            return [tool for tool in tools if isinstance(tool, dict)]
+        normalized = _normalize_tools_snapshot(tools)
+        if normalized:
+            return normalized
     return []
 
 
@@ -85,7 +123,7 @@ def load_traces(
                 token=token,
                 cache_dir=str(cache_dir) if cache_dir is not None else None,
                 local_dir=str(local_dir) if local_dir is not None else None,
-                allow_patterns=["*.jsonl", "**/*.jsonl", "tools.json", "**/tools.json"],
+                allow_patterns=["*.jsonl", "**/*.jsonl", "README.md", "tools.json", "**/tools.json"],
             )
         )
     traces_dir = root if root.is_file() else _trace_directory(root, split)

@@ -73,10 +73,52 @@ def test_load_traces_downloads_dataset_repo_and_converts_split(tmp_path: Path):
         token=None,
         cache_dir=None,
         local_dir=None,
-        allow_patterns=["*.jsonl", "**/*.jsonl", "tools.json", "**/tools.json"],
+        allow_patterns=["*.jsonl", "**/*.jsonl", "README.md", "tools.json", "**/tools.json"],
     )
     assert dataset.num_rows == 1
     assert dataset[0]["prompt"] == "Inspect repo"
+
+
+def test_load_traces_applies_tools_snapshot_embedded_in_readme(tmp_path: Path):
+    dataset_file = tmp_path / "chat.jsonl"
+    dataset_file.write_text(
+        json.dumps(
+            {
+                "messages": [
+                    {"role": "user", "content": "Open page", "thinking": None},
+                    {"role": "assistant", "content": "Done", "thinking": None},
+                ],
+                "prompt": "Open page",
+                "response": "Done",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "browser_open",
+                "description": "Open a browser page",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    (tmp_path / "README.md").write_text(
+        "<details>\n"
+        "<summary>Training-ready tool schema snapshot</summary>\n\n"
+        "```json\n"
+        + json.dumps(tools, indent=2)
+        + "\n```\n"
+        "</details>\n",
+        encoding="utf-8",
+    )
+
+    dataset = load_traces(tmp_path)
+
+    assert dataset.num_rows == 1
+    assert dataset[0]["tools"][0]["function"]["name"] == "browser_open"
 
 
 def test_load_traces_raises_when_no_trace_files_exist(tmp_path: Path):

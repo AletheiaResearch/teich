@@ -83,13 +83,34 @@ def _publish_dataset_to_hub(cfg: Config) -> str:
         private=cfg.publish.private,
         exist_ok=True,
     )
-    api.upload_folder(
-        folder_path=str(cfg.output.traces_dir),
-        repo_id=repo_id,
-        repo_type="dataset",
-        commit_message="Upload teich dataset output",
-        ignore_patterns=["partials/**"],
-    )
+    delete_file = getattr(api, "delete_file", None)
+    if callable(delete_file):
+        try:
+            delete_file(
+                path_in_repo="tools.json",
+                repo_id=repo_id,
+                repo_type="dataset",
+                commit_message="Remove legacy teich tools snapshot",
+            )
+        except Exception:
+            pass
+    upload_large_folder = getattr(api, "upload_large_folder", None)
+    if callable(upload_large_folder):
+        upload_large_folder(
+            repo_id=repo_id,
+            folder_path=str(cfg.output.traces_dir),
+            repo_type="dataset",
+            private=cfg.publish.private,
+            ignore_patterns=["partials/**"],
+        )
+    else:
+        api.upload_folder(
+            folder_path=str(cfg.output.traces_dir),
+            repo_id=repo_id,
+            repo_type="dataset",
+            commit_message="Upload teich dataset output",
+            ignore_patterns=["partials/**"],
+        )
     return str(repo_url)
 
 

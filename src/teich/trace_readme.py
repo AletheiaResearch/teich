@@ -156,6 +156,22 @@ def _is_structured_dataset(trace_files: Iterable[Path]) -> bool:
     return isinstance(sample_entry, dict) and isinstance(sample_entry.get("messages"), list)
 
 
+def _tools_details_block(tools: list[dict[str, Any]]) -> list[str]:
+    return [
+        "## Tool schema snapshot",
+        "",
+        "<details>",
+        "<summary>Training-ready tool schema snapshot</summary>",
+        "",
+        "```json",
+        json.dumps(tools, indent=2, ensure_ascii=False),
+        "```",
+        "",
+        "</details>",
+        "",
+    ]
+
+
 def build_traces_readme(
     *,
     pretty_name: str,
@@ -213,7 +229,7 @@ def build_traces_readme(
             [
                 "## Training-ready tools",
                 "",
-                "A complete configured `tools` schema snapshot is available in `tools.json`.",
+                "A complete configured `tools` schema snapshot is embedded in the collapsed section at the bottom of this README.",
                 "Use it when rendering loaded examples through your training chat template.",
                 "`load_traces` applies this snapshot to each loaded example as the `tools` field.",
                 "",
@@ -419,6 +435,8 @@ def build_traces_readme(
             "",
         ]
     )
+    if dataset_tools:
+        lines.extend(_tools_details_block(dataset_tools))
     return "\n".join(lines)
 
 
@@ -448,11 +466,6 @@ def write_traces_readme(
         encoding="utf-8",
     )
     tools_path = traces_dir / "tools.json"
-    if dataset_tools:
-        tools_path.write_text(
-            json.dumps(dataset_tools, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
-    elif tools_path.exists():
+    if tools_path.exists():
         tools_path.unlink()
     return readme_path

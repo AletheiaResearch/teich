@@ -109,13 +109,12 @@ openai_api_key: sk-test
         assert '- "codex-mini-latest"' in readme
         assert '- "teich"' in readme
         assert "## Training-ready tools" in readme
-        assert "tools.json" in readme
-        assert '"name": "bash"' not in readme
-        assert (output_dir / "tools.json").exists()
-        tools = json.loads((output_dir / "tools.json").read_text(encoding="utf-8"))
-        bash_tool = next(tool for tool in tools if tool["function"]["name"] == "bash")
-        assert bash_tool["function"]["description"].startswith("Run shell commands")
-        assert "command" in bash_tool["function"]["parameters"]["properties"]
+        assert "tools.json" not in readme
+        assert "<details>" in readme
+        assert "<summary>Training-ready tool schema snapshot</summary>" in readme
+        assert '"name": "bash"' in readme
+        assert '"command"' in readme
+        assert not (output_dir / "tools.json").exists()
 
 
 def test_generate_command_success_chat(tmp_path: Path):
@@ -286,13 +285,20 @@ api:
             private=True,
             exist_ok=True,
         )
-        mock_api.upload_folder.assert_called_once_with(
-            folder_path=str(output_dir),
+        mock_api.delete_file.assert_called_once_with(
+            path_in_repo="tools.json",
             repo_id="armand0e/test-dataset",
             repo_type="dataset",
-            commit_message="Upload teich dataset output",
+            commit_message="Remove legacy teich tools snapshot",
+        )
+        mock_api.upload_large_folder.assert_called_once_with(
+            repo_id="armand0e/test-dataset",
+            folder_path=str(output_dir),
+            repo_type="dataset",
+            private=True,
             ignore_patterns=["partials/**"],
         )
+        mock_api.upload_folder.assert_not_called()
 
 
 def test_generate_command_prompts_before_publishing_partial_outputs_and_defaults_no(tmp_path: Path):
@@ -379,13 +385,20 @@ api:
 
         assert result.exit_code == 1
         assert "Published partial dataset: https://huggingface.co/datasets/armand0e/test-dataset" in result.output
-        mock_api.upload_folder.assert_called_once_with(
-            folder_path=str(output_dir),
+        mock_api.delete_file.assert_called_once_with(
+            path_in_repo="tools.json",
             repo_id="armand0e/test-dataset",
             repo_type="dataset",
-            commit_message="Upload teich dataset output",
+            commit_message="Remove legacy teich tools snapshot",
+        )
+        mock_api.upload_large_folder.assert_called_once_with(
+            repo_id="armand0e/test-dataset",
+            folder_path=str(output_dir),
+            repo_type="dataset",
+            private=False,
             ignore_patterns=["partials/**"],
         )
+        mock_api.upload_folder.assert_not_called()
 
 
 def test_generate_command_deduplicates_configured_prompts_before_running(tmp_path: Path):
