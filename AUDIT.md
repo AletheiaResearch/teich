@@ -4,6 +4,8 @@
   - Added regression coverage for the destructive text-tokenization/remove-columns path and the `tokenize=True` skip-prepare path.
 - [x] Test the recommended README flow against real Qwen/Gemma tokenizers with current TRL/Unsloth versions.
   - Ran a tokenizer-only smoke with `Qwen/Qwen2.5-0.5B-Instruct`; `prepare_data(tokenize=True)` preserved Teich columns and `mask_data()` produced compact labels.
+  - Ran a tokenizer-only smoke with `unsloth/Qwen3.5-0.8B`; unique tool output stayed masked and assistant reasoning/tool-call/final-answer targets were supervised.
+  - Ran a tokenizer-only smoke with `google/gemma-4-31B-it`; `prepare_data(tokenize=True)` preserved Teich columns, `mask_data()` produced compact labels, and unique tool output stayed masked.
   - Existing real Jinja template tests continue to cover local Gemma-style rendering.
 - [x] Audit fallback masking leakage for tool responses in templates where tool outputs are embedded inside assistant/model turns.
   - Fixed generic fallback subtraction for `<tool_response>...</tool_response>` plus Gemma-style delimiters.
