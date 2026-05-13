@@ -273,6 +273,61 @@ def test_load_traces_loads_structured_chat_dataset_file(tmp_path: Path):
     assert row["metadata"]["usage"]["prompt_tokens"] == 4
 
 
+def test_load_traces_normalizes_separate_assistant_thinking_field(tmp_path: Path):
+    dataset_file = tmp_path / "opus-reasoning.jsonl"
+    dataset_file.write_text(
+        json.dumps(
+            {
+                "messages": [
+                    {"role": "user", "content": "Explain API gateways."},
+                    {
+                        "role": "assistant",
+                        "content": "# API Gateway Architecture",
+                        "thinking": "Plan routing, auth, rate limiting, and observability.",
+                    },
+                ]
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    dataset = load_traces(dataset_file)
+
+    assistant = dataset[0]["messages"][-1]
+    assert assistant["content"] == "# API Gateway Architecture"
+    assert assistant["reasoning_content"] == "Plan routing, auth, rate limiting, and observability."
+
+
+def test_load_traces_splits_inline_think_blocks_from_assistant_content(tmp_path: Path):
+    dataset_file = tmp_path / "claude-reasoning.jsonl"
+    dataset_file.write_text(
+        json.dumps(
+            {
+                "messages": [
+                    {"role": "system", "content": ""},
+                    {"role": "user", "content": "Find the rectangle dimensions."},
+                    {
+                        "role": "assistant",
+                        "content": (
+                            "<think>Let width be w and length be 3w.</think> "
+                            "# Answer\n\nThe width is 3sqrt(2)."
+                        ),
+                    },
+                ]
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    dataset = load_traces(dataset_file)
+
+    assistant = dataset[0]["messages"][-1]
+    assert assistant["content"] == "# Answer\n\nThe width is 3sqrt(2)."
+    assert assistant["reasoning_content"] == "Let width be w and length be 3w."
+
+
 def test_load_traces_normalizes_structured_model_role_to_assistant(tmp_path: Path):
     dataset_file = tmp_path / "gemma-chat.jsonl"
     dataset_file.write_text(

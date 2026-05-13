@@ -8,7 +8,7 @@ from datasets import Dataset
 import pytest
 
 from teich import load_traces, mask_data, prepare_data, preview_sft_example
-from teich.formatter import _labels_from_offsets
+from teich.formatter import _labels_from_offsets, _reconcile_marker_boundary_whitespace
 
 
 def prepare_and_mask_for_test(
@@ -126,6 +126,33 @@ def test_labels_from_offsets_masks_tokens_that_cross_supervision_boundaries():
     )
 
     assert labels == [-100, -100, 3]
+
+
+def test_prepare_data_normalizes_direct_messages_dataset_with_inline_thinking():
+    tokenizer = FakeTokenizer()
+    dataset = Dataset.from_list(
+        [
+            {
+                "messages": [
+                    {"role": "user", "content": "solve"},
+                    {"role": "assistant", "content": "<think>reason it out</think> final answer"},
+                ]
+            }
+        ]
+    )
+
+    training_data = prepare_and_mask_for_test(
+        dataset,
+        tokenizer,
+        chat_template_kwargs={"enable_thinking": True},
+        include_debug_columns=True,
+    )
+    row = training_data[0]
+    rendered = row["text"]
+    supervised_text = tokenizer.decode([token for token in row["labels"] if token != -100])
+
+    assert "<think>reason it out</think> final answer" not in rendered
+    assert "<think>reason it out</think>final answer</assistant>" in supervised_text
 
 
 class RequiresUserTokenizer(FakeTokenizer):
@@ -2402,6 +2429,28 @@ _REAL_TEMPLATE_COMPATIBILITY_CASES = [
         },
         id="gemma4-thinking-off-no-reasoning-labels",
     ),
+    pytest.param(
+        {
+            "name": "new-gemma4-thinking-on-preserve",
+            "template_path": "new_gemma_4_template.jinja",
+            "chat_template_kwargs": {"enable_thinking": True, "preserve_thinking": True},
+            "train_on_reasoning": True,
+            "expected_supervised_substrings": ["inspect repo", "<|tool_call>call:bash", "command:", "<|\"|>ls<|\"|>", "done"],
+            "forbidden_supervised_substrings": ["response:bash", "file_a.py"],
+        },
+        id="new-gemma4-thinking-on-preserve",
+    ),
+    pytest.param(
+        {
+            "name": "new-gemma4-thinking-off-no-reasoning-labels",
+            "template_path": "new_gemma_4_template.jinja",
+            "chat_template_kwargs": {"enable_thinking": False, "preserve_thinking": False},
+            "train_on_reasoning": False,
+            "expected_supervised_substrings": ["<|tool_call>call:bash", "command:", "<|\"|>ls<|\"|>", "done"],
+            "forbidden_supervised_substrings": ["inspect repo", "response:bash", "file_a.py"],
+        },
+        id="new-gemma4-thinking-off-no-reasoning-labels",
+    ),
 ]
 
 
@@ -2509,6 +2558,264 @@ def test_actual_gemma4_template_keeps_tool_responses_out_of_model_turns_and_uses
     assert "<|tool_response>" not in rendered.split("<|turn>model\n", 2)[1].split("<turn|>", 1)[0]
     assert "<|turn>user\n<|tool_response>" in rendered
     assert "<|turn>model\ndone<turn|>" in rendered
+
+
+def test_new_gemma4_template_uses_native_inline_tool_call_and_response_format():
+    jinja2 = pytest.importorskip("jinja2")
+    template_path = Path("new_gemma_4_template.jinja")
+    if not template_path.exists():
+        pytest.skip(f"{template_path} is not available")
+
+    tokenizer = RealJinjaChatTemplateTokenizer(template_path, jinja2)
+    rendered = tokenizer.apply_chat_template(
+        _real_template_tool_call_dataset()[0]["messages"],
+        tools=_real_template_tool_call_dataset()[0]["tools"],
+        enable_thinking=True,
+        preserve_thinking=True,
+    )
+
+    assert '<|tool_call>call:bash{command:<|"|>ls<|"|>}<tool_call|>' in rendered
+    assert '<|tool_response>response:bash{value:<|"|>file_a.py<|"|>}<tool_response|>done<turn|>' in rendered
+    assert "<|turn>user\n<|tool_response>" not in rendered
+
+
+def test_new_gemma4_template_preserve_thinking_controls_history_reasoning():
+    jinja2 = pytest.importorskip("jinja2")
+    template_path = Path("new_gemma_4_template.jinja")
+    if not template_path.exists():
+        pytest.skip(f"{template_path} is not available")
+
+    tokenizer = RealJinjaChatTemplateTokenizer(template_path, jinja2)
+    messages = [
+        {"role": "developer", "content": "Use tools carefully."},
+        {"role": "system", "content": "Be concise."},
+        {"role": "user", "content": "inspect"},
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "earlier reasoning",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": {"command": "ls"}},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "name": "bash", "content": "SECRET_TOOL_OUTPUT"},
+        {"role": "user", "content": "summarize"},
+        {"role": "assistant", "content": "done", "reasoning_content": "final reasoning"},
+    ]
+
+    history_stripped = tokenizer.apply_chat_template(
+        messages,
+        tools=_real_template_tool_call_dataset()[0]["tools"],
+        enable_thinking=True,
+        preserve_thinking=False,
+    )
+    history_preserved = tokenizer.apply_chat_template(
+        messages,
+        tools=_real_template_tool_call_dataset()[0]["tools"],
+        enable_thinking=True,
+        preserve_thinking=True,
+    )
+
+    assert "Use tools carefully.\nBe concise." in history_stripped
+    assert "earlier reasoning" not in history_stripped
+    assert "final reasoning" in history_stripped
+    assert "earlier reasoning" in history_preserved
+    assert "final reasoning" in history_preserved
+
+
+def test_new_gemma4_template_trains_write_tool_call_arguments_not_tool_outputs():
+    jinja2 = pytest.importorskip("jinja2")
+    template_path = Path("new_gemma_4_template.jinja")
+    if not template_path.exists():
+        pytest.skip(f"{template_path} is not available")
+
+    tokenizer = RealJinjaChatTemplateTokenizer(template_path, jinja2)
+    rust_test = (
+        "#[test]\n"
+        "fn test_timeout_when_lock_held_forever() {\n"
+        '    let temp = tempfile::NamedTempFile::new().expect("tempfile");\n'
+        "    assert!(true);\n"
+        "}\n"
+    )
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "write",
+                "description": "write file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"content": {"type": "string"}, "path": {"type": "string"}},
+                    "required": ["content", "path"],
+                },
+            },
+        },
+        _real_template_tool_call_dataset()[0]["tools"][0],
+    ]
+    messages = [
+        {"role": "user", "content": "write a rust test"},
+        {
+            "role": "assistant",
+            "content": "I will write the integration test first.",
+            "tool_calls": [
+                {
+                    "id": "call_write",
+                    "type": "function",
+                    "function": {
+                        "name": "write",
+                        "arguments": {"content": rust_test, "path": "/workspace/tests/integration_test.rs"},
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_write",
+            "name": "write",
+            "content": "Successfully wrote 1518 bytes to /workspace/tests/integration_test.rs",
+        },
+        {
+            "role": "assistant",
+            "content": "Now let me verify everything compiles and tests pass.",
+            "tool_calls": [
+                {
+                    "id": "call_bash",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": {"command": "cd /workspace && cargo build 2>&1"}},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_bash",
+            "name": "bash",
+            "content": "/bin/bash: line 1: cargo: command not found\n\nCommand exited with code 127",
+        },
+        {"role": "assistant", "content": "cargo is not available in this environment."},
+    ]
+    prepared = prepare_data(
+        Dataset.from_list([{"messages": messages, "tools": tools}]),
+        tokenizer,
+        chat_template_kwargs={"enable_thinking": True, "preserve_thinking": True},
+        tokenize=True,
+        strict=True,
+        verbose=False,
+    )
+    trainer = SimpleNamespace(
+        train_dataset=prepared,
+        eval_dataset=None,
+        args=SimpleNamespace(dataset_text_field="text", max_length=None, packing=False),
+        tokenizer=tokenizer,
+    )
+    trainer = mask_data(
+        trainer,
+        tokenizer=tokenizer,
+        train_on_reasoning=True,
+        train_on_final_answers=True,
+        train_on_tools=True,
+        audit=False,
+        verbose=False,
+    )
+
+    row = trainer.train_dataset[0]
+    supervised_text = tokenizer.decode([token for token in row["labels"] if token != -100])
+    masked_text = tokenizer.decode([token_id for token_id, label in zip(row["input_ids"], row["labels"]) if label == -100])
+
+    assert "#[test]" in supervised_text
+    assert "I will write the integration test first." in supervised_text
+    assert "/workspace/tests/integration_test.rs" in supervised_text
+    assert "cd /workspace && cargo build 2>&1" in supervised_text
+    assert "<|tool_call>" not in masked_text
+    assert "Successfully wrote 1518 bytes" not in supervised_text
+    assert "cargo: command not found" not in supervised_text
+    assert "#[test]" not in masked_text
+    assert "Successfully wrote 1518 bytes" in masked_text
+    assert "cargo: command not found" in masked_text
+
+
+def test_new_gemma4_template_strict_markers_tolerate_trimmed_embedded_thinking():
+    jinja2 = pytest.importorskip("jinja2")
+    template_path = Path("new_gemma_4_template.jinja")
+    if not template_path.exists():
+        pytest.skip(f"{template_path} is not available")
+
+    tokenizer = RealJinjaChatTemplateTokenizer(template_path, jinja2)
+    dataset = Dataset.from_list(
+        [
+            {
+                "messages": [
+                    {"role": "user", "content": "Analyze the issue."},
+                    {
+                        "role": "assistant",
+                        "content": "<thinking>Need to inspect the issue first.</thinking>",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "bash",
+                                    "arguments": {"command": "gh issue view 1123 --json title,body"},
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call_1",
+                        "name": "bash",
+                        "content": '{"title":"config: maximum time to wait for a retry"}',
+                    },
+                    {
+                        "role": "assistant",
+                        "content": (
+                            "<thinking>The issue is a feature request.</thinking>\n\n"
+                            "The issue requests a configurable maximum retry delay."
+                        ),
+                    },
+                ],
+                "tools": _real_template_tool_call_dataset()[0]["tools"],
+            }
+        ]
+    )
+
+    prepared = prepare_data(
+        dataset,
+        tokenizer,
+        chat_template_kwargs={"enable_thinking": True, "preserve_thinking": True},
+        strict=True,
+        verbose=False,
+    )
+
+    rendered = prepared[0]["text"]
+    supervised_text = "".join(
+        rendered[span["start"]:span["end"]]
+        for span in prepared[0]["teich_supervised_spans"]
+        if span.get("kind") in {"final_answer", "tool_call"}
+    )
+
+    assert "\n\nThe issue requests" not in rendered
+    assert "The issue requests a configurable maximum retry delay." in supervised_text
+    assert "gh issue view 1123 --json title,body" in supervised_text
+
+
+def test_marker_boundary_whitespace_reconciliation_handles_insertions_and_deletions():
+    spans = [{"start": 5, "end": 12, "kind": "final_answer", "role": "assistant"}]
+    deleted = _reconcile_marker_boundary_whitespace("start\n\nanswer", spans, "startanswer")
+    inserted = _reconcile_marker_boundary_whitespace("startanswer", spans, "start\n\nanswer")
+
+    assert deleted is not None
+    assert deleted[0] == "startanswer"
+    assert deleted[1][0]["start"] == 5
+    assert deleted[1][0]["end"] == 10
+
+    assert inserted is not None
+    assert inserted[0] == "start\n\nanswer"
+    assert inserted[1][0]["start"] == 5
+    assert inserted[1][0]["end"] == 14
 
 
 def test_actual_qwen_template_receives_normalized_mapping_tool_arguments():

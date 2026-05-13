@@ -1,6 +1,6 @@
 [project]
 name = "teich"
-version = "0.1.1a40"
+version = "0.1.1a45"
 description = "Turn coding agent traces into auditable supervised fine-tuning data"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "ruff>=0.4"]
+dev = ["pytest>=8.0", "ruff>=0.4", "jinja2>=3.1"]
 
 [project.scripts]
 teich = "teich.cli:main"
@@ -29,6 +29,26 @@ packages = ["src/teich"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "docker/codex-runtime.Dockerfile" = "teich/docker/codex-runtime.Dockerfile"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests",
+    "/docker",
+    "/.github",
+    "/README.md",
+    "/DOCS.md",
+    "/ROADMAP.md",
+    "/LICENSE",
+    "/pyproject.toml",
+    "/uv.lock",
+    "/config.example.yaml",
+    "/teich_example.py",
+    "/gemma4_example.py",
+    "/gemma-4-chat-template.jinja",
+    "/new_gemma_4_template.jinja",
+    "/qwen3.6_chat_template.jinja",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

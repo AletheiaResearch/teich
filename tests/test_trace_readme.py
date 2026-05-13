@@ -34,8 +34,9 @@ def test_build_traces_readme_includes_model_and_references_tools(tmp_path: Path)
     assert "## Conversion" in readme
     assert "### Recommended: train with Unsloth and TRL `SFTTrainer`" in readme
     assert "from unsloth import FastLanguageModel" in readme
-    assert "import torch" in readme
+    assert "import torch" not in readme
     assert "MODEL_NAME = 'unsloth/Qwen3.5-0.8B'" in readme
+    assert "TRAIN_ON_REASONING" not in readme
     assert "prepare_data" in readme
     assert "mask_data" in readme
     assert "dataset_text_field='text'" in readme
@@ -44,8 +45,9 @@ def test_build_traces_readme_includes_model_and_references_tools(tmp_path: Path)
     assert "tokenize=True" in readme
     assert "packing=False" in readme
     assert "trainer_stats = trainer.train(resume_from_checkpoint=False)" in readme
-    assert "torch.cuda.get_device_properties(0)" in readme
-    assert "Peak reserved memory for training % of max memory" in readme
+    assert "torch.cuda.get_device_properties(0)" not in readme
+    assert "Peak reserved memory" not in readme
+    assert "train_on_reasoning=True" in readme
     assert "model.push_to_hub_merged" in readme
     assert "load_traces" in readme
     assert "format_and_mask" not in readme
@@ -55,6 +57,8 @@ def test_build_traces_readme_includes_model_and_references_tools(tmp_path: Path)
     assert "train_dataset = prepare_data(" in readme
     assert "You can combine this dataset with other Teich chat-only or tool-call datasets" in readme
     assert "['username/repo', 'username/other-teich-dataset']" in readme
+    assert "For weighted mixes" in readme
+    assert "'agent': {'source': 'username/repo', 'percentage': 80}" in readme
     assert "convert_traces_to_training_data" not in readme
 
 
@@ -108,7 +112,8 @@ def test_write_traces_readme_for_structured_chat_dataset_skips_tools_json(tmp_pa
     assert "You can combine this dataset with other Teich chat-only or tool-call datasets" in readme
     assert "['username/repo', 'username/other-teich-dataset']" in readme
     assert "trainer = mask_data(" in readme
-    assert "train_on_reasoning=TRAIN_ON_REASONING" in readme
+    assert "train_on_reasoning=True" in readme
+    assert "TRAIN_ON_REASONING" not in readme
     assert "prepare_data(..., teich_masking=False)" in readme
     assert "tools=example.get('tools') or []" not in readme
     assert "Chat-only datasets include `messages` plus convenience fields like `system`, `prompt`, `thinking`, and `response`." in readme

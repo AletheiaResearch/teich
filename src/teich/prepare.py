@@ -7,7 +7,7 @@ from typing import Any
 
 from datasets import Dataset, concatenate_datasets
 
-from .formatter import format_data
+from .formatter import format_data, normalize_prepared_dataset_features
 from .loader import _resolve_hf_token, load_traces
 
 
@@ -20,6 +20,7 @@ class _SourceMixEntry:
     source: str | Path | Dataset
     max_examples: int | None
     percentage: float | None
+    has_explicit_mix_value: bool
 
 
 @dataclass(slots=True)
@@ -28,6 +29,7 @@ class _ResolvedSourceMix:
     probabilities: list[float]
     max_examples: int | None
     names: list[str]
+    rigid_percentages: bool
 
 
 @dataclass(slots=True)
@@ -92,6 +94,7 @@ def prepare_data(
             formatted_datasets,
             probabilities=dataset.probabilities,
             max_examples=dataset.max_examples,
+            rigid_percentages=dataset.rigid_percentages,
         )
     if isinstance(dataset, _ResolvedSourceList):
         formatted = format_data(
@@ -240,6 +243,7 @@ def _source_mix_entry_from_value(value: Any, *, default_name: str) -> _SourceMix
                 source=_validate_source_value(source),
                 max_examples=_optional_non_negative_int(value.get("max_examples"), f"{name_value}.max_examples"),
                 percentage=_optional_mix_value(value, name_value),
+                has_explicit_mix_value=_has_explicit_mix_value(value),
             )
         raise TypeError("A source mix entry mapping must include a 'source', 'dataset', or 'path' key.")
     return _SourceMixEntry(
@@ -247,6 +251,7 @@ def _source_mix_entry_from_value(value: Any, *, default_name: str) -> _SourceMix
         source=_validate_source_value(value),
         max_examples=None,
         percentage=None,
+        has_explicit_mix_value=False,
     )
 
 
@@ -276,6 +281,10 @@ def _optional_mix_value(value: Mapping[str, Any], source_name: str) -> float | N
     if "proportion" in value:
         return _optional_percentage(value["proportion"], f"{source_name}.proportion")
     return None
+
+
+def _has_explicit_mix_value(value: Mapping[str, Any]) -> bool:
+    return any(key in value and value[key] is not None for key in ("weight", "percentage", "proportion"))
 
 
 def _optional_positive_float(value: Any, name: str) -> float | None:
@@ -339,6 +348,7 @@ def _resolve_source_mix(
         probabilities=probabilities,
         max_examples=max_examples,
         names=[entry.name for entry in entries],
+        rigid_percentages=any(entry.has_explicit_mix_value for entry in entries),
     )
 
 
@@ -347,6 +357,7 @@ def _mix_prepared_datasets(
     *,
     probabilities: Sequence[float],
     max_examples: int | None,
+    rigid_percentages: bool = False,
 ) -> Dataset:
     if not datasets:
         raise ValueError("At least one dataset must be provided.")
@@ -358,15 +369,50 @@ def _mix_prepared_datasets(
     target_total = min(max_examples, sum(available_counts)) if max_examples is not None else sum(available_counts)
     if target_total == 0:
         return datasets[0].select(range(0))
-    source_counts = _allocate_source_counts(available_counts, probabilities, target_total)
+    if rigid_percentages:
+        source_counts = _allocate_rigid_source_counts(available_counts, probabilities, target_total)
+    else:
+        source_counts = _allocate_source_counts(available_counts, probabilities, target_total)
     selected_datasets = [
-        dataset.shuffle(seed=_DATASET_MIX_SEED + index).select(range(count))
+        normalize_prepared_dataset_features(dataset.shuffle(seed=_DATASET_MIX_SEED + index).select(range(count)))
         for index, (dataset, count) in enumerate(zip(datasets, source_counts, strict=True))
         if count > 0
     ]
     if not selected_datasets:
         return datasets[0].select(range(0))
     return concatenate_datasets(selected_datasets).shuffle(seed=_DATASET_MIX_SEED)
+
+
+def _allocate_rigid_source_counts(
+    available_counts: Sequence[int],
+    probabilities: Sequence[float],
+    target_total: int,
+) -> list[int]:
+    upper_bound = min(
+        target_total,
+        *[int((available + 1 - 1e-12) / probability) for available, probability in zip(available_counts, probabilities, strict=True)],
+    )
+    for total in range(upper_bound, -1, -1):
+        counts = _largest_remainder_counts(probabilities, total)
+        if all(count <= available for count, available in zip(counts, available_counts, strict=True)):
+            return counts
+    return [0] * len(available_counts)
+
+
+def _largest_remainder_counts(probabilities: Sequence[float], target_total: int) -> list[int]:
+    desired_counts = [target_total * probability for probability in probabilities]
+    quotas = [int(desired) for desired in desired_counts]
+    remaining = target_total - sum(quotas)
+    fractional_parts = [
+        (desired - quota, index)
+        for index, (desired, quota) in enumerate(zip(desired_counts, quotas, strict=True))
+    ]
+    for _, index in sorted(fractional_parts, key=lambda item: (-item[0], item[1])):
+        if remaining <= 0:
+            break
+        quotas[index] += 1
+        remaining -= 1
+    return quotas
 
 
 def _allocate_source_counts(

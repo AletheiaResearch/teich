@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import difflib
 import json
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from datasets import Dataset, concatenate_datasets
+from datasets import Dataset, Features, Json, List, Value, concatenate_datasets
 from rich.console import Console
+
+from .converter import normalize_training_messages
 
 
 _GEMMA_TURN_START_PATTERN = re.compile(r"<\|turn>(model|user|system)\n")
@@ -610,6 +613,106 @@ def _strip_markers_and_collect_spans(text: str, markers: list[dict[str, str]]) -
     return cleaned_text, spans
 
 
+def _range_touches_span_boundary(start: int, end: int, spans: list[dict[str, Any]]) -> bool:
+    for span in spans:
+        span_start = span["start"]
+        span_end = span["end"]
+        if start == end and (start == span_start or start == span_end):
+            return True
+        if span_start <= start and end <= span_end and (start == span_start or end == span_end):
+            return True
+    return False
+
+
+def _shift_span_for_whitespace_edit(
+    span: dict[str, Any],
+    start: int,
+    end: int,
+    replacement_length: int,
+) -> dict[str, Any] | None:
+    removed_length = end - start
+    delta = replacement_length - removed_length
+    updated = dict(span)
+
+    def shift_range(range_start: int, range_end: int) -> tuple[int, int] | None:
+        if start == end and range_start <= start <= range_end:
+            return range_start, range_end + replacement_length
+        if end <= range_start:
+            return range_start + delta, range_end + delta
+        if start >= range_end:
+            if start == range_end and delta > 0:
+                return range_start, range_end + delta
+            return range_start, range_end
+        overlap_start = max(start, range_start)
+        overlap_end = min(end, range_end)
+        overlap = max(0, overlap_end - overlap_start)
+        if start < range_start:
+            range_start = start
+        range_end += replacement_length - overlap
+        if range_start >= range_end:
+            return None
+        return range_start, range_end
+
+    span_start = updated["start"]
+    span_end = updated["end"]
+    shifted = shift_range(span_start, span_end)
+    if shifted is None:
+        return None
+    updated["start"], updated["end"] = shifted
+    source_start = updated.get("source_start")
+    source_end = updated.get("source_end")
+    if isinstance(source_start, int) and isinstance(source_end, int):
+        shifted_source = shift_range(source_start, source_end)
+        if shifted_source is None:
+            updated.pop("source_start", None)
+            updated.pop("source_end", None)
+        else:
+            updated["source_start"], updated["source_end"] = shifted_source
+    return updated
+
+
+def _reconcile_marker_boundary_whitespace(
+    text: str,
+    spans: list[dict[str, Any]],
+    target_text: str,
+) -> tuple[str, list[dict[str, Any]]] | None:
+    if text == target_text:
+        return text, spans
+    matcher = difflib.SequenceMatcher(a=text, b=target_text, autojunk=False)
+    edits: list[tuple[int, int, str]] = []
+    for tag, start_a, end_a, start_b, end_b in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        if tag not in {"delete", "insert", "replace"}:
+            return None
+        removed = text[start_a:end_a]
+        inserted = target_text[start_b:end_b]
+        if removed and not removed.isspace():
+            return None
+        if inserted and not inserted.isspace():
+            return None
+        if not removed and not inserted:
+            return None
+        if not _range_touches_span_boundary(start_a, end_a, spans):
+            return None
+        edits.append((start_a, end_a, inserted))
+    if not edits:
+        return None
+    adjusted_text = text
+    adjusted_spans = [dict(span) for span in spans]
+    for start, end, inserted in reversed(edits):
+        adjusted_text = adjusted_text[:start] + inserted + adjusted_text[end:]
+        shifted_spans: list[dict[str, Any]] = []
+        for span in adjusted_spans:
+            shifted = _shift_span_for_whitespace_edit(span, start, end, len(inserted))
+            if shifted is not None:
+                shifted_spans.append(shifted)
+        adjusted_spans = shifted_spans
+    if adjusted_text != target_text:
+        return None
+    return adjusted_text, adjusted_spans
+
+
 def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
     if not spans:
         return []
@@ -1059,17 +1162,35 @@ def _supervised_text_and_spans(
         return original_text, []
     formatted_text, supervised_spans = stripped
     if formatted_text != original_text:
-        assistant_marked_messages, assistant_markers = _mark_supervised_messages(messages, include_context_spans=False)
-        assistant_marked_text = _render_chat(renderer, assistant_marked_messages, tools, chat_template_kwargs)
-        assistant_stripped = _strip_markers_and_collect_spans(assistant_marked_text, assistant_markers)
-        del assistant_marked_text
-        if assistant_stripped is not None and assistant_stripped[0] == original_text:
-            formatted_text, supervised_spans = assistant_stripped
+        reconciled = _reconcile_marker_boundary_whitespace(formatted_text, supervised_spans, original_text)
+        if reconciled is not None:
+            formatted_text, supervised_spans = reconciled
         else:
-            if strict:
-                raise ValueError("Marker-injected chat template output does not match the original rendered chat after marker removal.")
-            inferred_spans = _infer_supervised_spans_from_rendered_text(original_text, train_on_reasoning=True)
-            return original_text, _span_dicts(inferred_spans)
+            assistant_marked_messages, assistant_markers = _mark_supervised_messages(messages, include_context_spans=False)
+            assistant_marked_text = _render_chat(renderer, assistant_marked_messages, tools, chat_template_kwargs)
+            assistant_stripped = _strip_markers_and_collect_spans(assistant_marked_text, assistant_markers)
+            del assistant_marked_text
+            if assistant_stripped is not None:
+                if assistant_stripped[0] == original_text:
+                    formatted_text, supervised_spans = assistant_stripped
+                else:
+                    reconciled = _reconcile_marker_boundary_whitespace(
+                        assistant_stripped[0],
+                        assistant_stripped[1],
+                        original_text,
+                    )
+                    if reconciled is not None:
+                        formatted_text, supervised_spans = reconciled
+                    elif strict:
+                        raise ValueError("Marker-injected chat template output does not match the original rendered chat after marker removal.")
+                    else:
+                        inferred_spans = _infer_supervised_spans_from_rendered_text(original_text, train_on_reasoning=True)
+                        return original_text, _span_dicts(inferred_spans)
+            else:
+                if strict:
+                    raise ValueError("Marker-injected chat template output does not match the original rendered chat after marker removal.")
+                inferred_spans = _infer_supervised_spans_from_rendered_text(original_text, train_on_reasoning=True)
+                return original_text, _span_dicts(inferred_spans)
     del original_text
     if markers and not supervised_spans:
         inferred_spans = _infer_supervised_spans_from_rendered_text(
@@ -1163,6 +1284,21 @@ def _normalize_span_metadata(value: Any) -> list[dict[str, Any]]:
     return spans
 
 
+def normalize_prepared_dataset_features(dataset: Dataset) -> Dataset:
+    """Cast Teich prepared columns to one stable Arrow schema."""
+    features = dict(dataset.features)
+    if TEICH_SUPERVISED_SPANS_COLUMN in dataset.column_names:
+        features[TEICH_SUPERVISED_SPANS_COLUMN] = List(Json())
+    if "input_ids" in dataset.column_names:
+        features["input_ids"] = List(Value("int32"))
+    if "attention_mask" in dataset.column_names:
+        features["attention_mask"] = List(Value("int8"))
+    normalized_features = Features({column: features[column] for column in dataset.column_names})
+    if dataset.features == normalized_features:
+        return dataset
+    return dataset.cast(normalized_features)
+
+
 def _normalize_span_dicts(value: Any) -> list[tuple[int, int]]:
     return _merge_spans([(span["start"], span["end"]) for span in _normalize_span_metadata(value)])
 
@@ -1209,7 +1345,9 @@ def format_data(
                         verbose=verbose,
                     )
                 )
-            return concatenate_datasets(formatted_datasets)
+            return concatenate_datasets(
+                [normalize_prepared_dataset_features(formatted) for formatted in formatted_datasets]
+            )
         dataset = datasets[0]
     if not isinstance(dataset, Dataset):
         raise TypeError("prepare_data expects a Dataset or a sequence of Dataset objects.")
@@ -1247,6 +1385,10 @@ def format_data(
             messages = batch[messages_column][index]
             if not isinstance(messages, list):
                 raise TypeError(f"Row is missing a list-valued '{messages_column}' column")
+            if len(messages) == 0:
+                dropped_count += 1
+                continue
+            messages = normalize_training_messages(messages)
             if len(messages) == 0:
                 dropped_count += 1
                 continue

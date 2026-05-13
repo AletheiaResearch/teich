@@ -5,9 +5,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from datasets import Dataset
+from datasets import Dataset, Features, Json, List, Value
 
 from teich import prepare_data
+from teich.prepare import _mix_prepared_datasets
 
 
 class TinyChatTokenizer:
@@ -146,6 +147,44 @@ def test_prepare_data_accepts_source_mix_with_percentages_and_caps():
     assert sum("chat answer" in text for text in texts) == 3
 
 
+def test_prepare_data_source_mix_percentages_scale_down_to_limiting_source():
+    tokenizer = TinyChatTokenizer()
+
+    prepared = prepare_data(
+        {
+            "max_examples": 10,
+            "agent": {"source": _dataset_with_answers("agent", 2), "percentage": 70},
+            "chat": {"source": _dataset_with_answers("chat", 20), "percentage": 30},
+        },
+        tokenizer,
+        verbose=False,
+    )
+
+    texts = [prepared[index]["text"] for index in range(prepared.num_rows)]
+    assert prepared.num_rows == 3
+    assert sum("agent answer" in text for text in texts) == 2
+    assert sum("chat answer" in text for text in texts) == 1
+
+
+def test_prepare_data_source_mix_percentages_keep_large_limited_ratio():
+    tokenizer = TinyChatTokenizer()
+
+    prepared = prepare_data(
+        {
+            "max_examples": 1000,
+            "agent": {"source": _dataset_with_answers("agent", 608), "percentage": 80},
+            "chat": {"source": _dataset_with_answers("chat", 1000), "percentage": 20},
+        },
+        tokenizer,
+        verbose=False,
+    )
+
+    texts = [prepared[index]["text"] for index in range(prepared.num_rows)]
+    assert prepared.num_rows == 760
+    assert sum("agent answer" in text for text in texts) == 608
+    assert sum("chat answer" in text for text in texts) == 152
+
+
 def test_prepare_data_source_mix_uses_equal_defaults_and_redistributes_capacity():
     tokenizer = TinyChatTokenizer()
 
@@ -165,6 +204,51 @@ def test_prepare_data_source_mix_uses_equal_defaults_and_redistributes_capacity(
     assert sum("large answer" in text for text in texts) == 6
 
 
+def test_prepare_data_source_mix_normalizes_prepared_span_features():
+    json_features = Features(
+        {
+            "text": Value("string"),
+            "teich_supervised_spans": List(Json()),
+            "input_ids": List(Value("int32")),
+            "attention_mask": List(Value("int8")),
+        }
+    )
+    json_span_dataset = Dataset.from_list(
+        [
+            {
+                "text": "<assistant>agent answer</assistant>",
+                "teich_supervised_spans": [{"start": 11, "end": 23, "kind": "final", "role": "assistant"}],
+                "input_ids": [1, 2, 3],
+                "attention_mask": [1, 1, 1],
+            }
+        ],
+        features=json_features,
+    )
+    structured_span_dataset = Dataset.from_list(
+        [
+            {
+                "text": "<assistant>chat answer</assistant>",
+                "teich_supervised_spans": [{"start": 11, "end": 22, "kind": "final", "role": "assistant"}],
+                "input_ids": [4, 5, 6],
+                "attention_mask": [1, 1, 1],
+            }
+        ]
+    )
+
+    mixed = _mix_prepared_datasets(
+        [json_span_dataset, structured_span_dataset],
+        probabilities=[0.5, 0.5],
+        max_examples=2,
+    )
+
+    assert mixed.num_rows == 2
+    assert mixed.features["teich_supervised_spans"] == List(Json())
+    assert {mixed[index]["text"] for index in range(mixed.num_rows)} == {
+        "<assistant>agent answer</assistant>",
+        "<assistant>chat answer</assistant>",
+    }
+
+
 def test_prepare_data_plain_source_list_applies_max_examples_globally():
     tokenizer = TinyChatTokenizer()
 
@@ -179,3 +263,27 @@ def test_prepare_data_plain_source_list_applies_max_examples_globally():
     )
 
     assert prepared.num_rows == 3
+
+
+def test_prepare_data_plain_source_list_supports_documented_training_options():
+    tokenizer = TinyChatTokenizer()
+
+    prepared = prepare_data(
+        [
+            _dataset_with_answers("first", 2),
+            _dataset_with_answers("second", 2),
+        ],
+        tokenizer,
+        max_examples=4,
+        max_length=100,
+        drop_oversized_examples=True,
+        tokenize=True,
+        chat_template_kwargs={"enable_thinking": True},
+        verbose=False,
+    )
+
+    texts = [prepared[index]["text"] for index in range(prepared.num_rows)]
+    assert prepared.num_rows == 4
+    assert set(prepared.column_names) == {"text", "teich_supervised_spans", "input_ids", "attention_mask"}
+    assert any("first answer" in text for text in texts)
+    assert any("second answer" in text for text in texts)

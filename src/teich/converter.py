@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+
+_INLINE_THINKING_BLOCK_PATTERN = re.compile(r"<(think|thinking)>(.*?)</\1>", re.DOTALL)
 
 
 @dataclass(slots=True)
@@ -38,6 +42,28 @@ def _first_text_block(content_blocks: Any) -> str:
             if isinstance(text, str) and text:
                 parts.append(text)
     return "\n".join(parts).strip()
+
+
+def _split_inline_thinking(text: str) -> tuple[str, str | None]:
+    reasoning_parts: list[str] = []
+
+    def _remove_match(match: re.Match[str]) -> str:
+        reasoning = match.group(2).strip()
+        if reasoning:
+            reasoning_parts.append(reasoning)
+        return ""
+
+    content = _INLINE_THINKING_BLOCK_PATTERN.sub(_remove_match, text).strip()
+    reasoning = "\n\n".join(reasoning_parts).strip()
+    return content, reasoning or None
+
+
+def _message_content_and_inline_reasoning(value: Any) -> tuple[str, str | None]:
+    if isinstance(value, str):
+        return _split_inline_thinking(value)
+    text = _first_text_block(value)
+    reasoning = _pi_reasoning_content(value)
+    return text, reasoning
 
 
 def _has_same_system_message(messages: list[dict[str, Any]], content: str) -> bool:
@@ -658,9 +684,10 @@ def _normalize_training_message(message: Any) -> dict[str, Any] | None:
     if not isinstance(role, str) or not role.strip():
         return None
     normalized_role = _normalize_role(role.strip())
+    content, inline_reasoning = _message_content_and_inline_reasoning(message.get("content"))
     normalized: dict[str, Any] = {
         "role": normalized_role,
-        "content": message.get("content") if isinstance(message.get("content"), str) else str(message.get("content") or ""),
+        "content": content,
     }
     if normalized_role == "assistant":
         reasoning_content = message.get("reasoning_content")
@@ -668,6 +695,8 @@ def _normalize_training_message(message: Any) -> dict[str, Any] | None:
             thinking = message.get("thinking")
             if isinstance(thinking, str) and thinking.strip():
                 reasoning_content = thinking.strip()
+        if not isinstance(reasoning_content, str) or not reasoning_content.strip():
+            reasoning_content = inline_reasoning
         if isinstance(reasoning_content, str) and reasoning_content.strip():
             normalized["reasoning_content"] = reasoning_content.strip()
         tool_calls = message.get("tool_calls")
@@ -683,6 +712,16 @@ def _normalize_training_message(message: Any) -> dict[str, Any] | None:
         if message.get("is_error") is True:
             normalized["is_error"] = True
     return normalized
+
+
+def normalize_training_messages(messages: Any) -> list[dict[str, Any]]:
+    if not isinstance(messages, list):
+        return []
+    return [
+        normalized_message
+        for normalized_message in (_normalize_training_message(message) for message in messages)
+        if normalized_message is not None
+    ]
 
 
 def _prompt_from_messages(messages: list[dict[str, Any]]) -> str:
@@ -701,11 +740,7 @@ def _structured_training_example_from_row(
     row: dict[str, Any],
     row_index: int,
 ) -> TrainingExample:
-    messages = [
-        normalized_message
-        for normalized_message in (_normalize_training_message(message) for message in row.get("messages") or [])
-        if normalized_message is not None
-    ]
+    messages = normalize_training_messages(row.get("messages"))
     if not messages:
         system = row.get("system")
         if isinstance(system, str) and system.strip():
