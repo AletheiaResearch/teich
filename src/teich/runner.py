@@ -656,7 +656,41 @@ class DockerRuntimeRunner:
             raise RuntimeError(f"Failed to start Docker runtime container: {details}") from exc
 
     def _preserve_partial_session_files(self, session_dir: Path, session_id: str, prefix: str) -> list[Path]:
-        return []
+        if not session_dir.exists():
+            return []
+        preserved: list[Path] = []
+        for source_path in sorted(path for path in session_dir.rglob("*.jsonl") if path.is_file()):
+            destination = self._resolve_partial_output_path(f"{prefix}-{session_id}-{source_path.name}")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_path, destination)
+            preserved.append(destination)
+        return preserved
+
+    def _resolve_partial_output_path(self, file_name: str) -> Path:
+        destination = self.config.output.traces_dir / "partials" / file_name
+        if not destination.exists():
+            return destination
+        stem = destination.stem
+        suffix = destination.suffix
+        counter = 1
+        while True:
+            candidate = destination.with_name(f"{stem}_{counter}{suffix}")
+            if not candidate.exists():
+                return candidate
+            counter += 1
+
+    def _move_output_to_partials(self, trace_path: Path) -> Path | None:
+        if not trace_path.exists():
+            return None
+        try:
+            if "partials" in trace_path.relative_to(self.config.output.traces_dir).parts:
+                return trace_path
+        except ValueError:
+            pass
+        destination = self._resolve_partial_output_path(trace_path.name)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(trace_path), destination)
+        return destination
 
     @staticmethod
     def _copy_workspace_snapshot(workspace: Path, destination: Path) -> None:
@@ -1952,6 +1986,7 @@ class ExternalCliRunner(DockerRuntimeRunner):
             self._copy_workspace_snapshot(workspace, self._sandbox_destination(destination))
             return destination
         except BaseException:
+            self._move_output_to_partials(destination)
             raise
         finally:
             if len(turn_prompts) > 1:
@@ -2269,7 +2304,13 @@ class HermesRunner(ExternalCliRunner):
             event["reasoning_content"] = reasoning
         return event
 
-    def _export_hermes_state_sessions(self, home_dir: Path, workspace: Path) -> dict[str, Path]:
+    def _export_hermes_state_sessions(
+        self,
+        home_dir: Path,
+        workspace: Path,
+        *,
+        partial: bool = False,
+    ) -> dict[str, Path]:
         state_db = self._hermes_state_db(home_dir)
         if not state_db.exists():
             return {}
@@ -2280,8 +2321,11 @@ class HermesRunner(ExternalCliRunner):
             sessions = connection.execute("SELECT * FROM sessions ORDER BY started_at ASC, id ASC").fetchall()
             for session_row in sessions:
                 session_id = str(session_row["id"])
-                destination = self._resolve_output_path(
-                    f"{self.source_name}-{self._safe_session_file_id(session_id)}.jsonl"
+                file_name = f"{self.source_name}-{self._safe_session_file_id(session_id)}.jsonl"
+                destination = (
+                    self._resolve_partial_output_path(file_name)
+                    if partial
+                    else self._resolve_output_path(file_name)
                 )
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 events = [self._hermes_session_meta_event(session_row, workspace)]
@@ -2336,11 +2380,13 @@ class HermesRunner(ExternalCliRunner):
                 except subprocess.CalledProcessError as exc:
                     stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or "")
                     stdout = exc.output if isinstance(exc.output, str) else (exc.output or "")
-                    self._export_hermes_state_sessions(home_dir, workspace)
+                    self._export_hermes_state_sessions(home_dir, workspace, partial=True)
+                    self._move_output_to_partials(fallback_destination)
                     details = stderr.strip() or stdout.strip()
                     raise RuntimeError(f"Session {session_id[:8]} failed: {details}") from exc
                 except RuntimeError:
-                    self._export_hermes_state_sessions(home_dir, workspace)
+                    self._export_hermes_state_sessions(home_dir, workspace, partial=True)
+                    self._move_output_to_partials(fallback_destination)
                     raise
                 stdout_parts.append(stdout)
                 if not self._hermes_state_db(home_dir).exists():
@@ -2387,6 +2433,7 @@ class HermesRunner(ExternalCliRunner):
             self._copy_workspace_snapshot(workspace, self._sandbox_destination(destination))
             return destination
         except BaseException:
+            self._move_output_to_partials(fallback_destination)
             raise
         finally:
             if len(turn_prompts) > 1:

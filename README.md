@@ -175,6 +175,8 @@ Outputs:
 - `hermes`: one Teich `external_*` trace JSONL per Hermes native session from `state.db`, including delegated subagent sessions as separate files linked by `parent_session_id`, sandboxes in `sandbox/`, and a `README.md`
 - `chat`: text-only JSONL training rows in `output/` and a dataset `README.md`
 
+Only completed runs are kept at the top level of `output/`. Failed or interrupted agent traces are preserved under `output/partials/` for debugging, and Teich excludes that directory from resume detection, conversion, README generation, and Hugging Face uploads.
+
 If `publish.repo_id` is configured, Teich also creates or updates the matching Hugging Face **dataset** repo.
 
 Uploaded artifacts include:

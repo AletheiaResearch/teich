@@ -5,6 +5,7 @@ import io
 import json
 from pathlib import Path
 import sqlite3
+import subprocess
 import threading
 import time
 from unittest.mock import MagicMock, patch
@@ -429,6 +430,90 @@ def test_hermes_runner_exports_delegated_sessions_as_separate_files(tmp_path: Pa
     assert child_rows[2]["content"] == "subagent smoke ok"
 
 
+def _write_minimal_hermes_delegation_state_db(home_dir: Path) -> None:
+    connection = sqlite3.connect(home_dir / "state.db")
+    connection.executescript(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT,
+            model TEXT,
+            model_config TEXT,
+            system_prompt TEXT,
+            parent_session_id TEXT,
+            started_at REAL,
+            message_count INTEGER,
+            tool_call_count INTEGER,
+            input_tokens INTEGER,
+            output_tokens INTEGER,
+            has_finished INTEGER
+        );
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT,
+            role TEXT,
+            content TEXT,
+            timestamp REAL
+        );
+        """
+    )
+    connection.executemany(
+        "INSERT INTO sessions VALUES (?, 'cli', 'minimax/minimax-m2.5:free', '{}', '', ?, ?, ?, ?, ?, ?, 0)",
+        [
+            ("parent-session", None, 1_778_672_000, 2, 1, 10, 4),
+            ("child-session", "parent-session", 1_778_672_001, 2, 0, 5, 3),
+        ],
+    )
+    connection.executemany(
+        "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+        [
+            ("parent-session", "user", "delegate this", 1_778_672_000),
+            ("parent-session", "assistant", "parent partial", 1_778_672_001),
+            ("child-session", "user", "sub task", 1_778_672_002),
+            ("child-session", "assistant", "subagent smoke ok", 1_778_672_003),
+        ],
+    )
+    connection.commit()
+    connection.close()
+
+
+def test_hermes_runner_moves_failed_state_db_exports_to_partials(tmp_path: Path):
+    config = Config(
+        agent={"provider": "hermes"},
+        api=APIConfig(provider="openrouter"),
+        model=ModelConfig(model="minimax/minimax-m2.5:free"),
+        output={"traces_dir": tmp_path / "output", "sandbox_dir": tmp_path / "sandbox"},
+    )
+    with patch.object(HermesRunner, "_ensure_image"):
+        runner = HermesRunner(config)
+
+    workspace_root = tmp_path / "workspace-root"
+    workspace = workspace_root
+    home_dir = tmp_path / "hermes-home"
+    workspace.mkdir()
+    home_dir.mkdir()
+
+    def fail_after_writing_state_db(*args, **kwargs):
+        _write_minimal_hermes_delegation_state_db(home_dir)
+        raise subprocess.CalledProcessError(1, ["hermes"], output="", stderr="provider failed")
+
+    with patch.object(runner, "_prepare_workspace", return_value=(workspace_root, workspace)), \
+         patch("teich.runner.tempfile.mkdtemp", return_value=str(home_dir)), \
+         patch.object(runner, "_run_external_process", side_effect=fail_after_writing_state_db):
+        with pytest.raises(RuntimeError, match="provider failed"):
+            runner.run_session("delegate this", "hermes-session")
+
+    assert not list((tmp_path / "output").glob("*.jsonl"))
+    partials = sorted((tmp_path / "output" / "partials").glob("*.jsonl"))
+    assert len(partials) == 2
+    rows_by_session = {}
+    for path in partials:
+        first = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+        rows_by_session[first["payload"]["id"]] = first
+    assert rows_by_session["parent-session"]["payload"]["parent_session_id"] is None
+    assert rows_by_session["child-session"]["payload"]["parent_session_id"] == "parent-session"
+
+
 def test_run_process_removes_named_container_on_failure():
     config = Config()
 
@@ -460,7 +545,7 @@ def test_run_process_removes_named_container_on_failure():
     )
 
 
-def test_codex_run_session_discards_partial_trace_on_failure(tmp_path: Path):
+def test_codex_run_session_moves_partial_trace_on_failure(tmp_path: Path):
     config = Config(output={"traces_dir": tmp_path / "output", "sandbox_dir": tmp_path / "sandbox"})
 
     with patch.object(CodexRunner, '_ensure_image'):
@@ -486,7 +571,10 @@ def test_codex_run_session_discards_partial_trace_on_failure(tmp_path: Path):
         with pytest.raises(RuntimeError, match="boom"):
             runner.run_session("Test prompt", "test-session")
 
-    assert not (tmp_path / "output" / "partials").exists()
+    partials = list((tmp_path / "output" / "partials").glob("*.jsonl"))
+    assert len(partials) == 1
+    assert partials[0].read_text(encoding="utf-8").startswith('{"type":"response_item"')
+    assert not list((tmp_path / "output").glob("*.jsonl"))
 
 
 def test_run_all_with_no_prompts():
@@ -1491,7 +1579,7 @@ def test_pi_runner_resolves_pi_executable_from_path():
     assert PiRunner._resolve_pi_executable() == "@mariozechner/pi-coding-agent"
 
 
-def test_pi_run_session_discards_partial_trace_on_failure(tmp_path: Path):
+def test_pi_run_session_moves_partial_trace_on_failure(tmp_path: Path):
     config = Config(agent={"provider": "pi"}, output={"traces_dir": tmp_path / "output", "sandbox_dir": tmp_path / "sandbox"})
 
     with patch.object(PiRunner, '_ensure_image'):
@@ -1520,7 +1608,10 @@ def test_pi_run_session_discards_partial_trace_on_failure(tmp_path: Path):
         with pytest.raises(RuntimeError, match="boom"):
             runner.run_session("Test prompt", "test-session")
 
-    assert not (tmp_path / "output" / "partials").exists()
+    partials = list((tmp_path / "output" / "partials").glob("*.jsonl"))
+    assert len(partials) == 1
+    assert partials[0].read_text(encoding="utf-8").startswith('{"type":"message"')
+    assert not list((tmp_path / "output").glob("*.jsonl"))
 
 
 def test_chat_runner_writes_structured_dataset_row_from_responses_api(tmp_path: Path):

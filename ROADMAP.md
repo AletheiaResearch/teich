@@ -156,7 +156,7 @@ tokenized = tokenizer(rendered, truncation=True, max_length=32768)
 - [x] Detect completed prompts from existing outputs
 - [x] Resume interrupted runs with `--resume`
 - [x] Skip already-completed prompts
-- [x] Include recovered/partial traces in resume scanning when they convert to completed examples
+- [x] Keep failed/interrupted traces under `output/partials/` and exclude them from resume scanning
 
 ### 3.3 Output Formats
 
@@ -165,6 +165,7 @@ tokenized = tokenizer(rendered, truncation=True, max_length=32768)
 - [x] Hugging Face dataset upload
 - [x] Generated dataset README
 - [x] Embedded training-ready tool schema snapshot in generated README
+- [x] Clean top-level `output/` policy with partial traces quarantined under `partials/`
 - [ ] Parquet output option
 - [ ] Train/validation split generation
 
