@@ -64,7 +64,7 @@ prompts: []
     assert "No prompts configured" in result.output
 
 
-def test_generate_command_rejects_follow_up_prompts_for_non_chat_provider(tmp_path: Path):
+def test_generate_command_accepts_follow_up_prompts_for_codex_provider(tmp_path: Path):
     prompts_file = tmp_path / "prompts.jsonl"
     prompts_file.write_text(
         json.dumps({"prompt": "Build app", "follow_up_prompts": ["Add tests"]}) + "\n",
@@ -77,13 +77,31 @@ agent:
 model:
   model: codex-mini-latest
 prompts_file: {prompts_file}
+output:
+  traces_dir: {tmp_path}/output
 openai_api_key: sk-test
 """)
 
-    result = runner.invoke(app, ["generate", "-c", str(config_file)])
+    with patch('teich.cli.CodexRunner') as mock_runner:
+        mock_instance = MagicMock()
+        mock_instance.run_all.return_value = [tmp_path / "output/session1.jsonl"]
+        mock_runner.return_value = mock_instance
 
-    assert result.exit_code == 1
-    assert "follow_up_prompts are currently supported only when agent.provider is chat" in result.output
+        output_dir = tmp_path / "output"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "session1.jsonl").write_text(
+            '{"type":"session_meta","payload":{"id":"session1","base_instructions":{"text":"You are a coding agent."}}}\n'
+            '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Build app"}]}}\n'
+            '{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done"}]}}\n',
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(app, ["generate", "-c", str(config_file)])
+
+    assert result.exit_code == 0
+    assert "Success" in result.output
+    kwargs = mock_instance.run_all.call_args.kwargs
+    assert kwargs["prompt_inputs"][0].follow_up_prompts == ["Add tests"]
 
 
 def test_generate_command_success_codex(tmp_path: Path):

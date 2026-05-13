@@ -277,6 +277,101 @@ def test_run_all_executes_all_prompts(tmp_path: Path):
         assert results[0] == output_files[0]
 
 
+def test_codex_run_session_runs_follow_up_prompts_by_resuming_session():
+    config = Config()
+
+    with patch.object(CodexRunner, '_ensure_image'):
+        runner = CodexRunner(config)
+
+    prompt_input = PromptInput(prompt="Build app", follow_up_prompts=["Add tests", "Polish UI"])
+    mounted_workspaces = []
+
+    def mounted_path(command: list[str], target: str) -> Path:
+        mounts = [command[index + 1] for index, item in enumerate(command) if item == "-v"]
+        match = next(mount for mount in mounts if mount.endswith(f":{target}"))
+        return Path(match.rsplit(":", maxsplit=1)[0])
+
+    def record_process(command, *args) -> None:
+        stdin_text = args[6]
+        workspace = mounted_path(command, "/workspace")
+        mounted_workspaces.append(workspace)
+        if stdin_text == "Build app":
+            (workspace / "created-by-first-turn.txt").write_text("persisted", encoding="utf-8")
+        else:
+            assert (workspace / "created-by-first-turn.txt").read_text(encoding="utf-8") == "persisted"
+
+    with patch.object(runner, '_run_process', side_effect=record_process) as mock_run_process, \
+         patch.object(runner, '_extract_session_file') as mock_extract, \
+         patch.object(runner, '_copy_workspace_snapshot'):
+
+        mock_extract.return_value = Path("/output/session.jsonl")
+
+        runner.run_session("Build app", "test-session", prompt_input=prompt_input)
+
+    assert mock_run_process.call_count == 3
+    stdin_texts = [call.args[7] for call in mock_run_process.call_args_list]
+    assert stdin_texts == ["Build app", "Add tests", "Polish UI"]
+    first_command = mock_run_process.call_args_list[0].args[0]
+    second_command = mock_run_process.call_args_list[1].args[0]
+    assert "resume" not in first_command
+    assert "resume" in second_command
+    assert "--last" in second_command
+    assert len(set(mounted_workspaces)) == 1
+    codex_home_mounts = [
+        mounted_path(call.args[0], "/home/codex/.codex")
+        for call in mock_run_process.call_args_list
+    ]
+    assert len(set(codex_home_mounts)) == 1
+
+
+def test_pi_run_session_runs_follow_up_prompts_by_continuing_session(tmp_path: Path):
+    config = Config(agent={"provider": "pi"}, output={"traces_dir": tmp_path / "output", "sandbox_dir": tmp_path / "sandbox"})
+
+    with patch.object(PiRunner, '_ensure_image'):
+        runner = PiRunner(config)
+
+    captured_workspace = None
+    prompt_file_values = []
+    commands = []
+    mounted_workspaces = []
+    mounted_session_dirs = []
+
+    def mounted_path(command: list[str], target: str) -> Path:
+        mounts = [command[index + 1] for index, item in enumerate(command) if item == "-v"]
+        match = next(mount for mount in mounts if mount.endswith(f":{target}"))
+        return Path(match.rsplit(":", maxsplit=1)[0])
+
+    def capture_project_settings(workspace: Path) -> None:
+        nonlocal captured_workspace
+        captured_workspace = workspace
+
+    def record_prompt_file(command, *args, **kwargs) -> None:
+        assert captured_workspace is not None
+        commands.append(command)
+        workspace = mounted_path(command, "/workspace")
+        mounted_workspaces.append(workspace)
+        mounted_session_dirs.append(mounted_path(command, "/home/codex/pi-sessions"))
+        prompt_file_values.append((captured_workspace / ".teich-prompt.txt").read_text(encoding="utf-8"))
+        if prompt_file_values[-1] == "Build app":
+            (workspace / "created-by-first-turn.txt").write_text("persisted", encoding="utf-8")
+        else:
+            assert (workspace / "created-by-first-turn.txt").read_text(encoding="utf-8") == "persisted"
+
+    prompt_input = PromptInput(prompt="Build app", follow_up_prompts=["Add tests"])
+
+    with patch.object(runner, "_write_pi_project_settings", side_effect=capture_project_settings), \
+         patch.object(runner, "_run_process", side_effect=record_prompt_file), \
+         patch.object(runner, "_extract_session_file", return_value=tmp_path / "output" / "pi.jsonl"), \
+         patch.object(runner, "_copy_workspace_snapshot"):
+        runner.run_session("Build app", "pi-session", prompt_input=prompt_input)
+
+    assert prompt_file_values == ["Build app", "Add tests"]
+    assert "--continue" not in commands[0]
+    assert "--continue" in commands[1]
+    assert len(set(mounted_workspaces)) == 1
+    assert len(set(mounted_session_dirs)) == 1
+
+
 def test_run_all_reports_progress_and_preserves_prompt_order(tmp_path: Path):
     config = Config(prompts=["Prompt 1", "Prompt 2"], max_concurrency=2)
 
@@ -1525,6 +1620,31 @@ def test_resume_detects_completed_chat_follow_up_prompt_sets(tmp_path: Path):
             }
         )
         + "\n",
+        encoding="utf-8",
+    )
+    prompt_inputs = [
+        PromptInput(prompt="Build app"),
+        PromptInput(prompt="Build app", follow_up_prompts=["Add tests"]),
+        PromptInput(prompt="Build app", follow_up_prompts=["Add docs"]),
+    ]
+
+    pending = pending_prompt_inputs_for_resume(prompt_inputs, output_dir)
+
+    assert [(item.prompt, item.follow_up_prompts) for item in pending] == [
+        ("Build app", []),
+        ("Build app", ["Add docs"]),
+    ]
+
+
+def test_resume_detects_completed_agent_follow_up_prompt_sets(tmp_path: Path):
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "codex.jsonl").write_text(
+        '{"type":"session_meta","payload":{"id":"codex-1"}}\n'
+        '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Build app"}]}}\n'
+        '{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Built"}]}}\n'
+        '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Add tests"}]}}\n'
+        '{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done"}]}}\n',
         encoding="utf-8",
     )
     prompt_inputs = [

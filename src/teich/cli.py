@@ -172,12 +172,6 @@ def generate(
         console.print("[red]No prompts configured. Add prompts in config.yaml or prompts.jsonl.[/red]")
         raise typer.Exit(1)
     agent_provider = cfg.get_agent_provider()
-    if agent_provider != "chat" and any(prompt_input.follow_up_prompts for prompt_input in prompt_inputs):
-        console.print(
-            "[red]follow_up_prompts are currently supported only when agent.provider is chat. "
-            "Use single-turn prompt rows for codex/pi generation.[/red]"
-        )
-        raise typer.Exit(1)
 
     # Ensure output dir exists
     cfg.output.traces_dir.mkdir(parents=True, exist_ok=True)

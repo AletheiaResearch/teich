@@ -249,6 +249,12 @@ def _prompt_completion_key(prompt_input: PromptInput | str) -> str:
     return "\n\n--- follow-up ---\n\n".join(_prompt_text_completion_key(prompt) for prompt in prompt_input.turn_prompts())
 
 
+def _agent_turn_prompts(prompt: str, prompt_input: PromptInput | None) -> list[str]:
+    if prompt_input is None or not prompt_input.follow_up_prompts:
+        return [prompt]
+    return PromptInput(prompt=prompt, follow_up_prompts=prompt_input.follow_up_prompts).turn_prompts()
+
+
 def _unwrap_teich_prompt_file(prompt: str) -> str:
     normalized = prompt.strip()
     match = re.fullmatch(
@@ -343,7 +349,18 @@ def completed_prompt_keys_from_outputs(traces_dir: Path) -> set[str]:
 def _prompt_input_from_training_example(example: dict[str, Any], prompt: str) -> PromptInput | str:
     follow_up_prompts = example.get("follow_up_prompts")
     if not isinstance(follow_up_prompts, list):
-        return prompt
+        messages = example.get("messages")
+        if not isinstance(messages, list):
+            return prompt
+        user_prompts = [
+            _message_text(message.get("content"))
+            for message in messages
+            if isinstance(message, dict) and message.get("role") == "user"
+        ]
+        user_prompts = [item for item in user_prompts if item]
+        if len(user_prompts) <= 1 or _prompt_text_completion_key(user_prompts[0]) != _prompt_text_completion_key(prompt):
+            return prompt
+        follow_up_prompts = user_prompts[1:]
     try:
         return PromptInput(prompt=prompt, follow_up_prompts=follow_up_prompts)
     except ValueError:
@@ -789,8 +806,6 @@ class DockerRuntimeRunner:
         session_id = str(uuid.uuid4())
         started_at = datetime.now(timezone.utc)
         prompt_preview = self._prompt_preview(prompt_input.prompt)
-        if prompt_input.follow_up_prompts:
-            raise RuntimeError("follow_up_prompts are currently supported only by agent.provider: chat.")
         progress_base = SessionProgressUpdate(
             prompt_id=prompt_id,
             prompt_index=prompt_index,
@@ -1179,6 +1194,7 @@ class CodexRunner(DockerRuntimeRunner):
         workspace: Path,
         codex_home: Path,
         container_name: str,
+        resume: bool = False,
     ) -> list[str]:
         api_key = self.config.get_api_key() or ""
         configured_base_url = self.config.get_base_url()
@@ -1238,16 +1254,13 @@ class CodexRunner(DockerRuntimeRunner):
                     self._normalize_oss_local_provider(provider_name),
                 ]
             )
-        codex_cmd.extend(
-            [
-                "exec",
-                "--model",
-                model,
-                "--sandbox",
-                self.config.model.sandbox,
-                "--skip-git-repo-check",
-            ]
-        )
+        codex_cmd.append("exec")
+        if resume:
+            codex_cmd.extend(["resume", "--last"])
+        codex_cmd.extend(["--model", model])
+        if not resume:
+            codex_cmd.extend(["--sandbox", self.config.model.sandbox])
+        codex_cmd.append("--skip-git-repo-check")
         if base_url and not self._is_oss_local_provider(provider_name):
             provider_key = self._custom_provider_key(provider_name)
             provider_literal = (
@@ -1334,36 +1347,44 @@ class CodexRunner(DockerRuntimeRunner):
         codex_home = Path(tempfile.mkdtemp(prefix=f"codex-home-{session_id}-"))
         started_at = datetime.now(timezone.utc)
         container_name = self._container_name("codex", session_id)
+        turn_prompts = _agent_turn_prompts(prompt, prompt_input)
 
         try:
             self._write_codex_config(codex_home)
             if self._local_provider_proxy_target(self.config.api.provider, self.config.get_base_url()):
                 self._write_local_provider_proxy(codex_home)
             existing_sessions = {path.resolve() for path in self._list_session_files(codex_home)}
-            cmd = self._build_codex_command(prompt, workspace, codex_home, container_name)
-            try:
-                self._run_process(
-                    cmd,
-                    session_id,
-                    started_at,
-                    codex_home / "sessions",
-                    progress_callback,
-                    progress_base,
+            for turn_index, turn_prompt in enumerate(turn_prompts):
+                cmd = self._build_codex_command(
+                    turn_prompt,
+                    workspace,
+                    codex_home,
                     container_name,
-                    prompt,
+                    resume=turn_index > 0,
                 )
-            except subprocess.TimeoutExpired:
-                raise RuntimeError(
-                    f"Session {session_id[:8]} timed out after {self.config.timeout_seconds}s"
-                )
-            except subprocess.CalledProcessError as e:
-                stderr = e.stderr if isinstance(e.stderr, str) else (e.stderr or "")
-                if "'type' of tool must be 'function'" in stderr:
-                    stderr = (
-                        f"{stderr}\nHint: this custom provider endpoint is not fully compatible with Codex's Responses API tool format. "
-                        "Use a provider that supports Codex Responses semantics, or use Codex OSS mode with a supported local provider."
+                try:
+                    self._run_process(
+                        cmd,
+                        session_id,
+                        started_at,
+                        codex_home / "sessions",
+                        progress_callback,
+                        progress_base,
+                        container_name,
+                        turn_prompt,
                     )
-                raise RuntimeError(f"Session {session_id[:8]} failed: {stderr}")
+                except subprocess.TimeoutExpired:
+                    raise RuntimeError(
+                        f"Session {session_id[:8]} timed out after {self.config.timeout_seconds}s"
+                    )
+                except subprocess.CalledProcessError as e:
+                    stderr = e.stderr if isinstance(e.stderr, str) else (e.stderr or "")
+                    if "'type' of tool must be 'function'" in stderr:
+                        stderr = (
+                            f"{stderr}\nHint: this custom provider endpoint is not fully compatible with Codex's Responses API tool format. "
+                            "Use a provider that supports Codex Responses semantics, or use Codex OSS mode with a supported local provider."
+                        )
+                    raise RuntimeError(f"Session {session_id[:8]} failed: {stderr}")
             trace_path = self._extract_session_file(
                 session_id,
                 codex_home,
@@ -2102,6 +2123,7 @@ class PiRunner(DockerRuntimeRunner):
         agent_dir: Path,
         session_dir: Path,
         container_name: str,
+        continue_session: bool = False,
     ) -> list[str]:
         command = [
             "docker",
@@ -2151,6 +2173,8 @@ class PiRunner(DockerRuntimeRunner):
         api_key = self.config.get_api_key()
         if api_key and not configured_base_url:
             pi_command.extend(["--api-key", api_key])
+        if continue_session:
+            pi_command.append("--continue")
         pi_command.extend(["--print", f"@{WORKSPACE_IN_CONTAINER}/{TEICH_PROMPT_FILE_NAME}"])
         command.append(self.image_name)
         command.extend(pi_command)
@@ -2364,31 +2388,40 @@ class PiRunner(DockerRuntimeRunner):
         session_dir = Path(tempfile.mkdtemp(prefix=f"pi-sessions-{session_id}-"))
         started_at = datetime.now(timezone.utc)
         container_name = self._container_name("pi", session_id)
+        turn_prompts = _agent_turn_prompts(prompt, prompt_input)
         try:
             self._write_pi_agent_settings(agent_dir)
             workspace.mkdir(parents=True, exist_ok=True)
             self._write_pi_project_settings(workspace)
-            (workspace / TEICH_PROMPT_FILE_NAME).write_text(prompt, encoding="utf-8")
-            command = self._build_pi_command(prompt, workspace, agent_dir, session_dir, container_name)
-            try:
-                self._run_process(
-                    command,
-                    session_id,
-                    started_at,
+            for turn_index, turn_prompt in enumerate(turn_prompts):
+                (workspace / TEICH_PROMPT_FILE_NAME).write_text(turn_prompt, encoding="utf-8")
+                command = self._build_pi_command(
+                    turn_prompt,
+                    workspace,
+                    agent_dir,
                     session_dir,
-                    progress_callback,
-                    progress_base,
                     container_name,
+                    continue_session=turn_index > 0,
                 )
-            except subprocess.TimeoutExpired:
-                raise RuntimeError(
-                    f"Session {session_id[:8]} timed out after {self.config.timeout_seconds}s"
-                )
-            except subprocess.CalledProcessError as exc:
-                stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or "")
-                stdout = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or "")
-                details = stderr.strip() or stdout.strip()
-                raise RuntimeError(f"Session {session_id[:8]} failed: {details}")
+                try:
+                    self._run_process(
+                        command,
+                        session_id,
+                        started_at,
+                        session_dir,
+                        progress_callback,
+                        progress_base,
+                        container_name,
+                    )
+                except subprocess.TimeoutExpired:
+                    raise RuntimeError(
+                        f"Session {session_id[:8]} timed out after {self.config.timeout_seconds}s"
+                    )
+                except subprocess.CalledProcessError as exc:
+                    stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or "")
+                    stdout = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or "")
+                    details = stderr.strip() or stdout.strip()
+                    raise RuntimeError(f"Session {session_id[:8]} failed: {details}")
             trace_path = self._extract_session_file(session_id, session_dir, started_at)
             self._copy_workspace_snapshot(workspace, self._sandbox_destination(trace_path))
             return trace_path

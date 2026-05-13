@@ -191,7 +191,7 @@ Teich will scan existing outputs and skip prompts that already converted into co
 
 Prompt files can be JSONL/NDJSON, JSON, CSV, or plain text.
 
-JSONL is recommended because it handles long multiline prompts, repository metadata, and chat follow-up turns without CSV escaping problems.
+JSONL is recommended because it handles long multiline prompts, repository metadata, and follow-up turns without CSV escaping problems.
 
 Recommended `prompts.jsonl`:
 
@@ -201,9 +201,7 @@ Recommended `prompts.jsonl`:
 {"prompt":"Draft a compact project plan","follow_up_prompts":["Revise it for a solo developer","Add a risk checklist"]}
 ```
 
-`follow_up_prompts` is supported by `agent.provider: chat` as real additional user turns in one generated training row.
-
-`codex` and `pi` currently run one non-interactive coding-agent prompt per trace. Keep those prompt rows single-turn until native interactive follow-ups are added.
+`follow_up_prompts` is supported across providers. `chat` sends each follow-up as a real additional user turn in one generated training row. `codex` and `pi` run the initial prompt, then resume the same saved agent session for each follow-up so the trace captures the ordered turns.
 
 ### Generate a text-only chat dataset
 
