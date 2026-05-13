@@ -2,7 +2,22 @@
 
 Agent SFT data infrastructure for generation, normalization, chat-template rendering, response masking, and training audits.
 
-Teich is not only a dataset generator. It is a bridge between messy agent/chat data and model-specific supervised fine-tuning. You can start from fresh Codex/Pi traces, text-only chat generations, local JSONL files, Hugging Face datasets, or already-loaded `datasets.Dataset` objects. Teich normalizes those sources into OpenAI-style `messages` / `tools`, renders them through the target tokenizer chat template, and then applies typed response-only labels after the trainer has tokenized the data.
+Teich is not only a dataset generator. It is a bridge between messy agent/chat data and model-specific supervised fine-tuning.
+
+Start from any of these:
+
+- Fresh Codex or Pi traces
+- Text-only chat generations
+- Local JSONL files or folders
+- Hugging Face datasets
+- Already-loaded `datasets.Dataset` objects
+
+Then Teich handles the training-sensitive parts:
+
+- Normalize sources into OpenAI-style `messages` / `tools`
+- Render through the target tokenizer chat template
+- Preserve typed supervision spans before tokenization
+- Apply response-only labels after trainer tokenization
 
 That means the same package can:
 
@@ -34,7 +49,11 @@ mask_data()
 audited input_ids + labels
 ```
 
-You can use only the pieces you need. If you already have a dataset, skip generation and go straight to `prepare_data()`. If you want raw trace preservation, use the CLI. If you want standard next-token training without Teich labels, use `prepare_data(..., teich_masking=False)` and skip `mask_data()`.
+Use only the pieces you need:
+
+- Already have a dataset? Skip generation and go straight to `prepare_data()`.
+- Want raw trace preservation? Use the CLI.
+- Want standard next-token training? Use `prepare_data(..., teich_masking=False)` and skip `mask_data()`.
 
 ## Entry Points
 
@@ -87,7 +106,9 @@ Requirements for agent trace generation:
 - Docker
 - OpenAI/OpenRouter API key (or local OpenAI-compatible endpoint)
 
-`agent.provider: chat` does not require Docker. The Python utilities also work without Docker if you already have traces or structured JSONL datasets.
+`agent.provider: chat` does not require Docker.
+
+The Python utilities also work without Docker if you already have traces or structured JSONL datasets.
 
 Training examples use your existing finetuning stack. For the TRL example below, install compatible versions of `transformers`, `trl`, and your model-loading stack separately.
 
@@ -95,7 +116,9 @@ Training examples use your existing finetuning stack. For the TRL example below,
 
 ### Prepare an existing dataset for training
 
-You do not need to generate data with Teich first. If a local file, folder, Hugging Face dataset, or `datasets.Dataset` has a `messages` column, Teich can usually prepare it directly.
+You do not need to generate data with Teich first.
+
+If a local file, folder, Hugging Face dataset, or `datasets.Dataset` has a `messages` column, Teich can usually prepare it directly.
 
 ```python
 from teich import prepare_data
@@ -129,7 +152,9 @@ train_dataset = prepare_data(
 )
 ```
 
-Explicit `percentage`, `proportion`, and `weight` values are treated as true ratios. If one source cannot fill its share after filtering or context-window drops, Teich scales the total row count down instead of silently changing the realized mix.
+Explicit `percentage`, `proportion`, and `weight` values are treated as true ratios.
+
+If one source cannot fill its share after filtering or context-window drops, Teich scales the total row count down instead of silently changing the realized mix.
 
 ### Generate new data from prompts
 
@@ -148,7 +173,13 @@ Outputs:
 - `codex` / `pi`: raw traces in `output/`, sandboxes in `sandbox/`, and a `README.md`
 - `chat`: text-only JSONL training rows in `output/` and a dataset `README.md`
 
-If `publish.repo_id` is configured, Teich also creates or updates the matching Hugging Face **dataset** repo and uploads the generated JSONL and README automatically. Tool schemas are embedded in the dataset card when present.
+If `publish.repo_id` is configured, Teich also creates or updates the matching Hugging Face **dataset** repo.
+
+Uploaded artifacts include:
+
+- Generated JSONL
+- Dataset `README.md`
+- Embedded tool-schema snapshot in the dataset card when tools are present
 
 If a long run is interrupted, use:
 
@@ -158,7 +189,9 @@ teich generate -c config.yaml --resume
 
 Teich will scan existing outputs and skip prompts that already converted into completed training examples.
 
-Prompt files can be JSONL/NDJSON, JSON, CSV, or plain text. JSONL is recommended because it handles long multiline prompts, repository metadata, and chat follow-up turns without CSV escaping problems.
+Prompt files can be JSONL/NDJSON, JSON, CSV, or plain text.
+
+JSONL is recommended because it handles long multiline prompts, repository metadata, and chat follow-up turns without CSV escaping problems.
 
 Recommended `prompts.jsonl`:
 
@@ -168,7 +201,9 @@ Recommended `prompts.jsonl`:
 {"prompt":"Draft a compact project plan","follow_up_prompts":["Revise it for a solo developer","Add a risk checklist"]}
 ```
 
-`follow_up_prompts` is supported by `agent.provider: chat` as real additional user turns in one generated training row. `codex` and `pi` currently run one non-interactive coding-agent prompt per trace; keep those prompt rows single-turn until native interactive follow-ups are added.
+`follow_up_prompts` is supported by `agent.provider: chat` as real additional user turns in one generated training row.
+
+`codex` and `pi` currently run one non-interactive coding-agent prompt per trace. Keep those prompt rows single-turn until native interactive follow-ups are added.
 
 ### Generate a text-only chat dataset
 
@@ -190,11 +225,20 @@ Each generated JSONL line will look like:
 {"messages":[{"role":"system","content":"You are a helpful assistant","thinking":null},{"role":"user","content":"Hello","thinking":null},{"role":"assistant","content":"Hi!","thinking":"I should greet the user."}],"system":"You are a helpful assistant","prompt":"Hello","thinking":"I should greet the user.","response":"Hi!","model":"gpt-4.1-mini"}
 ```
 
-With follow-ups, the same row contains alternating `user` and `assistant` messages plus convenience fields like `follow_up_prompts`, `responses`, and final `response`.
+With follow-ups, the same row contains:
+
+- Alternating `user` and `assistant` messages
+- `follow_up_prompts`
+- Per-turn `responses`
+- Final `response`
 
 ### Train with Unsloth and TRL `SFTTrainer`
 
-Use the trainer-first path: `prepare_data` renders trainer-friendly `text` rows with Teich supervision metadata, `SFTTrainer` tokenizes them, then `mask_data` applies multi-turn/tool-aware response-only labels to the trainer dataset.
+Use the trainer-first path:
+
+1. `prepare_data` renders trainer-friendly `text` rows with Teich supervision metadata.
+2. `SFTTrainer` tokenizes them.
+3. `mask_data` applies multi-turn/tool-aware response-only labels to the trainer dataset.
 
 ```python
 import os
@@ -282,9 +326,27 @@ print(f"{trainer_stats.metrics['train_runtime']} seconds used for training.")
 model.push_to_hub_merged(PUSH_TO_HUB_REPO_ID, tokenizer, save_method="merged_16bit", token=HF_TOKEN)
 ```
 
-`prepare_data` loads local folders, local files, Hugging Face datasets, or a list mixing any of those with already-loaded `datasets.Dataset` objects; applies the tokenizer chat template; optionally tokenizes only to drop rows above `max_length`; and returns trainer-friendly `text` rows with typed Teich span metadata for multi-turn/tool-aware masking. Pass `tokenize=True` for the Unsloth/TRL flow so trainer setup treats the dataset as already tokenized and preserves Teich's span metadata for `mask_data`. If you do not want Teich response-only masking, pass `teich_masking=False`; `prepare_data()` will return plain rendered `text` rows, plus `input_ids` and `attention_mask` when `tokenize=True`, ready for a standard trainer flow. Mixed chat-only and tool-call datasets are formatted separately before concatenation, so their schemas do not need to match beyond the normalized `messages`/`tools` fields.
+`prepare_data`:
 
-`mask_data` follows the same trainer-first shape as Unsloth's response-only helper, but uses Teich's typed span metadata so multi-turn tool calls and tool responses are masked correctly. By default it trains on assistant reasoning, assistant final answers, and assistant tool calls, while keeping user/system/developer/tool-response text masked. You can override that policy with `train_on_reasoning`, `train_on_final_answers`, `train_on_tools`, `train_on_user`, `train_on_system`, `train_on_developer`, and `train_on_tool_responses`. It returns a compact trainer dataset with only `input_ids` and `labels`; the trainer collator builds attention masks dynamically. Keep `packing=False` for this flow because packed datasets merge row boundaries before masking. For long-context runs, `max_supervised_tokens` defaults to the trainer's `max_length` to cap the number of trainable answer tokens per row; pass a lower value if loss memory is still too high.
+- Loads local folders, local files, Hugging Face datasets, source mixes, or `datasets.Dataset` objects.
+- Applies the tokenizer chat template.
+- Optionally tokenizes only to drop rows above `max_length`.
+- Returns trainer-friendly `text` rows with typed Teich span metadata.
+- Supports `teich_masking=False` for plain next-token training without Teich response-only labels.
+
+For Unsloth / TRL, pass `tokenize=True` so trainer setup treats the dataset as already tokenized and preserves Teich span metadata until `mask_data()` runs.
+
+`mask_data`:
+
+- Follows the same trainer-first shape as Unsloth's response-only helper.
+- Uses Teich span metadata so multi-turn tool calls and tool responses are masked correctly.
+- Trains on assistant reasoning, final answers, and tool calls by default.
+- Keeps user/system/developer/tool-response text masked by default.
+- Returns a compact trainer dataset with only `input_ids` and `labels`.
+
+You can override the default policy with `train_on_reasoning`, `train_on_final_answers`, `train_on_tools`, `train_on_user`, `train_on_system`, `train_on_developer`, and `train_on_tool_responses`.
+
+Keep `packing=False` for this flow because packed datasets merge row boundaries before masking. For long-context runs, `max_supervised_tokens` defaults to the trainer's `max_length` to cap the number of trainable answer tokens per row.
 
 To combine datasets, pass a list of dataset IDs, local paths, or loaded `datasets.Dataset` objects:
 
@@ -299,11 +361,20 @@ train_dataset = prepare_data(
 )
 ```
 
-For weighted mixes, explicit `percentage`, `proportion`, and `weight` values are treated as true ratios. If one source cannot fill its share after filtering or context-window drops, Teich scales the total row count down instead of silently changing the realized mix.
+For weighted mixes, explicit `percentage`, `proportion`, and `weight` values are treated as true ratios.
+
+If one source cannot fill its share after filtering or context-window drops, Teich scales the total row count down instead of silently changing the realized mix.
 
 ### Fallback manual flow with `load_traces`
 
-Use `load_traces` directly only when you want to own the remaining training pipeline yourself: chat-template rendering, filtering, tokenization, label masking, packing policy, and auditing.
+Use `load_traces` directly when you want to own the rest of the training pipeline yourself:
+
+- Chat-template rendering
+- Filtering
+- Tokenization
+- Label masking
+- Packing policy
+- Auditing
 
 ```python
 from teich import load_traces
