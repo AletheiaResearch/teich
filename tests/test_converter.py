@@ -357,6 +357,77 @@ def test_convert_native_claude_code_transcript_with_camel_session_id(tmp_path: P
     assert example.messages[3] == {"role": "assistant", "content": "Done."}
 
 
+def test_convert_native_claude_code_merges_fragmented_assistant_turns(tmp_path: Path):
+    trace_file = tmp_path / "native-fragmented-claude.jsonl"
+    events = [
+        {
+            "type": "user",
+            "message": {"role": "user", "content": "Update the server"},
+            "uuid": "user-uuid",
+            "parentUuid": None,
+            "sessionId": "claude-session",
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "model": "claude-sonnet-4-6",
+                "content": [
+                    {"type": "text", "text": "I'll update the timeout handling."},
+                ],
+            },
+            "uuid": "assistant-text-uuid",
+            "parentUuid": "user-uuid",
+            "sessionId": "claude-session",
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "model": "claude-sonnet-4-6",
+                "content": [
+                    {
+                        "type": "thinking",
+                        "thinking": "The timeout should be configurable and covered by tests.",
+                    },
+                ],
+            },
+            "uuid": "assistant-thinking-uuid",
+            "parentUuid": "assistant-text-uuid",
+            "sessionId": "claude-session",
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "model": "claude-sonnet-4-6",
+                "content": [
+                    {"type": "tool_use", "id": "toolu_1", "name": "Edit", "input": {"file_path": "server.py"}},
+                ],
+            },
+            "uuid": "assistant-tool-uuid",
+            "parentUuid": "assistant-thinking-uuid",
+            "sessionId": "claude-session",
+        },
+    ]
+    trace_file.write_text("\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8")
+
+    example = convert_trace_to_training_example(trace_file)
+
+    assert len(example.messages) == 2
+    assert example.messages[0] == {"role": "user", "content": "Update the server"}
+    assert example.messages[1]["role"] == "assistant"
+    assert example.messages[1]["reasoning_content"] == "The timeout should be configurable and covered by tests."
+    assert example.messages[1]["content"] == "I'll update the timeout handling."
+    assert example.messages[1]["tool_calls"] == [
+        {
+            "id": "toolu_1",
+            "type": "function",
+            "function": {"name": "Edit", "arguments": {"file_path": "server.py"}},
+        }
+    ]
+
+
 def test_convert_external_agent_trace(tmp_path: Path):
     trace_file = tmp_path / "hermes.jsonl"
     events = [

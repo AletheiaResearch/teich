@@ -468,6 +468,55 @@ def _claude_text_from_content(content: Any) -> str:
     return "\n".join(parts).strip()
 
 
+def _claude_reasoning_from_content(content: Any) -> str | None:
+    if not isinstance(content, list):
+        return None
+    parts: list[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+        if block_type in {"thinking", "reasoning", "reasoning_text"}:
+            text = block.get("thinking")
+            if not isinstance(text, str) or not text.strip():
+                text = block.get("text")
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+    result = "\n\n".join(parts).strip()
+    return result or None
+
+
+def _append_or_merge_assistant_message(messages: list[dict[str, Any]], message: dict[str, Any]) -> None:
+    if not messages or messages[-1].get("role") != "assistant":
+        messages.append(message)
+        return
+
+    existing = messages[-1]
+    reasoning = message.get("reasoning_content")
+    if isinstance(reasoning, str) and reasoning.strip():
+        existing_reasoning = existing.get("reasoning_content")
+        if isinstance(existing_reasoning, str) and existing_reasoning.strip():
+            existing["reasoning_content"] = f"{existing_reasoning.strip()}\n\n{reasoning.strip()}"
+        else:
+            existing["reasoning_content"] = reasoning.strip()
+
+    content = message.get("content")
+    if isinstance(content, str) and content.strip():
+        existing_content = existing.get("content")
+        if isinstance(existing_content, str) and existing_content.strip():
+            existing["content"] = f"{existing_content.strip()}\n\n{content.strip()}"
+        else:
+            existing["content"] = content.strip()
+
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, list) and tool_calls:
+        existing_tool_calls = existing.setdefault("tool_calls", [])
+        if isinstance(existing_tool_calls, list):
+            existing_tool_calls.extend(tool_calls)
+        else:
+            existing["tool_calls"] = tool_calls
+
+
 def _claude_tool_result_text(block: dict[str, Any]) -> str:
     content = block.get("content")
     if isinstance(content, str):
@@ -583,6 +632,9 @@ def _convert_claude_code_trace_to_training_example(
             content_blocks = payload.get("content")
             content = _claude_text_from_content(content_blocks)
             message: dict[str, Any] = {"role": "assistant", "content": content}
+            reasoning_content = _claude_reasoning_from_content(content_blocks)
+            if reasoning_content:
+                message["reasoning_content"] = reasoning_content
             tool_calls: list[dict[str, Any]] = []
             if isinstance(content_blocks, list):
                 for block in content_blocks:
@@ -609,8 +661,8 @@ def _convert_claude_code_trace_to_training_example(
                     )
             if tool_calls:
                 message["tool_calls"] = tool_calls
-            if content or tool_calls:
-                messages.append(message)
+            if content or reasoning_content or tool_calls:
+                _append_or_merge_assistant_message(messages, message)
             continue
 
         if event_type == "result":
