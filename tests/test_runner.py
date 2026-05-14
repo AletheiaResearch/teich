@@ -895,7 +895,7 @@ def test_run_all_reports_progress_and_preserves_prompt_order(tmp_path: Path):
     assert completed[0].metrics.total_cost == 0.25
 
 
-def test_run_all_queues_prompts_lazily_as_workers_free_up(tmp_path: Path):
+def test_run_all_prequeues_all_prompts_before_workers_free_up(tmp_path: Path):
     config = Config(prompts=["Prompt 1", "Prompt 2", "Prompt 3"], max_concurrency=2)
 
     with patch.object(CodexRunner, '_ensure_image'):
@@ -931,7 +931,11 @@ def test_run_all_queues_prompts_lazily_as_workers_free_up(tmp_path: Path):
         thread.start()
         assert first_batch_started.wait(timeout=2)
         time.sleep(0.05)
-        assert [update.prompt_id for update in updates if update.status == "queued"] == ["prompt-1", "prompt-2"]
+        assert [update.prompt_id for update in updates if update.status == "queued"] == [
+            "prompt-1",
+            "prompt-2",
+            "prompt-3",
+        ]
         release_first_batch.set()
         thread.join(timeout=2)
 
@@ -943,7 +947,7 @@ def test_run_all_queues_prompts_lazily_as_workers_free_up(tmp_path: Path):
         for update, thread_name in zip(updates, update_thread_names, strict=True)
         if update.status == "queued"
     ]
-    assert all(thread_name.startswith("teich-prompt-worker-") for thread_name in queued_update_thread_names)
+    assert all(thread_name == thread.name for thread_name in queued_update_thread_names)
 
 
 def test_run_all_stops_claiming_agent_prompts_after_failure(tmp_path: Path):
@@ -1994,7 +1998,7 @@ def test_chat_runner_run_all_preserves_completed_rows_when_later_response_is_inv
     assert destination.exists()
     rows = [json.loads(line) for line in destination.read_text(encoding="utf-8").splitlines()]
     assert [row["prompt"] for row in rows] == ["Hello"]
-    assert [update.status for update in updates] == ["queued", "running", "completed", "queued", "running", "failed"]
+    assert [update.status for update in updates] == ["queued", "queued", "running", "completed", "running", "failed"]
 
 
 def test_chat_runner_run_all_writes_one_dataset_file_with_all_rows(tmp_path: Path):
@@ -2089,7 +2093,7 @@ def test_chat_runner_run_all_creates_and_appends_dataset_while_batch_is_running(
     assert sorted(row["prompt"] for row in rows) == ["blocked", "fast"]
 
 
-def test_chat_runner_run_all_queues_prompts_lazily(tmp_path: Path):
+def test_chat_runner_run_all_prequeues_all_prompts(tmp_path: Path):
     config = Config(
         agent={"provider": "chat"},
         model=ModelConfig(model="gpt-4.1-mini"),
@@ -2136,7 +2140,11 @@ def test_chat_runner_run_all_queues_prompts_lazily(tmp_path: Path):
         thread.start()
         assert first_batch_started.wait(timeout=2)
         time.sleep(0.05)
-        assert [update.prompt_id for update in updates if update.status == "queued"] == ["prompt-1", "prompt-2"]
+        assert [update.prompt_id for update in updates if update.status == "queued"] == [
+            "prompt-1",
+            "prompt-2",
+            "prompt-3",
+        ]
         release_first_batch.set()
         thread.join(timeout=2)
 
@@ -2148,7 +2156,7 @@ def test_chat_runner_run_all_queues_prompts_lazily(tmp_path: Path):
         for update, thread_name in zip(updates, update_thread_names, strict=True)
         if update.status == "queued"
     ]
-    assert all(thread_name.startswith("teich-chat-worker-") for thread_name in queued_update_thread_names)
+    assert all(thread_name == thread.name for thread_name in queued_update_thread_names)
 
 
 def test_chat_runner_run_all_preserves_completed_rows_when_later_prompt_fails(tmp_path: Path):

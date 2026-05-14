@@ -1340,6 +1340,9 @@ class DockerRuntimeRunner:
                     )
                 )
 
+        for prompt_index, prompt_input in enumerate(prompt_inputs, start=1):
+            emit_queued(prompt_index, prompt_input)
+
         def worker() -> None:
             while not stop_event.is_set():
                 try:
@@ -1347,7 +1350,6 @@ class DockerRuntimeRunner:
                 except queue.Empty:
                     return
                 try:
-                    emit_queued(prompt_index, prompt_input)
                     result = self._run_prompt_task(
                         f"prompt-{prompt_index}",
                         prompt_index,
@@ -3620,6 +3622,9 @@ class ChatRunner(DockerRuntimeRunner):
                     )
                 )
 
+        for prompt_index, prompt_input in enumerate(prompt_inputs, start=1):
+            emit_queued(prompt_index, prompt_input)
+
         def worker() -> None:
             while not stop_event.is_set():
                 try:
@@ -3630,7 +3635,6 @@ class ChatRunner(DockerRuntimeRunner):
                     prompt_queue.task_done()
                     return
                 try:
-                    emit_queued(prompt_index, prompt_input)
                     with running_lock:
                         running[prompt_index] = (
                             prompt_input,
