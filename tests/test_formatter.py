@@ -1224,6 +1224,91 @@ def test_prepare_data_filters_oversized_rows_with_tokenized_mode():
     assert "ok</assistant>" in prepared[0]["text"]
 
 
+def test_prepare_data_trims_oversized_followups_before_dropping():
+    tokenizer = LengthFilteringTokenizer()
+    dataset = Dataset.from_list(
+        [
+            {
+                "messages": [
+                    {"role": "user", "content": "short"},
+                    {"role": "assistant", "content": "ok"},
+                    {"role": "user", "content": "follow up " + ("x" * 80)},
+                    {"role": "assistant", "content": "later " + ("y" * 80)},
+                ],
+                "tools": [],
+            },
+        ]
+    )
+
+    prepared = prepare_data(
+        dataset,
+        tokenizer,
+        max_length=60,
+        trim_oversized_followups=True,
+        tokenize=True,
+        verbose=False,
+    )
+
+    assert prepared.num_rows == 1
+    assert "ok</assistant>" in prepared[0]["text"]
+    assert "follow up" not in prepared[0]["text"]
+    assert "later" not in prepared[0]["text"]
+    assert len(prepared[0]["input_ids"]) <= 60
+
+
+def test_prepare_data_only_trims_rows_with_multiple_user_turns():
+    tokenizer = LengthFilteringTokenizer()
+    dataset = Dataset.from_list(
+        [
+            {
+                "messages": [
+                    {"role": "user", "content": "single"},
+                    {"role": "assistant", "content": "x" * 100},
+                ],
+                "tools": [],
+            },
+        ]
+    )
+
+    with pytest.raises(ValueError, match="context window"):
+        prepare_data(
+            dataset,
+            tokenizer,
+            max_length=60,
+            trim_oversized_followups=True,
+            verbose=False,
+        )
+
+
+def test_prepare_data_keeps_oversized_rows_when_drop_is_disabled_even_with_trim_enabled():
+    tokenizer = LengthFilteringTokenizer()
+    dataset = Dataset.from_list(
+        [
+            {
+                "messages": [
+                    {"role": "user", "content": "short"},
+                    {"role": "assistant", "content": "ok"},
+                    {"role": "user", "content": "follow up"},
+                    {"role": "assistant", "content": "x" * 100},
+                ],
+                "tools": [],
+            },
+        ]
+    )
+
+    prepared = prepare_data(
+        dataset,
+        tokenizer,
+        max_length=60,
+        drop_oversized_examples=False,
+        trim_oversized_followups=True,
+        verbose=False,
+    )
+
+    assert prepared.num_rows == 1
+    assert "follow up" in prepared[0]["text"]
+
+
 def test_prepare_data_can_keep_oversized_rows_for_trainer_truncation():
     tokenizer = TrainerStyleTokenizer()
     dataset = Dataset.from_list(

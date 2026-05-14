@@ -1299,6 +1299,30 @@ def normalize_prepared_dataset_features(dataset: Dataset) -> Dataset:
     return dataset.cast(normalized_features)
 
 
+def _drop_last_user_turn(messages: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
+    user_indexes = [
+        index
+        for index, message in enumerate(messages)
+        if isinstance(message, dict) and message.get("role") == "user"
+    ]
+    if len(user_indexes) < 2:
+        return None
+
+    before_last_user = messages[: user_indexes[-1]]
+    assistant_indexes = [
+        index
+        for index, message in enumerate(before_last_user)
+        if isinstance(message, dict) and message.get("role") == "assistant"
+    ]
+    if not assistant_indexes:
+        return None
+
+    trimmed = before_last_user[: assistant_indexes[-1] + 1]
+    if not any(message.get("role") == "user" for message in trimmed):
+        return None
+    return trimmed
+
+
 def _normalize_span_dicts(value: Any) -> list[tuple[int, int]]:
     return _merge_spans([(span["start"], span["end"]) for span in _normalize_span_metadata(value)])
 
@@ -1315,6 +1339,7 @@ def format_data(
     teich_masking: bool = True,
     max_length: int | None = None,
     drop_oversized_examples: bool = True,
+    trim_oversized_followups: bool = False,
     tokenize: bool = False,
     strict: bool = False,
     verbose: bool = True,
@@ -1340,6 +1365,7 @@ def format_data(
                         teich_masking=teich_masking,
                         max_length=max_length,
                         drop_oversized_examples=drop_oversized_examples,
+                        trim_oversized_followups=trim_oversized_followups,
                         tokenize=tokenize,
                         strict=strict,
                         verbose=verbose,
@@ -1359,6 +1385,7 @@ def format_data(
     effective_max_length = max_length if isinstance(max_length, int) and max_length > 0 else None
     dropped_count = 0
     dropped_oversized_count = 0
+    trimmed_oversized_count = 0
 
     if messages_column not in dataset.column_names:
         raise TypeError(f"Dataset is missing required '{messages_column}' column")
@@ -1375,11 +1402,40 @@ def format_data(
     def _map_batch(batch: dict[str, list[Any]]) -> dict[str, list[Any]]:
         nonlocal dropped_count
         nonlocal dropped_oversized_count
+        nonlocal trimmed_oversized_count
         batch_size = len(batch[messages_column])
         tools_batch = batch.get(tools_column)
         if tools_batch is None:
             tools_batch = [None] * batch_size
         output_batch = _empty_output_batch()
+
+        def render_row_messages(
+            messages: list[dict[str, Any]],
+            tools: list[dict[str, Any]],
+        ) -> tuple[str, list[dict[str, Any]], tuple[list[int], list[int]] | None, int | None] | None:
+            if teich_masking:
+                text, supervised_spans = _supervised_text_and_spans(
+                    renderer,
+                    messages,
+                    tools,
+                    template_kwargs,
+                    assistant_prompt_prefix_cache,
+                    strict,
+                )
+                if not supervised_spans:
+                    return None
+            else:
+                text = _render_chat(renderer, messages, tools, template_kwargs)
+                supervised_spans = []
+            tokenized: tuple[list[int], list[int]] | None = None
+            if tokenize:
+                tokenized = _tokenize_trainer_text(text_tokenizer, text)
+                if tokenized is None:
+                    raise ValueError("prepare_data(tokenize=True) requires a tokenizer that can tokenize text.")
+            tokenized_length = None
+            if effective_max_length is not None:
+                tokenized_length = len(tokenized[0]) if tokenized is not None else _tokenized_length(text_tokenizer, text)
+            return text, supervised_spans, tokenized, tokenized_length
 
         for index in range(batch_size):
             messages = batch[messages_column][index]
@@ -1396,31 +1452,34 @@ def format_data(
             tools = tools_batch[index] or []
             if not isinstance(tools, list):
                 raise TypeError(f"Row is missing a list-valued '{tools_column}' column")
-            if teich_masking:
-                text, supervised_spans = _supervised_text_and_spans(
-                    renderer,
-                    messages,
-                    tools,
-                    template_kwargs,
-                    assistant_prompt_prefix_cache,
-                    strict,
-                )
-                if not supervised_spans:
-                    dropped_count += 1
-                    continue
-            else:
-                text = _render_chat(renderer, messages, tools, template_kwargs)
-                supervised_spans = []
-            tokenized: tuple[list[int], list[int]] | None = None
-            if tokenize:
-                tokenized = _tokenize_trainer_text(text_tokenizer, text)
-                if tokenized is None:
-                    raise ValueError("prepare_data(tokenize=True) requires a tokenizer that can tokenize text.")
+            rendered = render_row_messages(messages, tools)
+            if rendered is None:
+                dropped_count += 1
+                continue
+            text, supervised_spans, tokenized, tokenized_length = rendered
             if drop_oversized_examples and effective_max_length is not None:
-                tokenized_length = len(tokenized[0]) if tokenized is not None else _tokenized_length(text_tokenizer, text)
-                if tokenized_length > effective_max_length:
+                did_trim = False
+                if tokenized_length is None:
                     dropped_oversized_count += 1
                     continue
+                if tokenized_length > effective_max_length:
+                    while trim_oversized_followups:
+                        trimmed_messages = _drop_last_user_turn(messages)
+                        if trimmed_messages is None:
+                            break
+                        messages = trimmed_messages
+                        did_trim = True
+                        rendered = render_row_messages(messages, tools)
+                        if rendered is None:
+                            break
+                        text, supervised_spans, tokenized, tokenized_length = rendered
+                        if tokenized_length is not None and tokenized_length <= effective_max_length:
+                            break
+                    if tokenized_length is None or tokenized_length > effective_max_length:
+                        dropped_oversized_count += 1
+                        continue
+                    if did_trim:
+                        trimmed_oversized_count += 1
             output_batch[text_column].append(text)
             if teich_masking:
                 output_batch[TEICH_SUPERVISED_SPANS_COLUMN].append(_span_dicts(supervised_spans))
@@ -1448,6 +1507,10 @@ def format_data(
         Console().print(f"[yellow]Dropped {dropped_count} rows without trainable assistant spans.[/yellow]")
     if verbose and dropped_oversized_count:
         Console().print(f"[yellow]Dropped {dropped_oversized_count} rows above {effective_max_length} tokens.[/yellow]")
+    if verbose and trimmed_oversized_count:
+        Console().print(
+            f"[yellow]Trimmed follow-up turns from {trimmed_oversized_count} oversized rows to fit {effective_max_length} tokens.[/yellow]"
+        )
     return formatted_data
 
 

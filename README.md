@@ -128,12 +128,13 @@ train_dataset = prepare_data(
     tokenizer,
     max_length=32768,
     drop_oversized_examples=True,
+    trim_oversized_followups=True,
     tokenize=True,
     chat_template_kwargs={"enable_thinking": True, "preserve_thinking": True},
 )
 ```
 
-`prepare_data()` returns rendered `text`, Teich span metadata, and optionally `input_ids` / `attention_mask`. Call `mask_data()` after constructing your trainer to convert those spans into labels.
+`prepare_data()` returns rendered `text`, Teich span metadata, and optionally `input_ids` / `attention_mask`. With `trim_oversized_followups=True`, multi-turn rows that exceed `max_length` can drop the final user follow-up and everything after it before the whole row is discarded. Call `mask_data()` after constructing your trainer to convert those spans into labels.
 
 ### Mix agent and chat datasets
 
@@ -147,6 +148,7 @@ train_dataset = prepare_data(
     tokenizer,
     max_length=32768,
     drop_oversized_examples=True,
+    trim_oversized_followups=True,
     tokenize=True,
     chat_template_kwargs={"enable_thinking": True, "preserve_thinking": True},
 )
@@ -295,6 +297,7 @@ train_dataset = prepare_data(
     chat_template_kwargs=CHAT_TEMPLATE_KWARGS,
     max_length=MAX_SEQ_LEN,
     drop_oversized_examples=True,
+    trim_oversized_followups=True,
     tokenize=True,
     strict=True,
 )
@@ -343,6 +346,7 @@ model.push_to_hub_merged(PUSH_TO_HUB_REPO_ID, tokenizer, save_method="merged_16b
 - Loads local folders, local files, Hugging Face datasets, source mixes, or `datasets.Dataset` objects.
 - Applies the tokenizer chat template.
 - Optionally tokenizes only to drop rows above `max_length`.
+- Optionally trims final follow-up turns from multi-turn rows before dropping them for exceeding `max_length`.
 - Returns trainer-friendly `text` rows with typed Teich span metadata.
 - Supports `teich_masking=False` for plain next-token training without Teich response-only labels.
 
@@ -368,6 +372,7 @@ train_dataset = prepare_data(
     tokenizer,
     max_length=MAX_SEQ_LEN,
     drop_oversized_examples=True,
+    trim_oversized_followups=True,
     tokenize=True,
     chat_template_kwargs=CHAT_TEMPLATE_KWARGS,
 )
