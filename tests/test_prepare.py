@@ -274,7 +274,26 @@ def test_prepare_data_source_mix_percentages_keep_large_limited_ratio():
     assert sum("chat answer" in text for text in texts) == 152
 
 
-def test_prepare_data_source_mix_uses_equal_defaults_and_redistributes_capacity():
+def test_prepare_data_source_mix_without_percentages_includes_all_rows_before_global_cap():
+    tokenizer = TinyChatTokenizer()
+
+    prepared = prepare_data(
+        [
+            {"source": _dataset_with_answers("small", 2)},
+            {"source": _dataset_with_answers("large", 10)},
+        ],
+        tokenizer,
+        max_examples=20,
+        verbose=False,
+    )
+
+    texts = [prepared[index]["text"] for index in range(prepared.num_rows)]
+    assert prepared.num_rows == 12
+    assert sum("small answer" in text for text in texts) == 2
+    assert sum("large answer" in text for text in texts) == 10
+
+
+def test_prepare_data_source_mix_without_percentages_trims_after_global_shuffle():
     tokenizer = TinyChatTokenizer()
 
     prepared = prepare_data(
@@ -289,8 +308,8 @@ def test_prepare_data_source_mix_uses_equal_defaults_and_redistributes_capacity(
 
     texts = [prepared[index]["text"] for index in range(prepared.num_rows)]
     assert prepared.num_rows == 8
-    assert sum("small answer" in text for text in texts) == 2
-    assert sum("large answer" in text for text in texts) == 6
+    assert 0 <= sum("small answer" in text for text in texts) <= 2
+    assert sum("small answer" in text for text in texts) + sum("large answer" in text for text in texts) == 8
 
 
 def test_prepare_data_source_mix_normalizes_prepared_span_features():

@@ -373,10 +373,11 @@ def _mix_prepared_datasets(
     target_total = min(max_examples, sum(available_counts)) if max_examples is not None else sum(available_counts)
     if target_total == 0:
         return datasets[0].select(range(0))
-    if rigid_percentages:
-        source_counts = _allocate_rigid_source_counts(available_counts, probabilities, target_total)
-    else:
-        source_counts = _allocate_source_counts(available_counts, probabilities, target_total)
+    if not rigid_percentages:
+        combined = concatenate_datasets([normalize_prepared_dataset_features(dataset) for dataset in datasets])
+        shuffled = combined.shuffle(seed=_DATASET_MIX_SEED)
+        return shuffled.select(range(target_total))
+    source_counts = _allocate_rigid_source_counts(available_counts, probabilities, target_total)
     selected_datasets = [
         normalize_prepared_dataset_features(dataset.shuffle(seed=_DATASET_MIX_SEED + index).select(range(count)))
         for index, (dataset, count) in enumerate(zip(datasets, source_counts, strict=True))
@@ -417,46 +418,6 @@ def _largest_remainder_counts(probabilities: Sequence[float], target_total: int)
         quotas[index] += 1
         remaining -= 1
     return quotas
-
-
-def _allocate_source_counts(
-    available_counts: Sequence[int],
-    probabilities: Sequence[float],
-    target_total: int,
-) -> list[int]:
-    remaining_capacity = list(available_counts)
-    counts = [0] * len(available_counts)
-    remaining = target_total
-    active = {index for index, capacity in enumerate(remaining_capacity) if capacity > 0}
-    while remaining > 0 and active:
-        active_weight = sum(probabilities[index] for index in active)
-        desired_counts: list[tuple[float, int, int]] = []
-        for index in active:
-            desired = remaining * (probabilities[index] / active_weight)
-            whole = min(remaining_capacity[index], int(desired))
-            desired_counts.append((desired - whole, index, whole))
-        assigned = 0
-        for _, index, whole in desired_counts:
-            if whole <= 0:
-                continue
-            counts[index] += whole
-            remaining_capacity[index] -= whole
-            assigned += whole
-        remaining -= assigned
-        active = {index for index in active if remaining_capacity[index] > 0}
-        if remaining <= 0 or not active:
-            break
-        for _, index, _ in sorted(desired_counts, reverse=True):
-            if index not in active:
-                continue
-            counts[index] += 1
-            remaining_capacity[index] -= 1
-            remaining -= 1
-            if remaining_capacity[index] == 0:
-                active.remove(index)
-            if remaining == 0:
-                break
-    return counts
 
 
 def _resolve_single_source_dataset(
