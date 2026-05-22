@@ -23,7 +23,7 @@ from .runner import (
     SessionProgressUpdate,
     TraceMetrics,
     completed_prompt_keys_from_outputs,
-    pending_prompt_inputs_for_resume,
+    prompt_inputs_for_run,
     unique_prompt_inputs_by_completion_key,
 )
 from .trace_readme import write_traces_readme
@@ -73,13 +73,13 @@ def _new_jsonl_outputs(traces_dir: Path, started_at: datetime, results: list[Pat
     return sorted(output_paths)
 
 
-def _try_write_partial_output_metadata(cfg: Config) -> Path | None:
+def _try_write_completed_output_metadata(cfg: Config) -> Path | None:
     if not _has_non_empty_trace_outputs(cfg.output.traces_dir):
         return None
     try:
         return _write_output_metadata(cfg)
     except Exception as exc:
-        console.print(f"[yellow]Warning: failed to write README for partial outputs: {exc}[/yellow]")
+        console.print(f"[yellow]Warning: failed to write README for completed outputs: {exc}[/yellow]")
         return None
 
 
@@ -125,7 +125,7 @@ def _publish_dataset_to_hub(cfg: Config) -> str:
     return str(repo_url)
 
 
-def _prompt_publish_partial_outputs(cfg: Config) -> str | None:
+def _prompt_publish_completed_outputs(cfg: Config) -> str | None:
     repo_id = cfg.get_publish_repo_id()
     if not repo_id or not _has_non_empty_trace_outputs(cfg.output.traces_dir):
         return None
@@ -134,10 +134,10 @@ def _prompt_publish_partial_outputs(cfg: Config) -> str | None:
         default=False,
     )
     if not should_publish:
-        console.print("[yellow]Skipping Hugging Face upload for partial outputs.[/yellow]")
+        console.print("[yellow]Skipping Hugging Face upload for completed outputs.[/yellow]")
         return None
     repo_url = _publish_dataset_to_hub(cfg)
-    console.print(f"[green]Published partial dataset: {repo_url}[/green]")
+    console.print(f"[green]Published completed outputs: {repo_url}[/green]")
     return repo_url
 
 
@@ -199,7 +199,7 @@ def generate(
     cfg.output.traces_dir.mkdir(parents=True, exist_ok=True)
     if resume:
         completed_keys = completed_prompt_keys_from_outputs(cfg.output.traces_dir)
-        pending_prompt_inputs = pending_prompt_inputs_for_resume(prompt_inputs, cfg.output.traces_dir)
+        pending_prompt_inputs = prompt_inputs_for_run(prompt_inputs, cfg.output.traces_dir, resume=True)
         skipped_count = len(prompt_inputs) - len(pending_prompt_inputs)
     else:
         completed_keys = set()
@@ -219,7 +219,7 @@ def generate(
         )
     if not pending_prompt_inputs:
         console.print("[green]All configured prompts already have completed outputs. Nothing to run.[/green]")
-        readme_path = _try_write_partial_output_metadata(cfg)
+        readme_path = _try_write_completed_output_metadata(cfg)
         if readme_path:
             console.print(f"[green]Wrote README: {readme_path}[/green]")
         return
@@ -277,17 +277,17 @@ def generate(
             console.print(f"[green]Published dataset: {repo_url}[/green]")
 
     except KeyboardInterrupt:
-        readme_path = _try_write_partial_output_metadata(cfg)
+        readme_path = _try_write_completed_output_metadata(cfg)
         if readme_path:
-            console.print(f"\n[green]Wrote README for partial outputs: {readme_path}[/green]")
+            console.print(f"\n[green]Wrote README for completed outputs: {readme_path}[/green]")
             _print_interrupted_upload_hint(cfg)
         console.print("\n[yellow]Interrupted. Completed outputs remain on disk.[/yellow]")
         raise typer.Exit(130)
     except Exception as e:
-        readme_path = _try_write_partial_output_metadata(cfg)
+        readme_path = _try_write_completed_output_metadata(cfg)
         if readme_path:
-            console.print(f"\n[green]Wrote README for partial outputs: {readme_path}[/green]")
-            _prompt_publish_partial_outputs(cfg)
+            console.print(f"\n[green]Wrote README for completed outputs: {readme_path}[/green]")
+            _prompt_publish_completed_outputs(cfg)
         console.print(f"\n[red]Error: {e}[/red]")
         raise typer.Exit(1)
 

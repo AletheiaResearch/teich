@@ -899,6 +899,17 @@ def pending_prompt_inputs_for_resume(prompt_inputs: list[PromptInput], traces_di
     ]
 
 
+def prompt_inputs_for_run(
+    prompt_inputs: list[PromptInput],
+    traces_dir: Path,
+    *,
+    resume: bool = False,
+) -> list[PromptInput]:
+    if resume:
+        return pending_prompt_inputs_for_resume(prompt_inputs, traces_dir)
+    return unique_prompt_inputs_by_completion_key(prompt_inputs)
+
+
 class DockerRuntimeRunner:
     """Shared Docker runtime used by agent runners."""
 
@@ -1065,42 +1076,13 @@ class DockerRuntimeRunner:
             details = stderr.strip() or stdout.strip() or str(exc)
             raise RuntimeError(f"Failed to start Docker runtime container: {details}") from exc
 
-    def _preserve_partial_session_files(self, session_dir: Path, session_id: str, prefix: str) -> list[Path]:
-        if not session_dir.exists():
-            return []
-        preserved: list[Path] = []
-        for source_path in sorted(path for path in session_dir.rglob("*.jsonl") if path.is_file()):
-            destination = self._resolve_partial_output_path(f"{prefix}-{session_id}-{source_path.name}")
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source_path, destination)
-            preserved.append(destination)
-        return preserved
-
-    def _resolve_partial_output_path(self, file_name: str) -> Path:
-        destination = self.config.output.traces_dir / "partials" / file_name
-        if not destination.exists():
-            return destination
-        stem = destination.stem
-        suffix = destination.suffix
-        counter = 1
-        while True:
-            candidate = destination.with_name(f"{stem}_{counter}{suffix}")
-            if not candidate.exists():
-                return candidate
-            counter += 1
-
-    def _move_output_to_partials(self, trace_path: Path) -> Path | None:
-        if not trace_path.exists():
-            return None
+    @staticmethod
+    def _discard_output_file(trace_path: Path) -> None:
         try:
-            if "partials" in trace_path.relative_to(self.config.output.traces_dir).parts:
-                return trace_path
-        except ValueError:
+            if trace_path.exists() and trace_path.is_file():
+                trace_path.unlink()
+        except OSError:
             pass
-        destination = self._resolve_partial_output_path(trace_path.name)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(trace_path), destination)
-        return destination
 
     @staticmethod
     def _hermes_metadata_path(trace_path: Path) -> Path:
@@ -1786,8 +1768,10 @@ class DockerRuntimeRunner:
         resume: bool = False,
     ) -> list[Path]:
         prompt_inputs = prompt_inputs if prompt_inputs is not None else self.config.get_prompt_inputs()
-        prompt_inputs = unique_prompt_inputs_by_completion_key(prompt_inputs)
+        prompt_inputs = prompt_inputs_for_run(prompt_inputs, self.config.output.traces_dir, resume=resume)
         if not prompt_inputs:
+            if resume:
+                return []
             raise ValueError("No prompts configured")
 
         total_prompts = len(prompt_inputs)
@@ -2365,7 +2349,6 @@ class CodexRunner(DockerRuntimeRunner):
             self._copy_workspace_snapshot(workspace, self._sandbox_destination(trace_path))
             return trace_path
         except BaseException:
-            self._preserve_partial_session_files(codex_home / "sessions", session_id, "codex")
             raise
         finally:
             if len(turn_prompts) > 1:
@@ -2688,7 +2671,7 @@ class ExternalCliRunner(DockerRuntimeRunner):
             self._copy_workspace_snapshot(workspace, self._sandbox_destination(destination))
             return destination
         except BaseException:
-            self._move_output_to_partials(destination)
+            self._discard_output_file(destination)
             raise
         finally:
             if len(turn_prompts) > 1:
@@ -2908,7 +2891,6 @@ class ClaudeCodeRunner(ExternalCliRunner):
             self._copy_workspace_snapshot(workspace, self._sandbox_destination(trace_path))
             return trace_path
         except BaseException:
-            self._preserve_partial_session_files(home_dir / "projects", session_id, self.source_name)
             raise
         finally:
             if len(turn_prompts) > 1:
@@ -3330,13 +3312,9 @@ class HermesRunner(ExternalCliRunner):
                 except subprocess.CalledProcessError as exc:
                     stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or "")
                     stdout = exc.output if isinstance(exc.output, str) else (exc.output or "")
-                    self._export_hermes_state_sessions(home_dir, workspace, partial=True)
-                    self._move_output_to_partials(fallback_destination)
                     details = stderr.strip() or stdout.strip()
                     raise RuntimeError(f"Session {session_id[:8]} failed: {details}") from exc
                 except RuntimeError:
-                    self._export_hermes_state_sessions(home_dir, workspace, partial=True)
-                    self._move_output_to_partials(fallback_destination)
                     raise
                 stdout_parts.append(stdout)
                 if not self._hermes_state_db(home_dir).exists():
@@ -3383,7 +3361,7 @@ class HermesRunner(ExternalCliRunner):
             self._copy_workspace_snapshot(workspace, self._sandbox_destination(destination))
             return destination
         except BaseException:
-            self._move_output_to_partials(fallback_destination)
+            self._discard_output_file(fallback_destination)
             raise
         finally:
             if len(turn_prompts) > 1:
@@ -4112,28 +4090,11 @@ class ChatRunner(DockerRuntimeRunner):
         destination: Path,
         append_lock: threading.Lock | None,
     ) -> dict[str, Any]:
-        extension: tuple[int, dict[str, Any]] | None = None
-        if prompt_input.follow_up_prompts and append_lock is not None and destination.exists():
-            with append_lock:
-                rows = self._read_chat_training_rows(destination)
-                extension = self._find_chat_row_to_extend(rows, prompt_input)
-
-        if extension is None:
-            training_row = self._request_chat_conversation(prompt_input)
-            if append_lock is not None:
-                with append_lock:
-                    self._append_chat_training_row(destination, training_row)
-            return training_row
-
-        training_row = self._request_chat_conversation_from_existing(prompt_input, extension[1])
+        training_row = self._request_chat_conversation(prompt_input)
         if append_lock is not None:
             with append_lock:
                 rows = self._read_chat_training_rows(destination)
-                latest_extension = self._find_chat_row_to_extend(rows, prompt_input)
-                if latest_extension is not None:
-                    rows[latest_extension[0]] = training_row
-                    self._write_chat_training_rows(destination, rows)
-                elif not self._chat_rows_include_completed_prompt(rows, prompt_input):
+                if not self._chat_rows_include_completed_prompt(rows, prompt_input):
                     self._append_chat_training_row(destination, training_row)
         return training_row
 
@@ -4266,8 +4227,10 @@ class ChatRunner(DockerRuntimeRunner):
         resume: bool = False,
     ) -> list[Path]:
         prompt_inputs = prompt_inputs if prompt_inputs is not None else self.config.get_prompt_inputs()
-        prompt_inputs = unique_prompt_inputs_by_completion_key(prompt_inputs)
+        prompt_inputs = prompt_inputs_for_run(prompt_inputs, self.config.output.traces_dir, resume=resume)
         if not prompt_inputs:
+            if resume:
+                return []
             raise ValueError("No prompts configured")
 
         destination = self.config.output.traces_dir / "chat.jsonl" if resume else self._resolve_output_path("chat.jsonl")
@@ -4954,7 +4917,6 @@ class PiRunner(DockerRuntimeRunner):
             self._copy_workspace_snapshot(workspace, self._sandbox_destination(trace_path))
             return trace_path
         except BaseException:
-            self._preserve_partial_session_files(session_dir, session_id, "pi")
             raise
         finally:
             if len(turn_prompts) > 1:

@@ -777,7 +777,7 @@ def _write_minimal_hermes_delegation_state_db(home_dir: Path) -> None:
     connection.close()
 
 
-def test_hermes_runner_moves_failed_state_db_exports_to_partials(tmp_path: Path):
+def test_hermes_runner_discards_failed_state_db_exports(tmp_path: Path):
     config = Config(
         agent={"provider": "hermes"},
         api=APIConfig(provider="openrouter"),
@@ -803,21 +803,7 @@ def test_hermes_runner_moves_failed_state_db_exports_to_partials(tmp_path: Path)
         with pytest.raises(RuntimeError, match="provider failed"):
             runner.run_session("delegate this", "hermes-session")
 
-    assert not list((tmp_path / "output").glob("*.jsonl"))
-    partials = sorted((tmp_path / "output" / "partials").glob("*.jsonl"))
-    assert len(partials) == 1
-    assert partials[0].name == "hermes-agent.jsonl"
-    rows_by_session = {}
-    for row in [json.loads(line) for line in partials[0].read_text(encoding="utf-8").splitlines()]:
-        metadata = row["metadata"]
-        rows_by_session[metadata["id"]] = metadata
-        assert row["traces"][0]["from"] == "human"
-        assert row["task"]
-        assert metadata["source"] == "cli"
-        assert metadata["teich_export_status"] == "partial"
-        assert metadata["teich_partial"] is True
-    assert rows_by_session["parent-session"]["parent_session_id"] is None
-    assert rows_by_session["child-session"]["parent_session_id"] == "parent-session"
+    assert not list((tmp_path / "output").rglob("*.jsonl"))
 
 
 def test_run_process_removes_named_container_on_failure():
@@ -851,7 +837,7 @@ def test_run_process_removes_named_container_on_failure():
     )
 
 
-def test_codex_run_session_moves_partial_trace_on_failure(tmp_path: Path):
+def test_codex_run_session_discards_partial_trace_on_failure(tmp_path: Path):
     config = Config(output={"traces_dir": tmp_path / "output", "sandbox_dir": tmp_path / "sandbox"})
 
     with patch.object(CodexRunner, '_ensure_image'):
@@ -877,10 +863,7 @@ def test_codex_run_session_moves_partial_trace_on_failure(tmp_path: Path):
         with pytest.raises(RuntimeError, match="boom"):
             runner.run_session("Test prompt", "test-session")
 
-    partials = list((tmp_path / "output" / "partials").glob("*.jsonl"))
-    assert len(partials) == 1
-    assert partials[0].read_text(encoding="utf-8").startswith('{"type":"response_item"')
-    assert not list((tmp_path / "output").glob("*.jsonl"))
+    assert not list((tmp_path / "output").rglob("*.jsonl"))
 
 
 def test_run_all_with_no_prompts():
@@ -2132,7 +2115,7 @@ def test_pi_runner_resolves_pi_executable_from_path():
     assert PiRunner._resolve_pi_executable() == "pi"
 
 
-def test_pi_run_session_moves_partial_trace_on_failure(tmp_path: Path):
+def test_pi_run_session_discards_partial_trace_on_failure(tmp_path: Path):
     config = Config(agent={"provider": "pi"}, output={"traces_dir": tmp_path / "output", "sandbox_dir": tmp_path / "sandbox"})
 
     with patch.object(PiRunner, '_ensure_image'):
@@ -2161,10 +2144,7 @@ def test_pi_run_session_moves_partial_trace_on_failure(tmp_path: Path):
         with pytest.raises(RuntimeError, match="boom"):
             runner.run_session("Test prompt", "test-session")
 
-    partials = list((tmp_path / "output" / "partials").glob("*.jsonl"))
-    assert len(partials) == 1
-    assert partials[0].read_text(encoding="utf-8").startswith('{"type":"message"')
-    assert not list((tmp_path / "output").glob("*.jsonl"))
+    assert not list((tmp_path / "output").rglob("*.jsonl"))
 
 
 def test_chat_runner_writes_structured_dataset_row_from_responses_api(tmp_path: Path):
@@ -2905,7 +2885,7 @@ def test_chat_runner_resume_appends_existing_chat_file(tmp_path: Path):
     assert [row["prompt"] for row in rows] == ["Hello", "Who are you?"]
 
 
-def test_chat_runner_resume_extends_existing_chat_row_with_follow_ups(tmp_path: Path):
+def test_chat_runner_resume_regenerates_incomplete_follow_up_row(tmp_path: Path):
     config = Config(
         agent={"provider": "chat"},
         model=ModelConfig(model="gpt-4.1-mini"),
@@ -2934,6 +2914,8 @@ def test_chat_runner_resume_extends_existing_chat_row_with_follow_ups(tmp_path: 
 
     def fake_turn(prompt: str, history: list[dict[str, str]] | None = None):
         calls.append((prompt, list(history or [])))
+        if prompt == "Build app":
+            return "Rebuilt", "replanned", {"input": 3, "output": 5, "totalTokens": 8}, "gpt-4.1-mini"
         if prompt == "Add tests":
             return "Tests added", None, {"input": 1, "output": 2, "totalTokens": 3}, "gpt-4.1-mini"
         if prompt == "Polish":
@@ -2945,14 +2927,15 @@ def test_chat_runner_resume_extends_existing_chat_row_with_follow_ups(tmp_path: 
         assert runner.run_all(max_concurrency=1, prompt_inputs=[prompt_input], resume=True) == [destination]
 
     rows = [json.loads(line) for line in destination.read_text(encoding="utf-8").splitlines()]
-    assert len(rows) == 1
-    row = rows[0]
+    assert len(rows) == 2
+    assert rows[0]["response"] == "Built"
+    row = rows[1]
     assert row["prompt"] == "Build app"
     assert row["follow_up_prompts"] == ["Add tests", "Polish"]
-    assert row["responses"] == ["Built", "Tests added", "Polished"]
+    assert row["responses"] == ["Rebuilt", "Tests added", "Polished"]
     assert row["response"] == "Polished"
-    assert row["thinking"] == "planned\n\nchecked"
-    assert row["usage"] == {"input": 6, "output": 9, "reasoning": 0, "totalTokens": 15}
+    assert row["thinking"] == "replanned\n\nchecked"
+    assert row["usage"] == {"input": 6, "output": 10, "reasoning": 0, "totalTokens": 16}
     assert [message["role"] for message in row["messages"]] == [
         "user",
         "assistant",
@@ -2961,18 +2944,19 @@ def test_chat_runner_resume_extends_existing_chat_row_with_follow_ups(tmp_path: 
         "user",
         "assistant",
     ]
-    assert [call[0] for call in calls] == ["Add tests", "Polish"]
-    assert calls[0][1] == [
-        {"role": "user", "content": "Build app"},
-        {"role": "assistant", "content": "Built"},
-    ]
+    assert [call[0] for call in calls] == ["Build app", "Add tests", "Polish"]
+    assert calls[0][1] == []
     assert calls[1][1][-2:] == [
+        {"role": "user", "content": "Build app"},
+        {"role": "assistant", "content": "Rebuilt"},
+    ]
+    assert calls[2][1][-2:] == [
         {"role": "user", "content": "Add tests"},
         {"role": "assistant", "content": "Tests added"},
     ]
 
 
-def test_chat_runner_resume_extends_existing_partial_follow_up_row(tmp_path: Path):
+def test_chat_runner_resume_regenerates_existing_partial_follow_up_row(tmp_path: Path):
     config = Config(
         agent={"provider": "chat"},
         model=ModelConfig(model="gpt-4.1-mini"),
@@ -3004,20 +2988,32 @@ def test_chat_runner_resume_extends_existing_partial_follow_up_row(tmp_path: Pat
 
     def fake_turn(prompt: str, history: list[dict[str, str]] | None = None):
         calls.append((prompt, list(history or [])))
-        return "Polished", None, {"input": 1, "output": 1, "totalTokens": 2}, "gpt-4.1-mini"
+        if prompt == "Build app":
+            return "Rebuilt", None, {"input": 1, "output": 1, "totalTokens": 2}, "gpt-4.1-mini"
+        if prompt == "Add tests":
+            return "Retested", None, {"input": 1, "output": 1, "totalTokens": 2}, "gpt-4.1-mini"
+        if prompt == "Polish":
+            return "Polished", None, {"input": 1, "output": 1, "totalTokens": 2}, "gpt-4.1-mini"
+        raise AssertionError(f"unexpected prompt: {prompt}")
 
     prompt_input = PromptInput(prompt="Build app", follow_up_prompts=["Add tests", "Polish"])
     with patch.object(runner, "_request_chat_turn", side_effect=fake_turn):
         assert runner.run_all(max_concurrency=1, prompt_inputs=[prompt_input], resume=True) == [destination]
 
     rows = [json.loads(line) for line in destination.read_text(encoding="utf-8").splitlines()]
-    assert len(rows) == 1
-    assert rows[0]["follow_up_prompts"] == ["Add tests", "Polish"]
-    assert rows[0]["responses"] == ["Built", "Tests added", "Polished"]
-    assert [call[0] for call in calls] == ["Polish"]
-    assert calls[0][1][-2:] == [
+    assert len(rows) == 2
+    assert rows[0]["follow_up_prompts"] == ["Add tests"]
+    assert rows[1]["follow_up_prompts"] == ["Add tests", "Polish"]
+    assert rows[1]["responses"] == ["Rebuilt", "Retested", "Polished"]
+    assert [call[0] for call in calls] == ["Build app", "Add tests", "Polish"]
+    assert calls[0][1] == []
+    assert calls[1][1][-2:] == [
+        {"role": "user", "content": "Build app"},
+        {"role": "assistant", "content": "Rebuilt"},
+    ]
+    assert calls[2][1][-2:] == [
         {"role": "user", "content": "Add tests"},
-        {"role": "assistant", "content": "Tests added"},
+        {"role": "assistant", "content": "Retested"},
     ]
 
 

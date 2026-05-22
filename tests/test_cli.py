@@ -241,7 +241,7 @@ api:
         assert "skipping 1 configured prompts" in result.output
 
 
-def test_generate_command_writes_readme_for_partial_outputs_on_failure(tmp_path: Path):
+def test_generate_command_writes_readme_for_completed_outputs_on_failure(tmp_path: Path):
     config_file = tmp_path / "config.yaml"
     config_file.write_text(f"""
 agent:
@@ -274,7 +274,7 @@ api:
         result = runner.invoke(app, ["generate", "-c", str(config_file)])
 
         assert result.exit_code == 1
-        assert "Wrote README for partial outputs" in result.output
+        assert "Wrote README for completed outputs" in result.output
         assert "Error: boom" in result.output
         assert (output_dir / "README.md").exists()
 
@@ -342,7 +342,7 @@ api:
         mock_api.upload_folder.assert_not_called()
 
 
-def test_generate_command_prompts_before_publishing_partial_outputs_and_defaults_no(tmp_path: Path):
+def test_generate_command_prompts_before_publishing_completed_outputs_and_defaults_no(tmp_path: Path):
     config_file = tmp_path / "config.yaml"
     config_file.write_text(f"""
 agent:
@@ -378,9 +378,9 @@ api:
         result = runner.invoke(app, ["generate", "-c", str(config_file)], input="\n")
 
         assert result.exit_code == 1
-        assert "Wrote README for partial outputs" in result.output
+        assert "Wrote README for completed outputs" in result.output
         assert "Upload successful traces to Hugging Face dataset armand0e/test-dataset?" in result.output
-        assert "Skipping Hugging Face upload for partial outputs" in result.output
+        assert "Skipping Hugging Face upload for completed outputs" in result.output
         mock_api_cls.assert_not_called()
 
 
@@ -419,7 +419,7 @@ api:
         result = runner.invoke(app, ["generate", "-c", str(config_file)])
 
         assert result.exit_code == 130
-        assert "Wrote README for partial outputs" in result.output
+        assert "Wrote README for completed outputs" in result.output
         assert "Upload successful traces to Hugging Face dataset" not in result.output
         assert "Skipping Hugging Face upload for interrupted run" in result.output
         assert 'hf upload armand0e/test-dataset . . --repo-type dataset --exclude "partials/**"' in result.output
@@ -427,7 +427,7 @@ api:
         mock_api_cls.assert_not_called()
 
 
-def test_generate_command_can_publish_partial_outputs_after_failure(tmp_path: Path):
+def test_generate_command_can_publish_completed_outputs_after_failure(tmp_path: Path):
     config_file = tmp_path / "config.yaml"
     config_file.write_text(f"""
 agent:
@@ -468,7 +468,8 @@ api:
         result = runner.invoke(app, ["generate", "-c", str(config_file)], input="y\n")
 
         assert result.exit_code == 1
-        assert "Published partial dataset: https://huggingface.co/datasets/armand0e/test-dataset" in result.output
+        assert "Published completed outputs:" in result.output
+        assert "https://huggingface.co/datasets/armand0e/test-dataset" in result.output
         mock_api.delete_file.assert_called_once_with(
             path_in_repo="tools.json",
             repo_id="armand0e/test-dataset",
