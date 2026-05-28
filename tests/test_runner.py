@@ -35,6 +35,16 @@ def _claude_home_from_command(command: list[str]) -> Path:
     raise AssertionError(f"Claude home mount not found in command: {command}")
 
 
+def _hermes_home_from_command(command: list[str]) -> Path:
+    for index, item in enumerate(command):
+        if item == "-v" and index + 1 < len(command):
+            mount = command[index + 1]
+            suffix = ":/home/codex/.hermes"
+            if mount.endswith(suffix):
+                return Path(mount[: -len(suffix)])
+    raise AssertionError(f"Hermes home mount not found in command: {command}")
+
+
 def _write_fake_claude_native_session(
     command: list[str],
     *,
@@ -78,6 +88,79 @@ def _write_fake_claude_native_session(
         },
     ]
     session_file.write_text(
+        "\n".join(json.dumps(row, separators=(",", ":")) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_fake_hermes_state_db(home_dir: Path, *, prompt: str = "Build app", answer: str = "done") -> None:
+    home_dir.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(home_dir / "state.db")
+    connection.executescript(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT,
+            model TEXT,
+            model_config TEXT,
+            system_prompt TEXT,
+            parent_session_id TEXT,
+            started_at REAL,
+            message_count INTEGER,
+            tool_call_count INTEGER,
+            input_tokens INTEGER,
+            output_tokens INTEGER,
+            has_finished INTEGER
+        );
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT,
+            role TEXT,
+            content TEXT,
+            timestamp REAL
+        );
+        """
+    )
+    connection.execute(
+        "INSERT INTO sessions VALUES (?, 'cli', 'codex-mini-latest', '{}', '', NULL, ?, 2, 0, 1, 1, 1)",
+        ("hermes-session", 1_778_672_000),
+    )
+    connection.executemany(
+        "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+        [
+            ("hermes-session", "user", prompt, 1_778_672_000),
+            ("hermes-session", "assistant", answer, 1_778_672_001),
+        ],
+    )
+    connection.commit()
+    connection.close()
+
+
+def _write_fake_pi_native_session(path: Path, turns: list[tuple[str, str]]) -> None:
+    rows: list[dict[str, object]] = [{"type": "session", "id": "pi-session"}]
+    for index, (prompt, answer) in enumerate(turns, start=1):
+        rows.extend(
+            [
+                {
+                    "type": "message",
+                    "id": f"user-{index}",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": prompt}],
+                    },
+                },
+                {
+                    "type": "message",
+                    "id": f"assistant-{index}",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": answer}],
+                    },
+                },
+            ]
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
         "\n".join(json.dumps(row, separators=(",", ":")) for row in rows) + "\n",
         encoding="utf-8",
     )
@@ -185,6 +268,8 @@ def test_codex_config_setup(tmp_path: Path):
     assert '[mcp_servers."filesystem"]' in content
     assert 'command = "npx"' in content
     assert 'args = ["-y", "mcp-server"]' in content
+    assert oct(codex_home.stat().st_mode & 0o777) == "0o777"
+    assert oct(config_file.stat().st_mode & 0o777) == "0o666"
 
 
 def test_run_session_command_generation():
@@ -250,6 +335,55 @@ def test_run_session_timeout():
             runner.run_session("Test prompt")
 
 
+def test_codex_run_session_salvages_complete_trace_after_nonzero_exit(tmp_path: Path):
+    config = Config(output={"traces_dir": tmp_path / "output", "sandbox_dir": tmp_path / "sandbox"})
+
+    with patch.object(CodexRunner, '_ensure_image'):
+        runner = CodexRunner(config)
+
+    trace_path = tmp_path / "output" / "codex.jsonl"
+    trace_path.parent.mkdir(parents=True)
+    trace_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "session_meta", "payload": {"id": "codex-salvage"}}),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "Build app"}],
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "Done"}],
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    exit_error = subprocess.CalledProcessError(1, ["codex"], output="", stderr="exited after writing trace")
+
+    with patch.object(runner, "_run_process", side_effect=exit_error), \
+         patch.object(runner, "_extract_session_file", return_value=trace_path) as mock_extract, \
+         patch.object(runner, "_copy_workspace_snapshot") as mock_copy_snapshot:
+        result = runner.run_session("Build app", "codex-salvage")
+
+    assert result == trace_path
+    mock_extract.assert_called_once()
+    mock_copy_snapshot.assert_called_once()
+
+
 def test_docker_runners_keep_long_prompt_out_of_host_command_line(tmp_path: Path):
     long_prompt = "x" * 40000
 
@@ -276,11 +410,15 @@ def test_docker_runners_keep_long_prompt_out_of_host_command_line(tmp_path: Path
         captured_workspace = workspace
 
     def assert_pi_prompt_file_before_cleanup(*args, **kwargs) -> None:
+        command = args[0]
+        mounts = [command[index + 1] for index, item in enumerate(command) if item == "-v"]
+        session_mount = next(mount for mount in mounts if mount.endswith(":/home/codex/pi-sessions"))
+        session_dir = Path(session_mount.rsplit(":", maxsplit=1)[0])
         assert captured_workspace is not None
         assert (captured_workspace / ".teich-prompt.txt").read_text(encoding="utf-8") == long_prompt
+        _write_fake_pi_native_session(session_dir / "trace.jsonl", [(long_prompt, "Done")])
 
     with patch.object(pi_runner, '_run_process', side_effect=assert_pi_prompt_file_before_cleanup) as mock_pi_run_process, \
-         patch.object(pi_runner, '_extract_session_file', return_value=tmp_path / "pi-output" / "trace.jsonl"), \
          patch.object(pi_runner, '_copy_workspace_snapshot'), \
          patch.object(pi_runner, '_write_pi_agent_settings'), \
          patch.object(pi_runner, '_write_pi_project_settings', side_effect=capture_project_settings):
@@ -317,6 +455,7 @@ def test_claude_code_runner_uses_stream_json_and_prompt_file(tmp_path: Path):
     assert "--output-format stream-json" in command_text
     assert "--permission-mode bypassPermissions" in command_text
     assert "< /workspace/.teich-prompt.txt" in command_text
+    assert "chmod -R a+rwX /home/codex/.claude" in command_text
     assert "ANTHROPIC_API_KEY=sk-ant-test" in command
     rows = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
     assert rows[0]["type"] == "user"
@@ -366,6 +505,116 @@ def test_claude_code_runner_uses_openrouter_anthropic_skin_auth(tmp_path: Path):
     assert rows[0]["type"] == "user"
     assert rows[0]["message"]["content"] == "smoke"
     assert rows[1]["message"]["model"] == "minimax/minimax-m2.5:free"
+
+
+def test_claude_code_runner_uses_proxy_for_custom_non_claude_model(tmp_path: Path):
+    config = Config(
+        agent={"provider": "claude-code"},
+        api=APIConfig(
+            provider="openai",
+            api_key="none",
+            base_url="https://lm.gptbox.dev/v1",
+        ),
+        model=ModelConfig(model="Opus-Agent", approval_policy="never"),
+        output={"traces_dir": tmp_path / "output", "sandbox_dir": tmp_path / "sandbox"},
+    )
+    with patch.object(ClaudeCodeRunner, "_ensure_image"):
+        runner = ClaudeCodeRunner(config)
+
+    with patch.object(runner, "_run_external_process") as mock_run, \
+         patch.object(runner, "_extract_native_session_file", return_value=tmp_path / "output" / "trace.jsonl"), \
+         patch.object(runner, "_copy_workspace_snapshot"):
+        runner.run_session("smoke", "claude-custom-session")
+
+    command = mock_run.call_args.args[0]
+    command_text = " ".join(command)
+    assert "ANTHROPIC_AUTH_TOKEN=none" in command
+    assert "ANTHROPIC_API_KEY=" in command
+    assert "OPENAI_API_KEY=none" in command
+    assert "ANTHROPIC_BASE_URL=http://127.0.0.1:17891" in command
+    assert "TEICH_CLAUDE_PROXY_TARGET=https://lm.gptbox.dev/v1" in command
+    assert "TEICH_CLAUDE_PROXY_TARGET_MODEL=Opus-Agent" in command
+    assert "--model claude-sonnet-4-6" in command_text
+    assert "--model Opus-Agent" not in command_text
+
+
+def test_claude_code_run_session_salvages_complete_trace_after_nonzero_exit(tmp_path: Path):
+    config = Config(
+        agent={"provider": "claude-code"},
+        api=APIConfig(provider="anthropic", api_key="sk-ant-test"),
+        model=ModelConfig(model="claude-sonnet-4-6", approval_policy="never"),
+        output={"traces_dir": tmp_path / "output", "sandbox_dir": tmp_path / "sandbox"},
+    )
+    with patch.object(ClaudeCodeRunner, "_ensure_image"):
+        runner = ClaudeCodeRunner(config)
+
+    trace_path = tmp_path / "output" / "claude.jsonl"
+    trace_path.parent.mkdir(parents=True)
+    trace_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "user", "sessionId": "claude-salvage", "message": {"role": "user", "content": "Build app"}}),
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "sessionId": "claude-salvage",
+                        "message": {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "Done"}],
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    exit_error = subprocess.CalledProcessError(1, ["claude"], output="", stderr="exited after writing trace")
+
+    with patch.object(runner, "_run_external_process", side_effect=exit_error), \
+         patch.object(runner, "_extract_native_session_file", return_value=trace_path) as mock_extract, \
+         patch.object(runner, "_copy_workspace_snapshot") as mock_copy_snapshot:
+        result = runner.run_session("Build app", "claude-salvage")
+
+    assert result == trace_path
+    mock_extract.assert_called_once()
+    mock_copy_snapshot.assert_called_once()
+
+
+def test_claude_code_extract_makes_native_session_tree_readable(tmp_path: Path):
+    config = Config(
+        agent={"provider": "claude-code"},
+        output={"traces_dir": tmp_path / "output", "sandbox_dir": tmp_path / "sandbox"},
+    )
+    with patch.object(ClaudeCodeRunner, "_ensure_image"):
+        runner = ClaudeCodeRunner(config)
+
+    home_dir = tmp_path / "home"
+    session_file = home_dir / "projects" / "-workspace" / "native-session.jsonl"
+    session_file.parent.mkdir(parents=True)
+    session_file.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+                "sessionId": "native-session",
+                "timestamp": "2026-05-13T00:00:00.000Z",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    session_file.chmod(0o600)
+
+    result = runner._extract_native_session_file(
+        "native-session",
+        home_dir,
+        set(),
+        datetime.fromtimestamp(0, tz=timezone.utc),
+    )
+
+    assert result.read_text(encoding="utf-8").strip()
+    assert oct(session_file.stat().st_mode & 0o777) == "0o666"
 
 
 def test_claude_code_runner_uses_continue_for_followups(tmp_path: Path):
@@ -430,7 +679,12 @@ def test_hermes_runner_uses_chat_query_and_prompt_file(tmp_path: Path):
     )
     with patch.object(HermesRunner, "_ensure_image"):
         runner = HermesRunner(config)
-    with patch.object(runner, "_run_external_process", return_value=("done", "")) as mock_run, \
+
+    def fake_run(command: list[str], _container_name: str | None):
+        _write_fake_hermes_state_db(_hermes_home_from_command(command), prompt=long_prompt, answer="done")
+        return "session_id: hermes-session\n", ""
+
+    with patch.object(runner, "_run_external_process", side_effect=fake_run) as mock_run, \
          patch.object(runner, "_copy_workspace_snapshot"):
         trace_path = runner.run_session(long_prompt, "hermes-session")
 
@@ -444,10 +698,12 @@ def test_hermes_runner_uses_chat_query_and_prompt_file(tmp_path: Path):
     assert '--source teich -q "$(cat /workspace/.teich-prompt.txt)"' in command_text
     assert "OPENROUTER_API_KEY=sk-or-test" in command
     rows = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
-    assert rows[0]["payload"]["source"] == "hermes-agent"
-    assert rows[0]["payload"]["model_provider"] == "openrouter"
-    assert rows[-1]["role"] == "assistant"
-    assert rows[-1]["content"] == "done"
+    assert rows[0]["source"] == "cli"
+    assert rows[0]["model_provider"] == "openrouter"
+    assert rows[0]["messages"][0]["role"] == "user"
+    assert rows[0]["messages"][0]["content"] == long_prompt
+    assert rows[0]["messages"][1]["role"] == "assistant"
+    assert rows[0]["messages"][1]["content"] == "done"
 
 
 def test_hermes_runner_writes_custom_endpoint_runtime_config(tmp_path: Path):
@@ -614,16 +870,14 @@ def test_hermes_runner_exports_delegated_sessions_as_separate_files(tmp_path: Pa
     rows_by_session = {row["id"]: row for row in rows}
     parent_row = rows_by_session["parent-session"]
     child_row = rows_by_session["child-session"]
-    parent_meta = parent_row["metadata"]
-    child_meta = child_row["metadata"]
-    assert set(parent_row) == {"id", "task", "traces", "tools", "metadata"}
-    assert parent_meta["source"] == "cli"
-    assert parent_meta["parent_session_id"] is None
-    assert child_meta["parent_session_id"] == "parent-session"
-    assert child_row["task"] == "sub task"
-    assert child_row["traces"][0] == {"from": "human", "value": "sub task"}
-    assert child_row["traces"][1] == {"from": "gpt", "value": "subagent smoke ok"}
-    assert any(tool["function"]["name"] == "delegate_task" for tool in child_row["tools"])
+    assert parent_row["source"] == "cli"
+    assert parent_row["parent_session_id"] is None
+    assert child_row["parent_session_id"] == "parent-session"
+    assert child_row["messages"][0]["role"] == "user"
+    assert child_row["messages"][0]["content"] == "sub task"
+    assert child_row["messages"][1]["role"] == "assistant"
+    assert child_row["messages"][1]["content"] == "subagent smoke ok"
+    assert parent_row["messages"][1]["tool_calls"][0]["function"]["name"] == "delegate_task"
 
 
 def test_hermes_runner_exports_current_state_db_fields_as_native_rows(tmp_path: Path):
@@ -763,21 +1017,19 @@ def test_hermes_runner_exports_current_state_db_fields_as_native_rows(tmp_path: 
 
     assert len(rows) == 1
     assert rows[0]["id"] == "current-session"
-    assert rows[0]["task"] == "inspect"
-    assert any(tool["function"]["name"] == "read_file" for tool in rows[0]["tools"])
-    metadata = rows[0]["metadata"]
-    assert metadata["source"] == "cli"
-    assert metadata["teich_export_status"] == "completed"
-    assert metadata["teich_partial"] is False
-    assert metadata["total_tokens"] == 14
-    assert metadata["estimated_cost_usd"] == 0.001
-    assert metadata["ended_at"] == 1_778_672_003
-    assert rows[0]["traces"][0] == {"from": "system", "value": "System for Hermes"}
-    assert rows[0]["traces"][1] == {"from": "human", "value": "inspect"}
-    assert rows[0]["traces"][2]["from"] == "gpt"
-    assert "<think>\nNeed to inspect the README.\n</think>" in rows[0]["traces"][2]["value"]
-    assert '"name": "read_file"' in rows[0]["traces"][2]["value"]
-    assert '"path": "README.md"' in rows[0]["traces"][2]["value"]
+    assert rows[0]["source"] == "cli"
+    assert rows[0]["teich_export_status"] == "completed"
+    assert rows[0]["teich_partial"] is False
+    assert rows[0]["total_tokens"] == 14
+    assert rows[0]["estimated_cost_usd"] == 0.001
+    assert rows[0]["ended_at"] == 1_778_672_003
+    assert rows[0]["system_prompt"] == "System for Hermes"
+    assert rows[0]["messages"][0]["role"] == "user"
+    assert rows[0]["messages"][0]["content"] == "inspect"
+    assert rows[0]["messages"][1]["role"] == "assistant"
+    assert rows[0]["messages"][1]["reasoning_content"] == "Need to inspect the README."
+    assert rows[0]["messages"][1]["tool_calls"][0]["function"]["name"] == "read_file"
+    assert rows[0]["messages"][1]["tool_calls"][0]["function"]["arguments"] == {"path": "README.md"}
 
 
 def _write_minimal_hermes_delegation_state_db(home_dir: Path) -> None:
@@ -827,7 +1079,7 @@ def _write_minimal_hermes_delegation_state_db(home_dir: Path) -> None:
     connection.close()
 
 
-def test_hermes_runner_discards_failed_state_db_exports(tmp_path: Path):
+def test_hermes_runner_salvages_complete_state_db_after_nonzero_exit(tmp_path: Path):
     config = Config(
         agent={"provider": "hermes"},
         api=APIConfig(provider="openrouter"),
@@ -850,10 +1102,11 @@ def test_hermes_runner_discards_failed_state_db_exports(tmp_path: Path):
     with patch.object(runner, "_prepare_workspace", return_value=(workspace_root, workspace)), \
          patch("teich.runner.tempfile.mkdtemp", return_value=str(home_dir)), \
          patch.object(runner, "_run_external_process", side_effect=fail_after_writing_state_db):
-        with pytest.raises(RuntimeError, match="provider failed"):
-            runner.run_session("delegate this", "hermes-session")
+        result = runner.run_session("delegate this", "hermes-session")
 
-    assert not list((tmp_path / "output").rglob("*.jsonl"))
+    assert result == tmp_path / "output" / "hermes-agent.jsonl"
+    rows = [json.loads(line) for line in result.read_text(encoding="utf-8").splitlines()]
+    assert [row["id"] for row in rows] == ["parent-session"]
 
 
 def test_run_process_removes_named_container_on_failure():
@@ -887,8 +1140,14 @@ def test_run_process_removes_named_container_on_failure():
     )
 
 
-def test_codex_run_session_discards_partial_trace_on_failure(tmp_path: Path):
-    config = Config(output={"traces_dir": tmp_path / "output", "sandbox_dir": tmp_path / "sandbox"})
+def test_codex_run_session_moves_partial_trace_to_failures_on_failure(tmp_path: Path):
+    config = Config(
+        output={
+            "traces_dir": tmp_path / "output",
+            "sandbox_dir": tmp_path / "sandbox",
+            "failures_dir": tmp_path / "failures",
+        }
+    )
 
     with patch.object(CodexRunner, '_ensure_image'):
         runner = CodexRunner(config)
@@ -914,6 +1173,9 @@ def test_codex_run_session_discards_partial_trace_on_failure(tmp_path: Path):
             runner.run_session("Test prompt", "test-session")
 
     assert not list((tmp_path / "output").rglob("*.jsonl"))
+    failed_traces = list((tmp_path / "failures").glob("*.jsonl"))
+    assert len(failed_traces) == 1
+    assert failed_traces[0].name == "partial.jsonl"
 
 
 def test_run_all_with_no_prompts():
@@ -973,7 +1235,7 @@ def test_codex_run_session_runs_follow_up_prompts_by_resuming_session():
         container_workspace = mounted_path(command, "/workspace")
         codex_home = mounted_path(command, "/home/codex/.codex")
 
-    def record_process(command, *args) -> None:
+    def record_process(command, *args, **kwargs) -> None:
         assert command[:3] == ["docker", "exec", "-i"]
         assert "--user" in command
         assert "-w" in command
@@ -1041,6 +1303,7 @@ def test_pi_run_session_runs_follow_up_prompts_by_continuing_session(tmp_path: P
     captured_workspace = None
     prompt_file_values = []
     commands = []
+    run_process_session_dirs = []
     container_workspace = None
     container_session_dir = None
 
@@ -1066,13 +1329,18 @@ def test_pi_run_session_runs_follow_up_prompts_by_continuing_session(tmp_path: P
         assert "-w" in command
         assert command[command.index("-w") + 1] == "/workspace"
         assert "teich-pi-pi-session" in command
+        run_process_session_dirs.append(args[2])
         assert container_workspace is not None
         commands.append(command)
         prompt_file_values.append((captured_workspace / ".teich-prompt.txt").read_text(encoding="utf-8"))
+        assert container_session_dir is not None
+        trace_path = container_session_dir / "session.jsonl"
         if prompt_file_values[-1] == "Build app":
             (container_workspace / "created-by-first-turn.txt").write_text("persisted", encoding="utf-8")
+            _write_fake_pi_native_session(trace_path, [("Build app", "Built")])
         else:
             assert (container_workspace / "created-by-first-turn.txt").read_text(encoding="utf-8") == "persisted"
+            _write_fake_pi_native_session(trace_path, [("Build app", "Built"), ("Add tests", "Done")])
 
     prompt_input = PromptInput(prompt="Build app", follow_up_prompts=["Add tests"])
 
@@ -1080,11 +1348,12 @@ def test_pi_run_session_runs_follow_up_prompts_by_continuing_session(tmp_path: P
          patch.object(runner, "_write_pi_project_settings", side_effect=capture_project_settings), \
          patch.object(runner, "_run_process", side_effect=record_prompt_file), \
          patch.object(runner, "_remove_container") as mock_remove_container, \
-         patch.object(runner, "_extract_session_file", return_value=tmp_path / "output" / "pi.jsonl"), \
          patch.object(runner, "_copy_workspace_snapshot"):
-        runner.run_session("Build app", "pi-session", prompt_input=prompt_input)
+        result = runner.run_session("Build app", "pi-session", prompt_input=prompt_input)
 
+    assert result == tmp_path / "output" / "session.jsonl"
     assert prompt_file_values == ["Build app", "Add tests"]
+    assert run_process_session_dirs == [None, None]
     assert "--continue" not in " ".join(commands[0])
     assert "--continue" in " ".join(commands[1])
     assert mock_start_container.call_count == 1
@@ -1112,13 +1381,61 @@ def test_pi_run_session_cleans_persistent_container_after_followup_failure(tmp_p
     assert "teich-pi-pi-failure" not in runner._active_containers
 
 
-def test_pi_run_session_salvages_valid_trace_after_last_turn_nonzero_exit(tmp_path: Path):
+def test_pi_run_session_retries_followup_without_removing_persistent_container(tmp_path: Path):
     config = Config(agent={"provider": "pi"}, output={"traces_dir": tmp_path / "output", "sandbox_dir": tmp_path / "sandbox"})
 
     with patch.object(PiRunner, '_ensure_image'):
         runner = PiRunner(config)
 
-    trace_path = tmp_path / "output" / "pi.jsonl"
+    container_session_dir = None
+    prompt_input = PromptInput(prompt="Build app", follow_up_prompts=["Add tests"])
+
+    def mounted_path(command: list[str], target: str) -> Path:
+        mounts = [command[index + 1] for index, item in enumerate(command) if item == "-v"]
+        match = next(mount for mount in mounts if mount.endswith(f":{target}"))
+        return Path(match.rsplit(":", maxsplit=1)[0])
+
+    def start_container(command: list[str]) -> None:
+        nonlocal container_session_dir
+        container_session_dir = mounted_path(command, "/home/codex/pi-sessions")
+
+    def write_trace(turns: list[tuple[str, str]]) -> None:
+        assert container_session_dir is not None
+        _write_fake_pi_native_session(container_session_dir / "session.jsonl", turns)
+
+    calls = 0
+
+    def run_turn(command, *args, **kwargs) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            write_trace([("Build app", "Built")])
+            return
+        if calls == 2:
+            assert kwargs["remove_container_on_error"] is False
+            assert "--continue" in " ".join(command)
+            write_trace([("Build app", "Built")])
+            raise subprocess.CalledProcessError(1, command, output="", stderr="provider stopped early")
+        write_trace([("Build app", "Built"), ("Add tests", "Done")])
+
+    with patch.object(runner, "_start_container", side_effect=start_container), \
+         patch.object(runner, "_run_process", side_effect=run_turn) as mock_run_process, \
+         patch.object(runner, "_remove_container") as mock_remove_container, \
+         patch.object(runner, "_write_pi_project_settings"), \
+         patch.object(runner, "_copy_workspace_snapshot"):
+        result = runner.run_session("Build app", "pi-followup-retry", prompt_input=prompt_input)
+
+    assert result == tmp_path / "output" / "session.jsonl"
+    assert mock_run_process.call_count == 3
+    mock_remove_container.assert_called_once_with("teich-pi-pi-followup-retry")
+
+
+def test_pi_run_session_salvages_complete_trace_after_nonzero_exit(tmp_path: Path):
+    config = Config(agent={"provider": "pi"}, output={"traces_dir": tmp_path / "output", "sandbox_dir": tmp_path / "sandbox"})
+
+    with patch.object(PiRunner, '_ensure_image'):
+        runner = PiRunner(config)
+
     exit_error = subprocess.CalledProcessError(
         1,
         ["pi"],
@@ -1126,19 +1443,102 @@ def test_pi_run_session_salvages_valid_trace_after_last_turn_nonzero_exit(tmp_pa
         stderr="provider reported a transient error after writing trace",
     )
 
-    with patch.object(runner, "_run_process", side_effect=exit_error), \
-         patch.object(runner, "_extract_session_file", return_value=trace_path) as mock_extract, \
+    def mounted_path(command: list[str], target: str) -> Path:
+        mounts = [command[index + 1] for index, item in enumerate(command) if item == "-v"]
+        match = next(mount for mount in mounts if mount.endswith(f":{target}"))
+        return Path(match.rsplit(":", maxsplit=1)[0])
+
+    def fail_after_writing_complete_trace(command, *args, **kwargs) -> None:
+        session_dir = mounted_path(command, "/home/codex/pi-sessions")
+        _write_fake_pi_native_session(session_dir / "pi.jsonl", [("Build app", "Done")])
+        raise exit_error
+
+    with patch.object(runner, "_run_process", side_effect=fail_after_writing_complete_trace) as mock_run_process, \
          patch.object(runner, "_copy_workspace_snapshot") as mock_copy_snapshot, \
          patch.object(runner, "_write_pi_project_settings"):
         result = runner.run_session("Build app", "pi-salvage")
 
-    assert result == trace_path
-    mock_extract.assert_called_once()
+    assert result == tmp_path / "output" / "pi.jsonl"
+    mock_run_process.assert_called_once()
     mock_copy_snapshot.assert_called_once()
 
 
-def test_pi_run_session_does_not_salvage_nonzero_exit_before_followup_turn(tmp_path: Path):
+def test_pi_run_session_retries_incomplete_tool_turn_before_exporting(tmp_path: Path):
     config = Config(agent={"provider": "pi"}, output={"traces_dir": tmp_path / "output", "sandbox_dir": tmp_path / "sandbox"})
+
+    with patch.object(PiRunner, '_ensure_image'):
+        runner = PiRunner(config)
+
+    commands: list[list[str]] = []
+
+    def mounted_path(command: list[str], target: str) -> Path:
+        mounts = [command[index + 1] for index, item in enumerate(command) if item == "-v"]
+        match = next(mount for mount in mounts if mount.endswith(f":{target}"))
+        return Path(match.rsplit(":", maxsplit=1)[0])
+
+    def write_incomplete_tool_trace(path: Path) -> None:
+        rows = [
+            {"type": "session", "id": "pi-session"},
+            {
+                "type": "message",
+                "id": "user-1",
+                "message": {"role": "user", "content": [{"type": "text", "text": "Build app"}]},
+            },
+            {
+                "type": "message",
+                "id": "assistant-1",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "toolCall", "id": "call-1", "name": "bash", "arguments": {"command": "ls"}}],
+                },
+            },
+            {
+                "type": "message",
+                "id": "tool-1",
+                "message": {
+                    "role": "toolResult",
+                    "toolCallId": "call-1",
+                    "toolName": "bash",
+                    "content": [{"type": "text", "text": "ok"}],
+                },
+            },
+        ]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "\n".join(json.dumps(row, separators=(",", ":")) for row in rows) + "\n",
+            encoding="utf-8",
+        )
+
+    def run_then_retry(command, *args, **kwargs) -> None:
+        commands.append(command)
+        session_dir = mounted_path(command, "/home/codex/pi-sessions")
+        trace_path = session_dir / "pi.jsonl"
+        if len(commands) == 1:
+            write_incomplete_tool_trace(trace_path)
+            raise subprocess.CalledProcessError(1, command, output="", stderr="provider stopped early")
+        _write_fake_pi_native_session(trace_path, [("Build app", "Recovered")])
+
+    with patch.object(runner, "_run_process", side_effect=run_then_retry) as mock_run_process, \
+         patch.object(runner, "_copy_workspace_snapshot"), \
+         patch.object(runner, "_write_pi_project_settings"):
+        result = runner.run_session("Build app", "pi-retry")
+
+    assert result == tmp_path / "output" / "pi.jsonl"
+    assert mock_run_process.call_count == 2
+    assert "--continue" not in " ".join(commands[0])
+    assert "--continue" in " ".join(commands[1])
+    assert not list((tmp_path / "failures").glob("*.jsonl"))
+
+
+def test_pi_run_session_quarantines_nonzero_exit_before_followup_turn(tmp_path: Path):
+    config = Config(
+        agent={"provider": "pi"},
+        output={
+            "traces_dir": tmp_path / "output",
+            "sandbox_dir": tmp_path / "sandbox",
+            "failures_dir": tmp_path / "failures",
+        },
+    )
 
     with patch.object(PiRunner, '_ensure_image'):
         runner = PiRunner(config)
@@ -1147,14 +1547,14 @@ def test_pi_run_session_does_not_salvage_nonzero_exit_before_followup_turn(tmp_p
     exit_error = subprocess.CalledProcessError(1, ["pi"], output="", stderr="first turn failed")
 
     with patch.object(runner, "_start_container"), \
-         patch.object(runner, "_run_process", side_effect=exit_error), \
-         patch.object(runner, "_extract_session_file") as mock_extract, \
-         patch.object(runner, "_remove_container"), \
+         patch.object(runner, "_run_process", side_effect=exit_error) as mock_run_process, \
+         patch.object(runner, "_remove_container") as mock_remove_container, \
          patch.object(runner, "_write_pi_project_settings"):
         with pytest.raises(RuntimeError, match="first turn failed"):
             runner.run_session("Build app", "pi-followup-nonzero", prompt_input=prompt_input)
 
-    mock_extract.assert_not_called()
+    assert mock_run_process.call_count == runner_module.AGENT_TURN_RETRY_LIMIT + 1
+    mock_remove_container.assert_called_once_with("teich-pi-pi-followup-nonzero")
 
 
 def test_pi_run_session_keeps_nonzero_failure_when_final_trace_is_invalid(tmp_path: Path):
@@ -1915,7 +2315,7 @@ def test_summarize_trace_file_estimates_codex_total_from_usage_delta(tmp_path: P
     assert metrics.est_total_tokens == 79
 
 
-def test_monitor_process_fails_fast_on_live_pi_tool_call_corruption(tmp_path: Path):
+def test_monitor_process_keeps_live_pi_tool_call_corruption_running(tmp_path: Path):
     config = Config(agent={"provider": "pi"}, output={"traces_dir": tmp_path / "output"})
     with patch.object(PiRunner, '_ensure_image'):
         runner = PiRunner(config)
@@ -1970,20 +2370,21 @@ def test_monitor_process_fails_fast_on_live_pi_tool_call_corruption(tmp_path: Pa
     stdout_handle = io.StringIO()
     stderr_handle = io.StringIO()
 
-    with pytest.raises(RuntimeError, match="malformed tool calls/results"):
-        runner._monitor_process(
-            process,
-            "session-id",
-            datetime.fromtimestamp(0, tz=timezone.utc),
-            session_dir,
-            None,
-            None,
-            stdout_handle,
-            stderr_handle,
-        )
+    process.poll.side_effect = [None, 0]
 
-    process.kill.assert_called_once()
-    process.wait.assert_called_once()
+    runner._monitor_process(
+        process,
+        "session-id",
+        datetime.fromtimestamp(0, tz=timezone.utc),
+        session_dir,
+        None,
+        None,
+        stdout_handle,
+        stderr_handle,
+    )
+
+    process.kill.assert_not_called()
+    process.wait.assert_not_called()
 
 
 def test_monitor_process_does_not_kill_live_pi_provider_error(tmp_path: Path):
@@ -2086,7 +2487,7 @@ def test_monitor_process_does_not_kill_live_pi_user_only_trace(tmp_path: Path):
     process.wait.assert_not_called()
 
 
-def test_pi_trace_with_model_error_is_rejected_before_export(tmp_path: Path):
+def test_pi_trace_with_model_error_is_copied_as_native_trace(tmp_path: Path):
     config = Config(agent={"provider": "pi"}, output={"traces_dir": tmp_path / "output"})
     with patch.object(PiRunner, '_ensure_image'):
         runner = PiRunner(config)
@@ -2119,13 +2520,12 @@ def test_pi_trace_with_model_error_is_rejected_before_export(tmp_path: Path):
     )
     destination = tmp_path / "output" / "bad-session.jsonl"
 
-    with pytest.raises(RuntimeError, match="model/provider error: 401 User not found"):
-        runner._copy_normalized_session_file(source, destination)
+    runner._copy_normalized_session_file(source, destination)
 
-    assert not destination.exists()
+    assert destination.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
 
 
-def test_pi_trace_with_user_only_turns_is_rejected_before_export(tmp_path: Path):
+def test_pi_trace_with_user_only_turns_is_copied_as_native_trace(tmp_path: Path):
     config = Config(agent={"provider": "pi"}, output={"traces_dir": tmp_path / "output"})
     with patch.object(PiRunner, '_ensure_image'):
         runner = PiRunner(config)
@@ -2163,13 +2563,12 @@ def test_pi_trace_with_user_only_turns_is_rejected_before_export(tmp_path: Path)
     destination = tmp_path / "output" / "user-only-session.jsonl"
     destination.parent.mkdir(parents=True)
 
-    with pytest.raises(RuntimeError, match="assistant response for 2 user turn"):
-        runner._copy_normalized_session_file(source, destination)
+    runner._copy_normalized_session_file(source, destination)
 
-    assert not destination.exists()
+    assert destination.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
 
 
-def test_pi_trace_with_terminal_length_stop_is_rejected_before_export(tmp_path: Path):
+def test_pi_trace_with_terminal_length_stop_is_copied_as_native_trace(tmp_path: Path):
     config = Config(agent={"provider": "pi"}, output={"traces_dir": tmp_path / "output"})
     with patch.object(PiRunner, '_ensure_image'):
         runner = PiRunner(config)
@@ -2208,10 +2607,9 @@ def test_pi_trace_with_terminal_length_stop_is_rejected_before_export(tmp_path: 
     destination = tmp_path / "output" / "length-session.jsonl"
     destination.parent.mkdir(parents=True)
 
-    with pytest.raises(RuntimeError, match="output token limit"):
-        runner._copy_normalized_session_file(source, destination)
+    runner._copy_normalized_session_file(source, destination)
 
-    assert not destination.exists()
+    assert destination.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
 
 
 def test_pi_trace_preserves_recovered_provider_error(tmp_path: Path):
@@ -2326,6 +2724,46 @@ def test_openai_custom_base_url_uses_non_reserved_provider_alias():
         assert 'model_providers.openai_compatible' in cmd_str
         assert 'model_provider="openai_compatible"' in cmd_str
         assert 'model_providers.openai=' not in cmd_str
+        assert 'local_provider_proxy.js' not in cmd_str
+        assert 'TEICH_LOCAL_PROVIDER_TARGET=https://lm.gptbox.dev/v1' not in cmd_str
+
+
+def test_codex_custom_endpoint_uses_placeholder_key_when_configured_as_none():
+    config = Config(
+        model=ModelConfig(model="Opus-Agent"),
+        api=APIConfig(
+            provider="openai",
+            base_url="https://lm.gptbox.dev/v1",
+            api_key="none",
+        ),
+    )
+
+    with patch.object(CodexRunner, '_ensure_image'):
+        runner = CodexRunner(config)
+
+    command, _proxy_target = runner._build_codex_docker_base_command(
+        Path("/workspace"),
+        Path("/tmp/codex-home"),
+        "teich-codex-test",
+    )
+
+    assert "OPENAI_API_KEY=none" in command
+
+
+def test_codex_copies_metadata_only_trace_without_export_validation(tmp_path: Path):
+    source = tmp_path / "source.jsonl"
+    destination = tmp_path / "dest.jsonl"
+    source.write_text(
+        json.dumps({"timestamp": "2026-05-22T00:00:00Z", "type": "session_meta", "payload": {"id": "s"}})
+        + "\n"
+        + json.dumps({"timestamp": "2026-05-22T00:00:00Z", "type": "event_msg", "payload": {"type": "task_complete"}})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    CodexRunner._copy_normalized_session_file(source, destination)
+
+    assert destination.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
 
 
 def test_lmstudio_provider_uses_native_oss_flags():
@@ -2433,11 +2871,16 @@ def test_run_session_clones_github_repo_into_pi_workspace(tmp_path: Path):
         nonlocal captured_workspace
         captured_workspace = workspace
 
+    def write_completed_trace(command, *args, **kwargs) -> None:
+        mounts = [command[index + 1] for index, item in enumerate(command) if item == "-v"]
+        session_mount = next(mount for mount in mounts if mount.endswith(":/home/codex/pi-sessions"))
+        session_dir = Path(session_mount.rsplit(":", maxsplit=1)[0])
+        _write_fake_pi_native_session(session_dir / "trace-1.jsonl", [("Fix the issue", "Done")])
+
     prompt_input = PromptInput(github_repo="armand0e/perplexica-mcp", prompt="Fix the issue")
 
     with patch.object(runner, '_clone_github_repo', side_effect=capture_clone) as mock_clone, \
-         patch.object(runner, '_run_process'), \
-         patch.object(runner, '_extract_session_file', return_value=tmp_path / 'output' / 'trace-1.jsonl'), \
+         patch.object(runner, '_run_process', side_effect=write_completed_trace), \
          patch.object(runner, '_copy_workspace_snapshot'), \
          patch.object(runner, '_write_pi_agent_settings'), \
          patch.object(runner, '_write_pi_project_settings', side_effect=capture_project_settings):
@@ -2449,7 +2892,7 @@ def test_run_session_clones_github_repo_into_pi_workspace(tmp_path: Path):
     assert captured_workspace == cloned_destination
 
 
-def test_copy_normalized_session_file_populates_reasoning_summary(tmp_path: Path):
+def test_copy_normalized_session_file_preserves_codex_native_reasoning_event(tmp_path: Path):
     source = tmp_path / "source.jsonl"
     destination = tmp_path / "destination.jsonl"
     source.write_text(
@@ -2488,14 +2931,10 @@ def test_copy_normalized_session_file_populates_reasoning_summary(tmp_path: Path
 
     CodexRunner._copy_normalized_session_file(source, destination)
 
-    events = [json.loads(line) for line in destination.read_text(encoding="utf-8").splitlines() if line]
-    assert events[0]["payload"]["summary"] == [
-        {"type": "summary_text", "text": "Use a direct factorial implementation."}
-    ]
-    assert events[1]["payload"]["type"] == "message"
+    assert destination.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
 
 
-def test_copy_normalized_session_file_unwraps_codex_prompt_file_user_message(tmp_path: Path):
+def test_copy_normalized_session_file_preserves_codex_native_prompt_file_user_message(tmp_path: Path):
     source = tmp_path / "source.jsonl"
     destination = tmp_path / "destination.jsonl"
     source.write_text(
@@ -2517,19 +2956,50 @@ def test_copy_normalized_session_file_unwraps_codex_prompt_file_user_message(tmp
         + "\n",
         encoding="utf-8",
     )
+    with source.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Done."}],
+                    },
+                }
+            )
+            + "\n"
+        )
 
     CodexRunner._copy_normalized_session_file(source, destination)
 
-    events = [json.loads(line) for line in destination.read_text(encoding="utf-8").splitlines() if line]
-    assert events[0]["payload"]["content"] == [
-        {
-            "type": "input_text",
-            "text": "Can you build me a dependency map for a software system?",
-        }
-    ]
+    assert destination.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
 
 
-def test_copy_normalized_session_file_converts_codex_custom_tool_events(tmp_path: Path):
+def test_copy_normalized_session_file_preserves_codex_user_only_trace(tmp_path: Path):
+    source = tmp_path / "source.jsonl"
+    destination = tmp_path / "destination.jsonl"
+    source.write_text(
+        json.dumps(
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Build app"}],
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    CodexRunner._copy_normalized_session_file(source, destination)
+
+    assert destination.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
+
+
+def test_copy_normalized_session_file_preserves_codex_native_custom_tool_events(tmp_path: Path):
     source = tmp_path / "source.jsonl"
     destination = tmp_path / "destination.jsonl"
     source.write_text(
@@ -2565,18 +3035,7 @@ def test_copy_normalized_session_file_converts_codex_custom_tool_events(tmp_path
 
     CodexRunner._copy_normalized_session_file(source, destination)
 
-    events = [json.loads(line) for line in destination.read_text(encoding="utf-8").splitlines() if line]
-    assert events[0]["payload"]["type"] == "function_call"
-    assert events[0]["payload"]["arguments"] == json.dumps(
-        {"patch": "*** Begin Patch\n*** Add File: app.py\n+print('hi')\n*** End Patch\n"},
-        ensure_ascii=False,
-    )
-    assert events[0]["payload"]["status"] == "completed"
-    assert events[1]["payload"] == {
-        "call_id": "call_patch",
-        "type": "function_call_output",
-        "output": "Success\n",
-    }
+    assert destination.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
 
 
 def test_pi_runner_builds_command_and_project_settings(tmp_path: Path):
@@ -2594,7 +3053,6 @@ def test_pi_runner_builds_command_and_project_settings(tmp_path: Path):
 
     runner._write_pi_agent_settings(tmp_path)
     settings = json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))
-    extension_source = (tmp_path / "extensions" / "teich_system_prompt.ts").read_text(encoding="utf-8")
     models = json.loads((tmp_path / "models.json").read_text(encoding="utf-8"))
 
     assert settings == {
@@ -2602,8 +3060,7 @@ def test_pi_runner_builds_command_and_project_settings(tmp_path: Path):
         "defaultModel": "claude-sonnet-4-20250514",
         "defaultThinkingLevel": "high",
     }
-    assert 'before_agent_start' in extension_source
-    assert 'ctx.getSystemPrompt()' in extension_source
+    assert not (tmp_path / "extensions").exists()
     assert models == {
         "providers": {
             "teich-anthropic": {
@@ -2665,8 +3122,15 @@ def test_pi_runner_resolves_pi_executable_from_path():
     assert PiRunner._resolve_pi_executable() == "pi"
 
 
-def test_pi_run_session_discards_partial_trace_on_failure(tmp_path: Path):
-    config = Config(agent={"provider": "pi"}, output={"traces_dir": tmp_path / "output", "sandbox_dir": tmp_path / "sandbox"})
+def test_pi_run_session_moves_partial_trace_to_failures_on_failure(tmp_path: Path):
+    config = Config(
+        agent={"provider": "pi"},
+        output={
+            "traces_dir": tmp_path / "output",
+            "sandbox_dir": tmp_path / "sandbox",
+            "failures_dir": tmp_path / "failures",
+        },
+    )
 
     with patch.object(PiRunner, '_ensure_image'):
         runner = PiRunner(config)
@@ -2695,6 +3159,9 @@ def test_pi_run_session_discards_partial_trace_on_failure(tmp_path: Path):
             runner.run_session("Test prompt", "test-session")
 
     assert not list((tmp_path / "output").rglob("*.jsonl"))
+    failed_traces = list((tmp_path / "failures").glob("*.jsonl"))
+    assert len(failed_traces) == 1
+    assert failed_traces[0].name == "partial.jsonl"
 
 
 def test_chat_runner_writes_structured_dataset_row_from_responses_api(tmp_path: Path):
@@ -2735,6 +3202,7 @@ def test_chat_runner_writes_structured_dataset_row_from_responses_api(tmp_path: 
     assert row["usage"]["totalTokens"] == 7
     request = mock_urlopen.call_args.args[0]
     assert request.full_url == "https://api.openai.com/v1/responses"
+    assert request.headers["User-agent"] == "teich"
     body = json.loads(request.data.decode("utf-8"))
     assert "instructions" not in body
 
@@ -2922,6 +3390,42 @@ def test_chat_runner_rejects_openai_compatible_error_payloads(tmp_path: Path, pa
             runner.run_session("Hello", "chat-session")
 
     assert not (tmp_path / "output" / "chat-session.jsonl").exists()
+
+
+def test_chat_runner_retries_transient_provider_error_before_marking_failed(tmp_path: Path):
+    config = Config(
+        agent={"provider": "chat"},
+        model=ModelConfig(model="gpt-4.1-mini"),
+        api=APIConfig(provider="openrouter", api_key="sk-test", wire_api="responses"),
+        output={"traces_dir": tmp_path / "output"},
+    )
+    runner = ChatRunner(config)
+    success = MagicMock()
+    success.read.return_value = json.dumps(
+        {
+            "model": "gpt-4.1-mini",
+            "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}],
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+        }
+    ).encode("utf-8")
+    success.__enter__.return_value = success
+    success.__exit__.return_value = False
+    transient_error = runner_module.HTTPError(
+        url="https://api.example.test/v1/responses",
+        code=429,
+        msg="Too Many Requests",
+        hdrs=None,
+        fp=io.BytesIO(b'{"error":{"message":"rate limited"}}'),
+    )
+
+    with patch("teich.runner.urlopen", side_effect=[transient_error, success]) as mock_urlopen, \
+         patch("teich.runner.time.sleep") as mock_sleep:
+        result = runner.run_session("Hello", "chat-retry")
+
+    assert mock_urlopen.call_count == 2
+    mock_sleep.assert_called_once()
+    row = json.loads(result.read_text(encoding="utf-8"))
+    assert row["response"] == "ok"
 
 
 def test_chat_runner_run_all_marks_api_error_as_failed_and_does_not_append_row(tmp_path: Path):
@@ -3338,6 +3842,29 @@ def test_resume_detects_completed_agent_follow_up_prompt_sets(tmp_path: Path):
     ]
 
 
+def test_completed_turns_rejects_trace_that_ends_on_tool_result():
+    incomplete = {
+        "messages": [
+            {"role": "user", "content": "Build app"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
+        ]
+    }
+    complete = {
+        "messages": [
+            *incomplete["messages"],
+            {"role": "assistant", "content": "Done"},
+        ]
+    }
+
+    assert not runner_module._training_example_completed_turns(incomplete, ["Build app"])
+    assert runner_module._training_example_completed_turns(complete, ["Build app"])
+
+
 def test_resume_deduplicates_new_configured_prompts(tmp_path: Path):
     output_dir = tmp_path / "output"
     output_dir.mkdir()
@@ -3410,20 +3937,43 @@ def test_resume_unwraps_teich_prompt_file_wrapper_from_completed_traces(tmp_path
     assert [item.prompt for item in pending] == ["Write tests"]
 
 
-def test_resume_ignores_partial_trace_directory(tmp_path: Path):
+def test_resume_ignores_non_data_trace_directories(tmp_path: Path):
     output_dir = tmp_path / "output"
     partials_dir = output_dir / "partials"
+    failures_dir = output_dir / "failures"
     partials_dir.mkdir(parents=True)
+    failures_dir.mkdir(parents=True)
     (partials_dir / "partial.jsonl").write_text(
         '{"type":"message","message":{"role":"user","content":[{"type":"text","text":"Fix bug"}]}}\n'
         '{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"Fixed"}]}}\n',
         encoding="utf-8",
     )
-    prompt_inputs = [PromptInput(prompt="Fix bug")]
+    (failures_dir / "failed.jsonl").write_text(
+        '{"type":"message","message":{"role":"user","content":[{"type":"text","text":"Build app"}]}}\n'
+        '{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"Built"}]}}\n',
+        encoding="utf-8",
+    )
+    prompt_inputs = [PromptInput(prompt="Fix bug"), PromptInput(prompt="Build app")]
 
     pending = pending_prompt_inputs_for_resume(prompt_inputs, output_dir)
 
-    assert [item.prompt for item in pending] == ["Fix bug"]
+    assert [item.prompt for item in pending] == ["Fix bug", "Build app"]
+
+
+def test_resume_ignores_configured_failures_dir_inside_output(tmp_path: Path):
+    output_dir = tmp_path / "output"
+    failed_dir = output_dir / "failed-traces"
+    failed_dir.mkdir(parents=True)
+    (failed_dir / "failed.jsonl").write_text(
+        '{"type":"message","message":{"role":"user","content":[{"type":"text","text":"Build app"}]}}\n'
+        '{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"Built"}]}}\n',
+        encoding="utf-8",
+    )
+    prompt_inputs = [PromptInput(prompt="Build app")]
+
+    pending = pending_prompt_inputs_for_resume(prompt_inputs, output_dir, excluded_dirs=[failed_dir])
+
+    assert [item.prompt for item in pending] == ["Build app"]
 
 
 def test_chat_runner_resume_appends_existing_chat_file(tmp_path: Path):
@@ -3950,7 +4500,7 @@ def test_pi_runner_extracts_saved_session_file(tmp_path: Path):
     assert result.read_text(encoding="utf-8") == '{"type":"session","id":"pi-session"}\n'
 
 
-def test_pi_runner_strips_provider_from_exported_trace(tmp_path: Path):
+def test_pi_runner_preserves_provider_in_native_exported_trace(tmp_path: Path):
     config = Config(agent={"provider": "pi"}, output={"traces_dir": tmp_path / "output"})
     with patch.object(PiRunner, '_ensure_image'):
         runner = PiRunner(config)
@@ -3991,22 +4541,10 @@ def test_pi_runner_strips_provider_from_exported_trace(tmp_path: Path):
         datetime.fromtimestamp(0, tz=timezone.utc),
     )
 
-    exported_events = [json.loads(line) for line in result.read_text(encoding="utf-8").splitlines() if line]
-    assert exported_events[1] == {
-        "type": "model_change",
-        "modelId": "deepseek/deepseek-v4-pro",
-    }
-    assert exported_events[2] == {
-        "type": "message",
-        "message": {
-            "role": "assistant",
-            "model": "deepseek/deepseek-v4-pro",
-            "content": [{"type": "text", "text": "done"}],
-        },
-    }
+    assert result.read_text(encoding="utf-8") == session_file.read_text(encoding="utf-8")
 
 
-def test_pi_runner_unwraps_prompt_file_user_message_in_exported_trace(tmp_path: Path):
+def test_pi_runner_preserves_prompt_file_user_message_in_native_exported_trace(tmp_path: Path):
     config = Config(agent={"provider": "pi"}, output={"traces_dir": tmp_path / "output"})
     with patch.object(PiRunner, '_ensure_image'):
         runner = PiRunner(config)
@@ -4059,16 +4597,10 @@ def test_pi_runner_unwraps_prompt_file_user_message_in_exported_trace(tmp_path: 
         datetime.fromtimestamp(0, tz=timezone.utc),
     )
 
-    exported_events = [json.loads(line) for line in result.read_text(encoding="utf-8").splitlines() if line]
-    assert exported_events[1]["message"]["content"] == [
-        {
-            "type": "text",
-            "text": "Can you build me a dependency map for a software system?",
-        }
-    ]
+    assert result.read_text(encoding="utf-8") == session_file.read_text(encoding="utf-8")
 
 
-def test_pi_runner_injects_captured_system_prompt_into_exported_trace(tmp_path: Path):
+def test_pi_runner_copies_native_trace_without_system_prompt_injection(tmp_path: Path):
     config = Config(agent={"provider": "pi"}, output={"traces_dir": tmp_path / "output"})
     with patch.object(PiRunner, '_ensure_image'):
         runner = PiRunner(config)
@@ -4131,23 +4663,93 @@ def test_pi_runner_injects_captured_system_prompt_into_exported_trace(tmp_path: 
         datetime.fromtimestamp(0, tz=timezone.utc),
     )
 
-    exported_events = [json.loads(line) for line in result.read_text(encoding="utf-8").splitlines() if line]
-    assert exported_events[0]["type"] == "session"
-    assert exported_events[1] == {
-        "type": "message",
-        "id": exported_events[1]["id"],
-        "parentId": None,
-        "timestamp": "2026-04-30T07:14:43.430Z",
-        "message": {
-            "role": "developer",
-            "content": [{"type": "text", "text": "You are Pi. Help with code."}],
-        },
+    assert result.read_text(encoding="utf-8") == session_file.read_text(encoding="utf-8")
+
+
+def test_pi_runner_appends_prompt_level_system_metadata_at_end(tmp_path: Path):
+    config = Config(agent={"provider": "pi"}, output={"traces_dir": tmp_path / "output"})
+    with patch.object(PiRunner, '_ensure_image'):
+        runner = PiRunner(config)
+
+    trace_file = tmp_path / "trace.jsonl"
+    native_lines = [
+        json.dumps({"type": "session", "id": "pi-session"}),
+        json.dumps(
+            {
+                "type": "message",
+                "id": "user-1",
+                "message": {"role": "user", "content": [{"type": "text", "text": "Hello"}]},
+            }
+        ),
+        json.dumps(
+            {
+                "type": "message",
+                "id": "assistant-1",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "Hi"}]},
+            }
+        ),
+    ]
+    trace_file.write_text("\n".join(native_lines) + "\n", encoding="utf-8")
+
+    runner._append_pi_system_prompt_metadata(
+        trace_file,
+        PromptInput(prompt="Hello", system="Use the prompt-level system."),
+    )
+
+    lines = trace_file.read_text(encoding="utf-8").splitlines()
+    assert lines[:-1] == native_lines
+    metadata_event = json.loads(lines[-1])
+    assert metadata_event["type"] == "custom"
+    assert metadata_event["customType"] == "teich-system-prompt"
+    assert metadata_event["data"] == {
+        "systemPrompt": "Use the prompt-level system.",
+        "source": "teich",
     }
-    assert exported_events[2]["message"]["role"] == "user"
-    assert all(event.get("type") != "custom" for event in exported_events)
 
 
-def test_pi_runner_rejects_malformed_tool_call_trace(tmp_path: Path):
+def test_pi_runner_does_not_duplicate_prompt_level_system_metadata(tmp_path: Path):
+    config = Config(agent={"provider": "pi"}, output={"traces_dir": tmp_path / "output"})
+    with patch.object(PiRunner, '_ensure_image'):
+        runner = PiRunner(config)
+
+    trace_file = tmp_path / "trace.jsonl"
+    trace_file.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "session", "id": "pi-session"}),
+                json.dumps(
+                    {
+                        "type": "message",
+                        "id": "system-1",
+                        "message": {
+                            "role": "developer",
+                            "content": [{"type": "text", "text": "Use the prompt-level system."}],
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "message",
+                        "id": "user-1",
+                        "message": {"role": "user", "content": [{"type": "text", "text": "Hello"}]},
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    before = trace_file.read_text(encoding="utf-8")
+
+    runner._append_pi_system_prompt_metadata(
+        trace_file,
+        PromptInput(prompt="Hello", system="Use the prompt-level system."),
+    )
+
+    assert trace_file.read_text(encoding="utf-8") == before
+
+
+def test_pi_runner_preserves_malformed_tool_call_trace(tmp_path: Path):
     config = Config(agent={"provider": "pi"}, output={"traces_dir": tmp_path / "output"})
     with patch.object(PiRunner, '_ensure_image'):
         runner = PiRunner(config)
@@ -4208,11 +4810,15 @@ def test_pi_runner_rejects_malformed_tool_call_trace(tmp_path: Path):
         encoding="utf-8",
     )
 
-    with pytest.raises(RuntimeError, match="malformed tool calls/results"):
-        runner._extract_session_file(
-            "session-id",
-            session_dir,
-            datetime.fromtimestamp(0, tz=timezone.utc),
-        )
+    output_path = runner._extract_session_file(
+        "session-id",
+        session_dir,
+        datetime.fromtimestamp(0, tz=timezone.utc),
+    )
 
-    assert list((tmp_path / "output").glob("*.jsonl")) == []
+    assert output_path.exists()
+    exported = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+    assert exported[1]["message"]["content"][1]["type"] == "toolCall"
+    assert exported[1]["message"]["content"][1]["id"] == ""
+    assert exported[2]["message"]["role"] == "toolResult"
+    assert "Validation failed for tool" in exported[2]["message"]["content"][0]["text"]

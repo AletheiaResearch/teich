@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 from .config import PromptInput
 
-from .converter import convert_trace_to_training_example, normalize_codex_trace_event
+from .converter import convert_trace_to_training_example, convert_traces_to_training_data, normalize_codex_trace_event
 
 RUNTIME_IMAGE_NAME = "teich-runtime:v3"
 RUNTIME_DOCKERFILE_NAME = "codex-runtime.Dockerfile"
@@ -41,11 +41,9 @@ WORKSPACE_IN_CONTAINER = "/workspace"
 HERMES_DEFAULT_TOOLSETS = "safe,terminal,file,skills,memory,session_search,delegation"
 HERMES_AGGREGATE_TRACE_FILE_NAME = "hermes-agent.jsonl"
 HERMES_AGGREGATE_WRITE_LOCK = threading.Lock()
-PI_MALFORMED_TOOL_CALL_ERROR_PREFIX = "Pi session produced malformed tool calls/results"
-
-
-class MalformedPiToolCallError(RuntimeError):
-    """Raised when Pi emits invalid tool-call trace events."""
+CHAT_REQUEST_MAX_ATTEMPTS = 3
+AGENT_TURN_RETRY_LIMIT = 3
+NON_DATA_TRACE_DIR_NAMES = {"partials", "failures"}
 
 
 def _make_tree_world_writable(path: Path) -> None:
@@ -61,6 +59,21 @@ def _make_tree_world_writable(path: Path) -> None:
             child.chmod(0o777 if child.is_dir() else 0o666)
         except OSError:
             continue
+
+
+def _is_non_data_trace_path(path: Path, traces_dir: Path, excluded_dirs: list[Path] | None = None) -> bool:
+    try:
+        if any(part in NON_DATA_TRACE_DIR_NAMES for part in path.relative_to(traces_dir).parts):
+            return True
+    except ValueError:
+        pass
+    for excluded_dir in excluded_dirs or []:
+        try:
+            path.resolve().relative_to(excluded_dir.resolve())
+            return True
+        except ValueError:
+            continue
+    return False
 
 
 HERMES_UNIVERSAL_TOOLS: list[dict[str, Any]] = [
@@ -271,7 +284,6 @@ OPENROUTER_GENERATION_STATS_ATTEMPTS = 2
 OPENROUTER_GENERATION_STATS_TIMEOUT_SECONDS = 3
 TEICH_PROMPT_FILE_NAME = ".teich-prompt.txt"
 PI_SYSTEM_PROMPT_CUSTOM_TYPE = "teich-system-prompt"
-PI_EMPTY_TOOL_NOT_FOUND_TEXT = "Tool  not found"
 
 
 LOCAL_PROVIDER_PROXY_SCRIPT = """
@@ -412,33 +424,6 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(listenPort, '127.0.0.1');
-""".strip()
-
-
-PI_SYSTEM_PROMPT_EXTENSION = f"""
-export default function (pi) {{
-  pi.on("before_agent_start", async (_event, ctx) => {{
-    const systemPrompt = ctx.getSystemPrompt();
-    if (typeof systemPrompt !== "string" || !systemPrompt.trim()) {{
-      return;
-    }}
-    const entries = typeof ctx.sessionManager.getEntries === "function"
-      ? ctx.sessionManager.getEntries()
-      : [];
-    if (Array.isArray(entries) && entries.some(
-      (entry) => entry?.type === "custom"
-        && entry?.customType === "{PI_SYSTEM_PROMPT_CUSTOM_TYPE}"
-        && entry?.data?.systemPrompt === systemPrompt,
-    )) {{
-      return;
-    }}
-    if (typeof ctx.sessionManager.appendCustomEntry === "function") {{
-      ctx.sessionManager.appendCustomEntry("{PI_SYSTEM_PROMPT_CUSTOM_TYPE}", {{
-        systemPrompt,
-      }});
-    }}
-  }});
-}}
 """.strip()
 
 
@@ -823,10 +808,75 @@ def _training_example_has_answer(example: dict[str, Any]) -> bool:
             continue
         if _message_text(message.get("content")):
             return True
+        reasoning_content = message.get("reasoning_content")
+        if isinstance(reasoning_content, str) and reasoning_content.strip():
+            return True
         tool_calls = message.get("tool_calls")
         if isinstance(tool_calls, list) and tool_calls:
             return True
     return False
+
+
+def _assistant_message_has_training_signal(message: dict[str, Any]) -> bool:
+    if message.get("role") not in {"assistant", "model"}:
+        return False
+    if _message_text(message.get("content")):
+        return True
+    reasoning_content = message.get("reasoning_content")
+    if isinstance(reasoning_content, str) and reasoning_content.strip():
+        return True
+    tool_calls = message.get("tool_calls")
+    return isinstance(tool_calls, list) and bool(tool_calls)
+
+
+def _assistant_message_has_tool_calls(message: dict[str, Any]) -> bool:
+    tool_calls = message.get("tool_calls")
+    return isinstance(tool_calls, list) and bool(tool_calls)
+
+
+def _training_example_completed_turns(example: dict[str, Any], turn_prompts: list[str]) -> bool:
+    if not turn_prompts or not _training_example_has_answer(example):
+        return False
+    messages = example.get("messages")
+    if not isinstance(messages, list):
+        return False
+
+    expected_keys = [_prompt_text_completion_key(prompt) for prompt in turn_prompts]
+    user_indexes: list[int] = []
+    search_start = 0
+    for expected_key in expected_keys:
+        matched_index: int | None = None
+        for index in range(search_start, len(messages)):
+            message = messages[index]
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            if _prompt_text_completion_key(_message_text(message.get("content"))) != expected_key:
+                continue
+            matched_index = index
+            break
+        if matched_index is None:
+            return False
+        user_indexes.append(matched_index)
+        search_start = matched_index + 1
+
+    for user_position, user_index in enumerate(user_indexes):
+        next_user_index = user_indexes[user_position + 1] if user_position + 1 < len(user_indexes) else len(messages)
+        turn_messages = [
+            message
+            for message in messages[user_index + 1:next_user_index]
+            if isinstance(message, dict) and message.get("role") in {"assistant", "model", "tool"}
+        ]
+        if not any(_assistant_message_has_training_signal(message) for message in turn_messages):
+            return False
+        if user_position == len(user_indexes) - 1:
+            if not turn_messages:
+                return False
+            last_message = turn_messages[-1]
+            if last_message.get("role") not in {"assistant", "model"}:
+                return False
+            if _assistant_message_has_tool_calls(last_message):
+                return False
+    return True
 
 
 def _structured_rows_from_jsonl(path: Path) -> list[dict[str, Any]] | None:
@@ -875,18 +925,15 @@ def _system_from_training_example(example: dict[str, Any]) -> str | None:
     return None
 
 
-def completed_prompt_keys_from_outputs(traces_dir: Path) -> set[str]:
+def completed_prompt_keys_from_outputs(traces_dir: Path, excluded_dirs: list[Path] | None = None) -> set[str]:
     if not traces_dir.exists():
         return set()
     completed: set[str] = set()
     for path in sorted(traces_dir.rglob("*.jsonl")):
         if not path.is_file():
             continue
-        try:
-            if "partials" in path.relative_to(traces_dir).parts:
-                continue
-        except ValueError:
-            pass
+        if _is_non_data_trace_path(path, traces_dir, excluded_dirs):
+            continue
         try:
             structured_rows = _structured_rows_from_jsonl(path)
             if structured_rows is not None:
@@ -938,9 +985,13 @@ def unique_prompt_inputs_by_completion_key(prompt_inputs: list[PromptInput]) -> 
     return unique
 
 
-def pending_prompt_inputs_for_resume(prompt_inputs: list[PromptInput], traces_dir: Path) -> list[PromptInput]:
+def pending_prompt_inputs_for_resume(
+    prompt_inputs: list[PromptInput],
+    traces_dir: Path,
+    excluded_dirs: list[Path] | None = None,
+) -> list[PromptInput]:
     prompt_inputs = unique_prompt_inputs_by_completion_key(prompt_inputs)
-    completed = completed_prompt_keys_from_outputs(traces_dir)
+    completed = completed_prompt_keys_from_outputs(traces_dir, excluded_dirs=excluded_dirs)
     if not completed:
         return prompt_inputs
     return [
@@ -955,9 +1006,10 @@ def prompt_inputs_for_run(
     traces_dir: Path,
     *,
     resume: bool = False,
+    excluded_dirs: list[Path] | None = None,
 ) -> list[PromptInput]:
     if resume:
-        return pending_prompt_inputs_for_resume(prompt_inputs, traces_dir)
+        return pending_prompt_inputs_for_resume(prompt_inputs, traces_dir, excluded_dirs=excluded_dirs)
     return unique_prompt_inputs_by_completion_key(prompt_inputs)
 
 
@@ -1088,7 +1140,13 @@ class DockerRuntimeRunner:
             **TEXT_SUBPROCESS_KWARGS,
         )
 
-    def _terminate_process(self, process: subprocess.Popen[str], container_name: str | None) -> None:
+    def _terminate_process(
+        self,
+        process: subprocess.Popen[str],
+        container_name: str | None,
+        *,
+        remove_container: bool = True,
+    ) -> None:
         try:
             if process.poll() is None:
                 process.terminate()
@@ -1098,7 +1156,8 @@ class DockerRuntimeRunner:
                     process.kill()
                     process.wait()
         finally:
-            self._remove_container(container_name)
+            if remove_container:
+                self._remove_container(container_name)
 
     def _terminate_active_processes(self) -> None:
         with self._active_processes_lock:
@@ -1142,12 +1201,55 @@ class DockerRuntimeRunner:
         self._unregister_active_container(container_name)
 
     @staticmethod
-    def _discard_output_file(trace_path: Path) -> None:
+    def _resolve_unique_path(directory: Path, file_name: str) -> Path:
+        destination = directory / file_name
+        if not destination.exists():
+            return destination
+        stem = destination.stem
+        suffix = destination.suffix
+        counter = 1
+        while True:
+            candidate = destination.with_name(f"{stem}_{counter}{suffix}")
+            if not candidate.exists():
+                return candidate
+            counter += 1
+
+    def _failure_destination(self, trace_path: Path) -> Path:
+        return self._resolve_unique_path(self.config.output.failures_dir, trace_path.name)
+
+    def _discard_output_file(self, trace_path: Path) -> None:
+        """Move an invalid generated trace out of the clean output directory."""
         try:
             if trace_path.exists() and trace_path.is_file():
-                trace_path.unlink()
+                destination = self._failure_destination(trace_path)
+                if trace_path.resolve() == destination.resolve():
+                    return
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(trace_path), str(destination))
+                metadata_path = self._hermes_metadata_path(trace_path)
+                if metadata_path.exists() and metadata_path.is_file():
+                    metadata_destination = destination.with_suffix(".metadata.json")
+                    if metadata_destination.exists():
+                        metadata_destination = self._resolve_unique_path(
+                            metadata_destination.parent,
+                            metadata_destination.name,
+                        )
+                    shutil.move(str(metadata_path), str(metadata_destination))
         except OSError:
             pass
+
+    def _trace_contains_completed_turns(self, trace_path: Path, turn_prompts: list[str]) -> bool:
+        try:
+            examples = convert_traces_to_training_data(trace_path)
+        except (OSError, json.JSONDecodeError, ValueError, TypeError):
+            return False
+        return any(_training_example_completed_turns(example, turn_prompts) for example in examples)
+
+    def _accept_trace_if_complete(self, trace_path: Path, turn_prompts: list[str]) -> Path | None:
+        if self._trace_contains_completed_turns(trace_path, turn_prompts):
+            return trace_path
+        self._discard_output_file(trace_path)
+        return None
 
     @staticmethod
     def _hermes_metadata_path(trace_path: Path) -> Path:
@@ -1841,7 +1943,12 @@ class DockerRuntimeRunner:
         resume: bool = False,
     ) -> list[Path]:
         prompt_inputs = prompt_inputs if prompt_inputs is not None else self.config.get_prompt_inputs()
-        prompt_inputs = prompt_inputs_for_run(prompt_inputs, self.config.output.traces_dir, resume=resume)
+        prompt_inputs = prompt_inputs_for_run(
+            prompt_inputs,
+            self.config.output.traces_dir,
+            resume=resume,
+            excluded_dirs=[self.config.output.failures_dir],
+        )
         if not prompt_inputs:
             if resume:
                 return []
@@ -1927,6 +2034,7 @@ class DockerRuntimeRunner:
         progress_base: SessionProgressUpdate | None = None,
         container_name: str | None = None,
         stdin_text: str | None = None,
+        remove_container_on_error: bool = True,
     ) -> None:
         with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stdout_handle, tempfile.TemporaryFile(
             mode="w+", encoding="utf-8"
@@ -1962,7 +2070,7 @@ class DockerRuntimeRunner:
                     stderr_handle,
                 )
             except BaseException:
-                self._terminate_process(process, container_name)
+                self._terminate_process(process, container_name, remove_container=remove_container_on_error)
                 raise
             finally:
                 self._unregister_active_process(process)
@@ -2049,6 +2157,7 @@ class CodexRunner(DockerRuntimeRunner):
 
     def _write_codex_config(self, codex_home: Path) -> None:
         codex_home.mkdir(parents=True, exist_ok=True)
+        codex_home.chmod(0o777)
         lines: list[str] = []
         if self.config.developer_instructions:
             lines.append(
@@ -2103,10 +2212,12 @@ class CodexRunner(DockerRuntimeRunner):
                     lines.append(f"{self._toml_string(key)} = {self._toml_string(value)}")
 
         config_text = "\n".join(lines).strip()
-        (codex_home / "config.toml").write_text(
+        config_path = codex_home / "config.toml"
+        config_path.write_text(
             (config_text + "\n") if config_text else "",
             encoding="utf-8",
         )
+        config_path.chmod(0o666)
 
     @staticmethod
     def _list_session_files(codex_home: Path) -> list[Path]:
@@ -2137,15 +2248,8 @@ class CodexRunner(DockerRuntimeRunner):
 
     @classmethod
     def _copy_normalized_session_file(cls, source_path: Path, destination: Path) -> None:
-        normalized_lines: list[str] = []
-        with source_path.open("r", encoding="utf-8") as source_handle:
-            for raw_line in source_handle:
-                line = raw_line.strip()
-                if not line:
-                    continue
-                event = json.loads(line)
-                normalized_lines.append(json.dumps(cls._normalize_trace_event(event), separators=(",", ":")))
-        destination.write_text("\n".join(normalized_lines) + "\n", encoding="utf-8")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source_path, destination)
 
     def _codex_base_url_and_proxy_target(self) -> tuple[str | None, str | None]:
         configured_base_url = self.config.get_base_url()
@@ -2164,8 +2268,8 @@ class CodexRunner(DockerRuntimeRunner):
         *,
         detached: bool = False,
     ) -> tuple[list[str], str | None]:
-        api_key = self.config.get_api_key() or ""
         configured_base_url = self.config.get_base_url()
+        api_key = self.config.get_api_key() or ("none" if configured_base_url else "")
         base_url, proxy_target = self._codex_base_url_and_proxy_target()
         provider_name = self.config.api.provider
         provider_env_key = self._provider_env_key(provider_name)
@@ -2366,6 +2470,9 @@ class CodexRunner(DockerRuntimeRunner):
         started_at = datetime.now(timezone.utc)
         container_name = self._container_name("codex", session_id)
         turn_prompts = _agent_turn_prompts(prompt, prompt_input)
+        failure_trace_saved = False
+        failure_trace_checked = False
+        existing_sessions: set[Path] = set()
 
         try:
             self._write_codex_config(codex_home)
@@ -2402,6 +2509,7 @@ class CodexRunner(DockerRuntimeRunner):
                         progress_base,
                         container_name,
                         turn_prompt,
+                        remove_container_on_error=len(turn_prompts) <= 1,
                     )
                 except subprocess.TimeoutExpired:
                     raise RuntimeError(
@@ -2414,6 +2522,37 @@ class CodexRunner(DockerRuntimeRunner):
                             f"{stderr}\nHint: this custom provider endpoint is not fully compatible with Codex's Responses API tool format. "
                             "Use a provider that supports Codex Responses semantics, or use Codex OSS mode with a supported local provider."
                         )
+                    if turn_index == len(turn_prompts) - 1:
+                        failure_trace_checked = True
+                        try:
+                            trace_path = self._extract_session_file(
+                                session_id,
+                                codex_home,
+                                existing_sessions,
+                                started_at,
+                            )
+                        except RuntimeError:
+                            trace_path = None
+                        if trace_path is not None:
+                            accepted_trace = self._accept_trace_if_complete(trace_path, turn_prompts)
+                            if accepted_trace is not None:
+                                self._copy_workspace_snapshot(workspace, self._sandbox_destination(trace_path))
+                                return trace_path
+                            failure_trace_saved = True
+                    else:
+                        failure_trace_checked = True
+                        try:
+                            trace_path = self._extract_session_file(
+                                session_id,
+                                codex_home,
+                                existing_sessions,
+                                started_at,
+                            )
+                        except RuntimeError:
+                            trace_path = None
+                        if trace_path is not None:
+                            self._discard_output_file(trace_path)
+                            failure_trace_saved = True
                     raise RuntimeError(f"Session {session_id[:8]} failed: {stderr}")
             trace_path = self._extract_session_file(
                 session_id,
@@ -2424,6 +2563,13 @@ class CodexRunner(DockerRuntimeRunner):
             self._copy_workspace_snapshot(workspace, self._sandbox_destination(trace_path))
             return trace_path
         except BaseException:
+            if not failure_trace_saved and not failure_trace_checked:
+                try:
+                    trace_path = self._extract_session_file(session_id, codex_home, existing_sessions, started_at)
+                except RuntimeError:
+                    trace_path = None
+                if trace_path is not None:
+                    self._discard_output_file(trace_path)
             raise
         finally:
             if len(turn_prompts) > 1:
@@ -2535,6 +2681,10 @@ class ExternalCliRunner(DockerRuntimeRunner):
     def _build_shell_command(self, *, continue_session: bool = False) -> str:
         raise NotImplementedError
 
+    def _wrap_external_shell_command(self, shell_command: str) -> str:
+        chmod_command = f"chmod -R a+rwX {shlex.quote(self.home_in_container)} >/dev/null 2>&1 || true"
+        return f"set +e; {shell_command}; status=$?; {chmod_command}; exit $status"
+
     def _build_external_command(
         self,
         workspace: Path,
@@ -2544,7 +2694,10 @@ class ExternalCliRunner(DockerRuntimeRunner):
         continue_session: bool = False,
     ) -> list[str]:
         command = self._build_external_docker_base_command(workspace, home_dir, container_name)
-        command.extend(["bash", "-lc", self._build_shell_command(continue_session=continue_session)])
+        shell_command = self._wrap_external_shell_command(
+            self._build_shell_command(continue_session=continue_session)
+        )
+        command.extend(["bash", "-lc", shell_command])
         return command
 
     def _build_external_persistent_container_command(
@@ -2568,7 +2721,7 @@ class ExternalCliRunner(DockerRuntimeRunner):
             container_name,
             "bash",
             "-lc",
-            self._build_shell_command(continue_session=continue_session),
+            self._wrap_external_shell_command(self._build_shell_command(continue_session=continue_session)),
         ]
 
     def _run_external_process(self, command: list[str], container_name: str | None) -> tuple[str, str]:
@@ -2781,6 +2934,7 @@ class ClaudeCodeRunner(ExternalCliRunner):
         existing_sessions: set[Path],
         started_at: datetime,
     ) -> Path:
+        _make_tree_world_writable(home_dir)
         session_files = self._list_native_session_files(home_dir)
         fresh_files = [path for path in session_files if path.resolve() not in existing_sessions]
         if not fresh_files:
@@ -2798,8 +2952,6 @@ class ClaudeCodeRunner(ExternalCliRunner):
         return destination
 
     def _needs_openrouter_model_proxy(self) -> bool:
-        if self._provider_env_key(self.config.api.provider) != "OPENROUTER_API_KEY":
-            return False
         if not self.config.get_base_url():
             return False
         model = self.config.get_effective_model().strip().lower()
@@ -2827,17 +2979,19 @@ class ClaudeCodeRunner(ExternalCliRunner):
         ]
 
     def _api_env_items(self) -> list[tuple[str, str]]:
-        api_key = self.config.get_api_key() or ""
+        api_key = self.config.get_api_key() or ("none" if self.config.get_base_url() else "")
         if not api_key:
             return []
         provider_env_key = self._provider_env_key(self.config.api.provider)
-        if provider_env_key == "OPENROUTER_API_KEY":
-            return [
+        if self._needs_openrouter_model_proxy():
+            items = [
                 ("TEICH_API_KEY", api_key),
                 ("ANTHROPIC_AUTH_TOKEN", api_key),
                 ("ANTHROPIC_API_KEY", ""),
-                ("OPENROUTER_API_KEY", api_key),
             ]
+            if provider_env_key != "ANTHROPIC_API_KEY":
+                items.append((provider_env_key, api_key))
+            return items
         items = [("TEICH_API_KEY", api_key), ("ANTHROPIC_API_KEY", api_key), (provider_env_key, api_key)]
         return list(dict.fromkeys(items))
 
@@ -2903,11 +3057,14 @@ class ClaudeCodeRunner(ExternalCliRunner):
             )
         self._write_openrouter_proxy(home_dir)
         command = self._build_external_docker_base_command(workspace, home_dir, container_name)
+        shell_command = self._wrap_external_shell_command(
+            f"{self._openrouter_proxy_shell_prefix()}{self._build_shell_command(continue_session=continue_session)}"
+        )
         command.extend(
             [
                 "bash",
                 "-lc",
-                f"{self._openrouter_proxy_shell_prefix()}exec {self._build_shell_command(continue_session=continue_session)}",
+                shell_command,
             ]
         )
         return command
@@ -2941,6 +3098,9 @@ class ClaudeCodeRunner(ExternalCliRunner):
         started_at = datetime.now(timezone.utc)
         container_name = self._container_name(self.container_kind, session_id)
         turn_prompts = _agent_turn_prompts(prompt, prompt_input)
+        failure_trace_saved = False
+        failure_trace_checked = False
+        existing_sessions: set[Path] = set()
         try:
             workspace.mkdir(parents=True, exist_ok=True)
             existing_sessions = {path.resolve() for path in self._list_native_session_files(home_dir)}
@@ -2967,11 +3127,54 @@ class ClaudeCodeRunner(ExternalCliRunner):
                     stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or "")
                     stdout = exc.output if isinstance(exc.output, str) else (exc.output or "")
                     details = stderr.strip() or stdout.strip()
+                    if turn_index == len(turn_prompts) - 1:
+                        failure_trace_checked = True
+                        try:
+                            trace_path = self._extract_native_session_file(
+                                session_id,
+                                home_dir,
+                                existing_sessions,
+                                started_at,
+                            )
+                        except RuntimeError:
+                            trace_path = None
+                        if trace_path is not None:
+                            accepted_trace = self._accept_trace_if_complete(trace_path, turn_prompts)
+                            if accepted_trace is not None:
+                                self._copy_workspace_snapshot(workspace, self._sandbox_destination(trace_path))
+                                return trace_path
+                            failure_trace_saved = True
+                    else:
+                        failure_trace_checked = True
+                        try:
+                            trace_path = self._extract_native_session_file(
+                                session_id,
+                                home_dir,
+                                existing_sessions,
+                                started_at,
+                            )
+                        except RuntimeError:
+                            trace_path = None
+                        if trace_path is not None:
+                            self._discard_output_file(trace_path)
+                            failure_trace_saved = True
                     raise RuntimeError(f"Session {session_id[:8]} failed: {details}") from exc
             trace_path = self._extract_native_session_file(session_id, home_dir, existing_sessions, started_at)
             self._copy_workspace_snapshot(workspace, self._sandbox_destination(trace_path))
             return trace_path
         except BaseException:
+            if not failure_trace_saved and not failure_trace_checked:
+                try:
+                    trace_path = self._extract_native_session_file(
+                        session_id,
+                        home_dir,
+                        existing_sessions,
+                        started_at,
+                    )
+                except RuntimeError:
+                    trace_path = None
+                if trace_path is not None:
+                    self._discard_output_file(trace_path)
             raise
         finally:
             if len(turn_prompts) > 1:
@@ -3183,6 +3386,7 @@ class HermesRunner(ExternalCliRunner):
                 "configured_model_provider": self.config.api.provider or self.default_model_provider,
                 "model": self._sqlite_row_get(row, "model") or self.config.get_effective_model(),
                 "configured_context_length": self.config.model.context_length,
+                "hermes_source": self._sqlite_row_get(row, "source"),
                 "total_tokens": total_tokens,
                 "estimated_cost_usd": estimated_cost,
                 "actual_cost_usd": actual_cost,
@@ -3283,21 +3487,11 @@ class HermesRunner(ExternalCliRunner):
         *,
         partial: bool = False,
     ) -> dict[str, object]:
-        traces = self._hermes_conversation_export(row, messages)
-        metadata = self._hermes_session_export(row, messages, workspace, partial=partial)
-        metadata.pop("messages", None)
-        session_id = str(metadata.get("id") or self._sqlite_row_get(row, "id") or "")
-        return {
-            "id": session_id,
-            "task": self._hermes_trace_task(traces),
-            "traces": traces,
-            "tools": self._hermes_tools_snapshot(),
-            "metadata": metadata,
-        }
+        return self._hermes_session_export(row, messages, workspace, partial=partial)
 
     def _hermes_aggregate_trace_path(self, *, partial: bool = False) -> Path:
         if partial:
-            return self.config.output.traces_dir / "partials" / HERMES_AGGREGATE_TRACE_FILE_NAME
+            return self.config.output.failures_dir / HERMES_AGGREGATE_TRACE_FILE_NAME
         return self.config.output.traces_dir / HERMES_AGGREGATE_TRACE_FILE_NAME
 
     def _hermes_message_export(self, row: sqlite3.Row) -> dict[str, object]:
@@ -3319,10 +3513,51 @@ class HermesRunner(ExternalCliRunner):
         *,
         partial: bool = False,
     ) -> dict[str, Path]:
+        rows = self._hermes_state_session_rows(home_dir, workspace, partial=partial)
+        return self._write_hermes_state_rows(rows, partial=partial)
+
+    def _export_completed_hermes_state_sessions(
+        self,
+        home_dir: Path,
+        workspace: Path,
+        turn_prompts: list[str],
+    ) -> dict[str, Path]:
+        rows = [
+            row
+            for row in self._hermes_state_session_rows(home_dir, workspace, partial=False)
+            if _training_example_completed_turns(row, turn_prompts)
+        ]
+        return self._write_hermes_state_rows(rows, partial=False)
+
+    def _write_hermes_state_rows(
+        self,
+        rows: list[dict[str, object]],
+        *,
+        partial: bool = False,
+    ) -> dict[str, Path]:
+        if not rows:
+            return {}
+        destination = self._hermes_aggregate_trace_path(partial=partial)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with HERMES_AGGREGATE_WRITE_LOCK:
+            self._write_events(destination, rows)
+        exported: dict[str, Path] = {}
+        for row in rows:
+            session_id = str(row.get("id") or "")
+            if session_id:
+                exported[session_id] = destination
+        return exported
+
+    def _hermes_state_session_rows(
+        self,
+        home_dir: Path,
+        workspace: Path,
+        *,
+        partial: bool = False,
+    ) -> list[dict[str, object]]:
         state_db = self._hermes_state_db(home_dir)
         if not state_db.exists():
-            return {}
-        exported: dict[str, Path] = {}
+            return []
         connection = sqlite3.connect(state_db)
         connection.row_factory = sqlite3.Row
         try:
@@ -3338,19 +3573,9 @@ class HermesRunner(ExternalCliRunner):
                 ).fetchall()
                 messages = [self._hermes_message_export(message_row) for message_row in message_rows]
                 rows.append(self._hermes_trace_row(session_row, messages, workspace, partial=partial))
-            if not rows:
-                return {}
-            destination = self._hermes_aggregate_trace_path(partial=partial)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            with HERMES_AGGREGATE_WRITE_LOCK:
-                self._write_events(destination, rows)
-            for row in rows:
-                session_id = str(row.get("id") or "")
-                if session_id:
-                    exported[session_id] = destination
+            return rows
         finally:
             connection.close()
-        return exported
 
     def run_session(
         self,
@@ -3365,7 +3590,6 @@ class HermesRunner(ExternalCliRunner):
         workspace_root, workspace = self._prepare_workspace(session_id, prompt_input, self.container_kind)
         home_dir = Path(tempfile.mkdtemp(prefix=f"{self.container_kind}-home-{session_id}-"))
         home_dir.chmod(0o777)
-        started_at = datetime.now(timezone.utc)
         container_name = self._container_name(self.container_kind, session_id)
         turn_prompts = _agent_turn_prompts(prompt, prompt_input)
         fallback_destination = self._resolve_output_path(f"{self.source_name}-{session_id}.jsonl")
@@ -3397,20 +3621,25 @@ class HermesRunner(ExternalCliRunner):
                     stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or "")
                     stdout = exc.output if isinstance(exc.output, str) else (exc.output or "")
                     details = stderr.strip() or stdout.strip()
+                    if turn_index == len(turn_prompts) - 1:
+                        final_exports = self._export_completed_hermes_state_sessions(home_dir, workspace, turn_prompts)
+                        parsed_session_id = self._parse_hermes_stdout_session_id("\n".join([*stdout_parts, stdout]))
+                        destination = (
+                            final_exports.get(parsed_session_id)
+                            or next((path for sid, path in final_exports.items() if sid.startswith(session_id)), None)
+                            or next(
+                                (path for sid, path in final_exports.items() if self._trace_has_no_parent(path)),
+                                None,
+                            )
+                            or next(iter(final_exports.values()), None)
+                        )
+                        if destination is not None:
+                            self._copy_workspace_snapshot(workspace, self._sandbox_destination(destination))
+                            return destination
                     raise RuntimeError(f"Session {session_id[:8]} failed: {details}") from exc
                 except RuntimeError:
                     raise
                 stdout_parts.append(stdout)
-                if not self._hermes_state_db(home_dir).exists():
-                    if not fallback_destination.exists():
-                        self._write_events(
-                            fallback_destination,
-                            [self._session_meta_event(session_id, started_at, workspace)],
-                        )
-                    self._write_events(
-                        fallback_destination,
-                        self._events_from_turn_output(turn_prompt, stdout, stderr, turn_index=turn_index),
-                    )
                 if progress_callback and progress_base:
                     progress_callback(
                         SessionProgressUpdate(
@@ -3422,13 +3651,13 @@ class HermesRunner(ExternalCliRunner):
                             status="running",
                             session_id=session_id,
                             started_at=progress_base.started_at,
-                            trace_path=fallback_destination,
-                            metrics=self._summarize_trace_file(fallback_destination)
-                            if fallback_destination.exists()
-                            else TraceMetrics(),
+                            trace_path=fallback_destination if fallback_destination.exists() else None,
+                            metrics=TraceMetrics(),
                         )
                     )
             final_exports = self._export_hermes_state_sessions(home_dir, workspace)
+            if not final_exports:
+                raise RuntimeError(f"Session {session_id[:8]} failed: Hermes did not write any state.db sessions")
             parsed_session_id = self._parse_hermes_stdout_session_id("\n".join(stdout_parts))
             destination = (
                 final_exports.get(parsed_session_id)
@@ -3439,12 +3668,13 @@ class HermesRunner(ExternalCliRunner):
                 )
                 or next(iter(final_exports.values()), fallback_destination)
             )
-            if not final_exports and not fallback_destination.exists():
-                self._write_events(fallback_destination, [self._session_meta_event(session_id, started_at, workspace)])
-                destination = fallback_destination
             self._copy_workspace_snapshot(workspace, self._sandbox_destination(destination))
             return destination
         except BaseException:
+            try:
+                self._export_hermes_state_sessions(home_dir, workspace, partial=True)
+            except Exception:
+                pass
             self._discard_output_file(fallback_destination)
             raise
         finally:
@@ -3468,6 +3698,8 @@ class HermesRunner(ExternalCliRunner):
             return False
         if isinstance(event, dict) and isinstance(event.get("metadata"), dict):
             return event["metadata"].get("parent_session_id") in {None, ""}
+        if isinstance(event, dict) and "parent_session_id" in event:
+            return event.get("parent_session_id") in {None, ""}
         payload = event.get("payload") if isinstance(event, dict) else None
         return isinstance(payload, dict) and payload.get("parent_session_id") in {None, ""}
 
@@ -3542,6 +3774,7 @@ class ChatRunner(DockerRuntimeRunner):
         headers = {
             "content-type": "application/json",
             "accept": "application/json",
+            "user-agent": "teich",
         }
         api_key = self.config.get_api_key()
         if api_key:
@@ -3719,7 +3952,32 @@ class ChatRunner(DockerRuntimeRunner):
 
         return payload
 
-    def _request_chat_turn(
+    @staticmethod
+    def _is_transient_chat_error(exc: RuntimeError) -> bool:
+        message = str(exc).lower()
+        transient_markers = (
+            "http 408",
+            "http 409",
+            "http 425",
+            "http 429",
+            "http 500",
+            "http 502",
+            "http 503",
+            "http 504",
+            "rate limit",
+            "temporarily",
+            "timeout",
+            "timed out",
+            "overloaded",
+            "try again",
+            "server error",
+            "service unavailable",
+            "connection reset",
+            "remote end closed connection",
+        )
+        return any(marker in message for marker in transient_markers)
+
+    def _request_chat_turn_once(
         self,
         prompt: str,
         history: list[dict[str, str]] | None = None,
@@ -3751,6 +4009,24 @@ class ChatRunner(DockerRuntimeRunner):
         if provider_usage is not None:
             usage = provider_usage
         return content, thinking, usage, model
+
+    def _request_chat_turn(
+        self,
+        prompt: str,
+        history: list[dict[str, str]] | None = None,
+        system_prompt: str | None = None,
+    ) -> tuple[str, str | None, dict[str, Any] | None, str]:
+        last_error: RuntimeError | None = None
+        for attempt in range(CHAT_REQUEST_MAX_ATTEMPTS):
+            try:
+                return self._request_chat_turn_once(prompt, history, system_prompt)
+            except RuntimeError as exc:
+                if not self._is_transient_chat_error(exc) or attempt >= CHAT_REQUEST_MAX_ATTEMPTS - 1:
+                    raise
+                last_error = exc
+                time.sleep(0.5 * (attempt + 1))
+        assert last_error is not None
+        raise last_error
 
     def _request_chat_turn_with_optional_system(
         self,
@@ -4311,7 +4587,12 @@ class ChatRunner(DockerRuntimeRunner):
         resume: bool = False,
     ) -> list[Path]:
         prompt_inputs = prompt_inputs if prompt_inputs is not None else self.config.get_prompt_inputs()
-        prompt_inputs = prompt_inputs_for_run(prompt_inputs, self.config.output.traces_dir, resume=resume)
+        prompt_inputs = prompt_inputs_for_run(
+            prompt_inputs,
+            self.config.output.traces_dir,
+            resume=resume,
+            excluded_dirs=[self.config.output.failures_dir],
+        )
         if not prompt_inputs:
             if resume:
                 return []
@@ -4437,14 +4718,11 @@ class PiRunner(DockerRuntimeRunner):
     """Manages Docker-based Pi sessions."""
 
     def _runtime_trace_guard_error(self, trace_path: Path) -> str | None:
-        try:
-            self._normalized_pi_trace_events(
-                trace_path,
-                reject_terminal_runtime_error=False,
-                reject_incomplete_user_turns=False,
-            )
-        except RuntimeError as exc:
-            return str(exc).replace("This trace was not exported because ", "")
+        # Pi writes native session events incrementally. During generation a tool
+        # call can briefly be invalid, fail validation, or be followed by a tool
+        # error that the model corrects on the next turn. Do not kill the live
+        # container from a partial trace snapshot; final export validation handles
+        # truly incomplete sessions.
         return None
 
     @staticmethod
@@ -4594,7 +4872,6 @@ class PiRunner(DockerRuntimeRunner):
             json.dumps(self._project_settings(), indent=2) + "\n",
             encoding="utf-8",
         )
-        self._write_pi_extension(agent_dir)
         models_config = self._pi_models_config()
         if models_config:
             models_file = agent_dir / "models.json"
@@ -4602,13 +4879,6 @@ class PiRunner(DockerRuntimeRunner):
                 json.dumps(models_config, indent=2) + "\n",
                 encoding="utf-8",
             )
-
-    @staticmethod
-    def _write_pi_extension(agent_dir: Path) -> None:
-        extensions_dir = agent_dir / "extensions"
-        extensions_dir.mkdir(parents=True, exist_ok=True)
-        extension_file = extensions_dir / "teich_system_prompt.ts"
-        extension_file.write_text(PI_SYSTEM_PROMPT_EXTENSION + "\n", encoding="utf-8")
 
     def _write_pi_project_settings(self, workspace: Path) -> None:
         settings_dir = workspace / ".pi"
@@ -4744,156 +5014,6 @@ class PiRunner(DockerRuntimeRunner):
         ]
 
     @classmethod
-    def _normalize_pi_trace_event(cls, event: dict[str, object]) -> dict[str, object]:
-        event = _normalize_teich_prompt_user_event(event)
-        if event.get("type") == "model_change":
-            normalized_event = dict(event)
-            normalized_event.pop("provider", None)
-            return normalized_event
-        if event.get("type") != "message":
-            return event
-        payload = event.get("message")
-        if not isinstance(payload, dict) or "provider" not in payload:
-            return event
-        normalized_event = dict(event)
-        normalized_payload = dict(payload)
-        normalized_payload.pop("provider", None)
-        normalized_event["message"] = normalized_payload
-        return normalized_event
-
-    @staticmethod
-    def _pi_system_prompt_from_event(event: dict[str, object]) -> str | None:
-        if event.get("type") != "custom" or event.get("customType") != PI_SYSTEM_PROMPT_CUSTOM_TYPE:
-            return None
-        data = event.get("data")
-        if not isinstance(data, dict):
-            return None
-        system_prompt = data.get("systemPrompt")
-        if not isinstance(system_prompt, str) or not system_prompt.strip():
-            return None
-        return system_prompt.strip()
-
-    @staticmethod
-    def _pi_has_system_message(events: list[dict[str, object]]) -> bool:
-        for event in events:
-            if event.get("type") != "message":
-                continue
-            payload = event.get("message")
-            if not isinstance(payload, dict):
-                continue
-            role = payload.get("role")
-            if role in {"system", "developer"}:
-                return True
-        return False
-
-    @staticmethod
-    def _pi_system_message_event(system_prompt: str, timestamp: str | None) -> dict[str, object]:
-        event_timestamp = timestamp or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        return {
-            "type": "message",
-            "id": f"system-{uuid.uuid4().hex[:8]}",
-            "parentId": None,
-            "timestamp": event_timestamp,
-            "message": {
-                "role": "developer",
-                "content": [{"type": "text", "text": system_prompt}],
-            },
-        }
-
-    @staticmethod
-    def _pi_message_text(payload: dict[str, object]) -> str:
-        content = payload.get("content")
-        if not isinstance(content, list):
-            return ""
-        for block in content:
-            if not isinstance(block, dict):
-                continue
-            if block.get("type") != "text":
-                continue
-            text = block.get("text")
-            if isinstance(text, str):
-                return text
-        return ""
-
-    @classmethod
-    def _validate_pi_trace_events(
-        cls,
-        events: list[dict[str, object]],
-        *,
-        reject_terminal_runtime_error: bool = True,
-        reject_incomplete_user_turns: bool = True,
-    ) -> None:
-        empty_tool_calls = 0
-        empty_tool_results = 0
-        incomplete_user_turns = 0
-        pending_user_turn = False
-        terminal_runtime_error: str | None = None
-        for event in events:
-            if event.get("type") != "message":
-                continue
-            payload = event.get("message")
-            if not isinstance(payload, dict):
-                continue
-            stop_reason = payload.get("stopReason")
-            error_message = payload.get("errorMessage")
-            if stop_reason == "error" or (isinstance(error_message, str) and error_message.strip()):
-                if isinstance(error_message, str) and error_message.strip():
-                    terminal_runtime_error = error_message.strip()
-                else:
-                    terminal_runtime_error = "model/provider returned stopReason=error"
-            elif stop_reason == "length":
-                terminal_runtime_error = "model/provider stopped because it reached the output token limit"
-            elif payload.get("role") == "assistant" and cls._pi_assistant_has_content(payload):
-                terminal_runtime_error = None
-            role = payload.get("role")
-            if role == "user":
-                if pending_user_turn:
-                    incomplete_user_turns += 1
-                pending_user_turn = True
-            elif role == "assistant":
-                if cls._pi_assistant_has_content(payload):
-                    pending_user_turn = False
-                content = payload.get("content")
-                if isinstance(content, list):
-                    for block in content:
-                        if not isinstance(block, dict) or block.get("type") != "toolCall":
-                            continue
-                        tool_id = block.get("id")
-                        tool_name = block.get("name")
-                        if not isinstance(tool_id, str) or not tool_id.strip():
-                            empty_tool_calls += 1
-                            continue
-                        if not isinstance(tool_name, str) or not tool_name.strip():
-                            empty_tool_calls += 1
-            elif role == "toolResult":
-                tool_name = payload.get("toolName") if isinstance(payload.get("toolName"), str) else ""
-                tool_call_id = payload.get("toolCallId") if isinstance(payload.get("toolCallId"), str) else ""
-                text = cls._pi_message_text(payload).strip()
-                if not tool_name.strip() or not tool_call_id.strip() or text == PI_EMPTY_TOOL_NOT_FOUND_TEXT:
-                    empty_tool_results += 1
-        if pending_user_turn:
-            incomplete_user_turns += 1
-        if reject_terminal_runtime_error and terminal_runtime_error:
-            raise RuntimeError(
-                "Pi session ended with model/provider error: "
-                f"{terminal_runtime_error}. "
-                "This trace was not exported because the model/provider did not produce a successful assistant response."
-            )
-        if reject_incomplete_user_turns and incomplete_user_turns:
-            raise RuntimeError(
-                "Pi session ended before producing an assistant response for "
-                f"{incomplete_user_turns} user turn(s). "
-                "This trace was not exported because it is incomplete."
-            )
-        if not empty_tool_calls and not empty_tool_results:
-            return
-        raise MalformedPiToolCallError(
-            f"{PI_MALFORMED_TOOL_CALL_ERROR_PREFIX} "
-            f"(empty_tool_calls={empty_tool_calls}, empty_tool_results={empty_tool_results}). "
-            "This trace was not exported because the model/provider emitted corrupted tool invocations."
-        )
-
-    @classmethod
     def _pi_assistant_has_content(cls, payload: dict[str, object]) -> bool:
         content = payload.get("content")
         if not isinstance(content, list):
@@ -4911,50 +5031,83 @@ class PiRunner(DockerRuntimeRunner):
                     return True
         return False
 
-    def _normalized_pi_trace_events(
-        self,
-        source_path: Path,
-        *,
-        reject_terminal_runtime_error: bool = True,
-        reject_incomplete_user_turns: bool = True,
-    ) -> list[dict[str, object]]:
-        normalized_events: list[dict[str, object]] = []
-        system_prompt: str | None = None
-        system_prompt_timestamp: str | None = None
-        with source_path.open("r", encoding="utf-8") as source_handle:
-            for raw_line in source_handle:
-                line = raw_line.strip()
-                if not line:
-                    continue
-                event = json.loads(line)
-                if system_prompt is None:
-                    extracted_system_prompt = self._pi_system_prompt_from_event(event)
-                    if extracted_system_prompt:
-                        system_prompt = extracted_system_prompt
-                        timestamp = event.get("timestamp")
-                        if isinstance(timestamp, str) and timestamp.strip():
-                            system_prompt_timestamp = timestamp.strip()
-                        continue
-                normalized_events.append(self._normalize_pi_trace_event(event))
-        if system_prompt and not self._pi_has_system_message(normalized_events):
-            system_message = self._pi_system_message_event(system_prompt, system_prompt_timestamp)
-            insert_at = 1 if normalized_events and normalized_events[0].get("type") == "session" else 0
-            normalized_events.insert(insert_at, system_message)
-        self._validate_pi_trace_events(
-            normalized_events,
-            reject_terminal_runtime_error=reject_terminal_runtime_error,
-            reject_incomplete_user_turns=reject_incomplete_user_turns,
-        )
-        return normalized_events
-
     def _copy_normalized_session_file(self, source_path: Path, destination: Path) -> None:
-        normalized_events = self._normalized_pi_trace_events(source_path)
-        destination.write_text(
-            "\n".join(json.dumps(event, separators=(",", ":")) for event in normalized_events) + "\n",
-            encoding="utf-8",
-        )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source_path, destination)
 
-    def _extract_session_file(self, session_id: str, session_dir: Path, started_at: datetime) -> Path:
+    @staticmethod
+    def _prompt_input_system_prompt(prompt_input: PromptInput | None) -> str | None:
+        if prompt_input is None or not isinstance(prompt_input.system, str):
+            return None
+        system_prompt = prompt_input.system.strip()
+        return system_prompt or None
+
+    @classmethod
+    def _pi_trace_includes_system_prompt(cls, trace_path: Path, system_prompt: str) -> bool:
+        expected = system_prompt.strip()
+        if not expected:
+            return True
+        try:
+            with trace_path.open("r", encoding="utf-8") as source:
+                for raw_line in source:
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    event = json.loads(line)
+                    if not isinstance(event, dict):
+                        continue
+                    if event.get("type") == "custom" and event.get("customType") == PI_SYSTEM_PROMPT_CUSTOM_TYPE:
+                        data = event.get("data")
+                        recorded = data.get("systemPrompt") if isinstance(data, dict) else None
+                        if isinstance(recorded, str) and recorded.strip() == expected:
+                            return True
+                        continue
+                    if event.get("type") != "message":
+                        continue
+                    payload = event.get("message")
+                    if not isinstance(payload, dict) or payload.get("role") not in {"system", "developer"}:
+                        continue
+                    if cls._pi_first_text(payload.get("content")).strip() == expected:
+                        return True
+        except (OSError, json.JSONDecodeError):
+            return False
+        return False
+
+    @staticmethod
+    def _pi_first_text(content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return ""
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") != "text":
+                continue
+            text = block.get("text")
+            if isinstance(text, str):
+                return text
+        return ""
+
+    def _append_pi_system_prompt_metadata(self, trace_path: Path, prompt_input: PromptInput | None) -> None:
+        system_prompt = self._prompt_input_system_prompt(prompt_input)
+        if not system_prompt or self._pi_trace_includes_system_prompt(trace_path, system_prompt):
+            return
+        event = {
+            "type": "custom",
+            "id": f"teich-system-{uuid.uuid4().hex[:8]}",
+            "parentId": None,
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "customType": PI_SYSTEM_PROMPT_CUSTOM_TYPE,
+            "data": {
+                "systemPrompt": system_prompt,
+                "source": "teich",
+            },
+        }
+        with trace_path.open("a", encoding="utf-8") as destination:
+            destination.write(json.dumps(event, separators=(",", ":")) + "\n")
+
+    def _latest_session_source_file(self, session_id: str, session_dir: Path, started_at: datetime) -> Path:
         session_files = self._list_session_files(session_dir)
         fresh_files = [
             path
@@ -4965,7 +5118,10 @@ class PiRunner(DockerRuntimeRunner):
             fresh_files = session_files
         if not fresh_files:
             raise RuntimeError(f"No Pi session file found for {session_id}")
-        source_path = max(fresh_files, key=lambda path: path.stat().st_mtime)
+        return max(fresh_files, key=lambda path: path.stat().st_mtime)
+
+    def _extract_session_file(self, session_id: str, session_dir: Path, started_at: datetime) -> Path:
+        source_path = self._latest_session_source_file(session_id, session_dir, started_at)
         destination = self._resolve_output_path(source_path.name)
         destination.parent.mkdir(parents=True, exist_ok=True)
         self._copy_normalized_session_file(source_path, destination)
@@ -5005,6 +5161,8 @@ class PiRunner(DockerRuntimeRunner):
         started_at = datetime.now(timezone.utc)
         container_name = self._container_name("pi", session_id)
         turn_prompts = _agent_turn_prompts(prompt, prompt_input)
+        failure_trace_saved = False
+        failure_trace_checked = False
         try:
             self._write_pi_agent_settings(agent_dir)
             _make_tree_world_writable(agent_dir)
@@ -5022,48 +5180,88 @@ class PiRunner(DockerRuntimeRunner):
                 )
             for turn_index, turn_prompt in enumerate(turn_prompts):
                 (workspace / TEICH_PROMPT_FILE_NAME).write_text(turn_prompt, encoding="utf-8")
-                if len(turn_prompts) > 1:
-                    command = self._build_pi_exec_command(container_name, continue_session=turn_index > 0)
-                else:
-                    command = self._build_pi_command(
-                        turn_prompt,
-                        workspace,
-                        agent_dir,
-                        session_dir,
-                        container_name,
-                        continue_session=turn_index > 0,
-                    )
-                try:
-                    self._run_process(
-                        command,
-                        session_id,
-                        started_at,
-                        session_dir,
-                        progress_callback,
-                        progress_base,
-                        container_name,
-                    )
-                except subprocess.TimeoutExpired:
-                    raise RuntimeError(
-                        f"Session {session_id[:8]} timed out after {self.config.timeout_seconds}s"
-                    )
-                except subprocess.CalledProcessError as exc:
-                    stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or "")
-                    stdout = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or "")
-                    details = stderr.strip() or stdout.strip()
-                    if turn_index == len(turn_prompts) - 1:
+                expected_turns = turn_prompts[: turn_index + 1]
+                for attempt in range(AGENT_TURN_RETRY_LIMIT + 1):
+                    continue_session = turn_index > 0 or attempt > 0
+                    if len(turn_prompts) > 1:
+                        command = self._build_pi_exec_command(container_name, continue_session=continue_session)
+                    else:
+                        command = self._build_pi_command(
+                            turn_prompt,
+                            workspace,
+                            agent_dir,
+                            session_dir,
+                            container_name,
+                            continue_session=continue_session,
+                        )
+                    process_error: subprocess.CalledProcessError | None = None
+                    details = ""
+                    try:
+                        self._run_process(
+                            command,
+                            session_id,
+                            started_at,
+                            None,
+                            progress_callback,
+                            progress_base,
+                            container_name,
+                            remove_container_on_error=len(turn_prompts) <= 1,
+                        )
+                    except subprocess.TimeoutExpired:
+                        raise RuntimeError(
+                            f"Session {session_id[:8]} timed out after {self.config.timeout_seconds}s"
+                        )
+                    except subprocess.CalledProcessError as exc:
+                        process_error = exc
+                        stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or "")
+                        stdout = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or "")
+                        details = stderr.strip() or stdout.strip() or str(exc)
+
+                    try:
+                        source_trace = self._latest_session_source_file(session_id, session_dir, started_at)
+                    except RuntimeError:
+                        source_trace = None
+
+                    if source_trace is not None and self._trace_contains_completed_turns(source_trace, expected_turns):
+                        break
+
+                    if attempt < AGENT_TURN_RETRY_LIMIT:
+                        continue
+
+                    failure_trace_checked = True
+                    if source_trace is not None:
                         try:
                             trace_path = self._extract_session_file(session_id, session_dir, started_at)
                         except RuntimeError:
-                            pass
-                        else:
-                            self._copy_workspace_snapshot(workspace, self._sandbox_destination(trace_path))
-                            return trace_path
-                    raise RuntimeError(f"Session {session_id[:8]} failed: {details}")
+                            trace_path = None
+                        if trace_path is not None:
+                            self._discard_output_file(trace_path)
+                            failure_trace_saved = True
+                    if process_error is not None:
+                        raise RuntimeError(
+                            f"Session {session_id[:8]} failed after {AGENT_TURN_RETRY_LIMIT} turn retries: {details}"
+                        ) from process_error
+                    raise RuntimeError(
+                        f"Session {session_id[:8]} stopped before completing turn {turn_index + 1} "
+                        f"after {AGENT_TURN_RETRY_LIMIT} retries"
+                    )
             trace_path = self._extract_session_file(session_id, session_dir, started_at)
+            if not self._trace_contains_completed_turns(trace_path, turn_prompts):
+                failure_trace_checked = True
+                self._discard_output_file(trace_path)
+                failure_trace_saved = True
+                raise RuntimeError(f"Session {session_id[:8]} stopped before completing all Pi turns")
+            self._append_pi_system_prompt_metadata(trace_path, prompt_input)
             self._copy_workspace_snapshot(workspace, self._sandbox_destination(trace_path))
             return trace_path
         except BaseException:
+            if not failure_trace_saved and not failure_trace_checked:
+                try:
+                    trace_path = self._extract_session_file(session_id, session_dir, started_at)
+                except RuntimeError:
+                    trace_path = None
+                if trace_path is not None:
+                    self._discard_output_file(trace_path)
             raise
         finally:
             if len(turn_prompts) > 1:

@@ -7,6 +7,14 @@ from typing import Any, Iterable
 from .converter import convert_traces_to_training_data
 
 
+def _path_is_relative_to(path: Path, directory: Path) -> bool:
+    try:
+        path.resolve().relative_to(directory.resolve())
+        return True
+    except ValueError:
+        return False
+
+
 def _merge_tool_parameters(schemas: list[dict[str, Any]]) -> dict[str, Any]:
     object_schemas = [schema for schema in schemas if isinstance(schema, dict) and schema]
     if not object_schemas:
@@ -424,13 +432,18 @@ def build_traces_readme(
             "",
             "For weighted mixes, pass a source mapping with `percentage`, `weight`, or per-source `max_examples`.",
             "Explicit ratios stay true: if a source cannot fill its share after filtering, Teich scales the total row count down instead of backfilling from another source.",
+            "Global `chat_template_kwargs` are the default; source-level `chat_template_kwargs` override those keys for that dataset only.",
             "",
             "```python",
             "train_dataset = prepare_data(",
             "    {",
             "        'max_examples': 2_000,",
             f"        'agent': {{'source': '{dataset_reference}', 'percentage': 80}},",
-            "        'chat': {'source': 'username/other-teich-dataset', 'percentage': 20},",
+            "        'chat': {",
+            "            'source': 'username/other-teich-dataset',",
+            "            'percentage': 20,",
+            "            'chat_template_kwargs': {'enable_thinking': False, 'preserve_thinking': False},",
+            "        },",
             "    },",
             "    tokenizer,",
             "    max_length=MAX_SEQ_LEN,",
@@ -482,11 +495,14 @@ def write_traces_readme(
     model_id: str | None = None,
     repo_id: str | None = None,
     tools: list[dict[str, Any]] | None = None,
+    excluded_dirs: list[Path] | None = None,
 ) -> Path:
     trace_files = sorted(
         path
         for path in traces_dir.rglob("*.jsonl")
-        if path.is_file() and "partials" not in path.relative_to(traces_dir).parts
+        if path.is_file()
+        and not {"partials", "failures"}.intersection(path.relative_to(traces_dir).parts)
+        and not any(_path_is_relative_to(path, excluded_dir) for excluded_dir in excluded_dirs or [])
     )
     dataset_tools = tools if tools is not None else _dataset_tools(trace_files)
     readme_path = traces_dir / "README.md"

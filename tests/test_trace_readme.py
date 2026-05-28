@@ -59,7 +59,9 @@ def test_build_traces_readme_includes_model_and_references_tools(tmp_path: Path)
     assert "['username/repo', 'username/other-teich-dataset']" in readme
     assert "For weighted mixes" in readme
     assert "Explicit ratios stay true" in readme
+    assert "source-level `chat_template_kwargs` override those keys" in readme
     assert "'agent': {'source': 'username/repo', 'percentage': 80}" in readme
+    assert "'chat_template_kwargs': {'enable_thinking': False, 'preserve_thinking': False}" in readme
     assert "convert_traces_to_training_data" not in readme
 
 
@@ -87,6 +89,32 @@ def test_write_traces_readme_embeds_tools_snapshot_in_readme(tmp_path: Path):
     assert '"name": "bash"' in readme
     assert '"description": "Run shell commands"' in readme
     assert '"additionalProperties": false' in readme
+
+
+def test_write_traces_readme_skips_configured_failures_dir(tmp_path: Path):
+    failed_dir = tmp_path / "failed-traces"
+    failed_dir.mkdir()
+    (failed_dir / "failed.jsonl").write_text(
+        '{"type":"session_meta","payload":{"id":"failed"}}\n'
+        '{"type":"response_item","payload":{"type":"tool_schema","name":"bad_tool","schema":{"description":"Failed tool","parameters":{"type":"object","properties":{}}}}}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "trace.jsonl").write_text(
+        '{"type":"session_meta","payload":{"id":"ok"}}\n'
+        '{"type":"response_item","payload":{"type":"tool_schema","name":"bash","schema":{"description":"Run shell commands","parameters":{"type":"object","properties":{}}}}}\n',
+        encoding="utf-8",
+    )
+
+    readme_path = write_traces_readme(
+        tmp_path,
+        pretty_name="Agentic Training Traces",
+        tags=["agent-traces"],
+        excluded_dirs=[failed_dir],
+    )
+
+    readme = readme_path.read_text(encoding="utf-8")
+    assert '"name": "bash"' in readme
+    assert "bad_tool" not in readme
 
 
 def test_write_traces_readme_embeds_claude_code_builtin_tools(tmp_path: Path):

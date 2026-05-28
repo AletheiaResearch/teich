@@ -146,6 +146,42 @@ def test_convert_codex_trace_uses_tool_descriptions_from_base_instructions(tmp_p
     ]
 
 
+def test_convert_pi_trace_uses_teich_eof_system_prompt_metadata(tmp_path: Path):
+    trace_file = tmp_path / "pi-trace.jsonl"
+    events = [
+        {"type": "session", "id": "pi-session-1"},
+        {
+            "type": "message",
+            "id": "user-1",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "Build the app"}],
+            },
+        },
+        {
+            "type": "message",
+            "id": "assistant-1",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Done."}],
+            },
+        },
+        {
+            "type": "custom",
+            "id": "teich-system-1",
+            "customType": "teich-system-prompt",
+            "data": {"systemPrompt": "Use the prompt-level system.", "source": "teich"},
+        },
+    ]
+    trace_file.write_text("\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8")
+
+    example = convert_trace_to_training_example(trace_file)
+
+    assert example.messages[0] == {"role": "system", "content": "Use the prompt-level system."}
+    assert example.messages[1] == {"role": "user", "content": "Build the app"}
+    assert example.metadata["system_prompt"] == "Use the prompt-level system."
+
+
 def test_convert_codex_trace_normalizes_custom_tool_calls(tmp_path: Path):
     trace_file = tmp_path / "codex-custom-tool.jsonl"
     events = [

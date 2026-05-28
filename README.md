@@ -142,8 +142,16 @@ train_dataset = prepare_data(
 train_dataset = prepare_data(
     {
         "max_examples": 1000,
-        "agent": {"source": "badlogicgames/pi-mono", "percentage": 80},
-        "chat": {"source": "TeichAI/Claude-Opus-4.6-Reasoning-887x", "percentage": 20},
+        "reasoning-agent": {
+            "source": "badlogicgames/pi-mono",
+            "percentage": 80,
+            "chat_template_kwargs": {"enable_thinking": True, "preserve_thinking": True},
+        },
+        "instruct-chat": {
+            "source": "TeichAI/polaris-alpha-1000x",
+            "percentage": 20,
+            "chat_template_kwargs": {"enable_thinking": False, "preserve_thinking": False},
+        },
     },
     tokenizer,
     max_length=32768,
@@ -157,6 +165,8 @@ train_dataset = prepare_data(
 Explicit `percentage`, `proportion`, and `weight` values are treated as true ratios.
 
 If one source cannot fill its share after filtering or context-window drops, Teich scales the total row count down instead of silently changing the realized mix.
+
+Global `chat_template_kwargs` are the default for every source. A source-level `chat_template_kwargs` mapping overrides those keys for that dataset only, which lets one `prepare_data()` call mix reasoning and instruct datasets safely.
 
 ### Generate new data from prompts
 
@@ -177,7 +187,7 @@ Outputs:
 - `hermes`: one Hermes-native session JSONL per session exported from `state.db` in the `export_all(source="cli")` shape, including delegated subagent sessions as separate files linked by `parent_session_id`, sandboxes in `sandbox/`, and a `README.md`
 - `chat`: text-only JSONL training rows in `output/` and a dataset `README.md`
 
-Only completed runs are kept at the top level of `output/`. Failed or interrupted agent traces are preserved under `output/partials/` for debugging, and Teich excludes that directory from resume detection, conversion, README generation, and Hugging Face uploads.
+Only completed runs are kept at the top level of `output/`. Failed or interrupted agent traces are moved to `failures/` for debugging, and Teich excludes `failures/` plus legacy `partials/` directories from resume detection, conversion, README generation, and Hugging Face uploads.
 
 Generation progress reports provider/model usage when Teich can retrieve it. For OpenRouter, Teich first queries the provider's generation stats API for native token and cost accounting, then falls back to harness-reported usage. If neither source is available, Teich prints `N/A` instead of treating the missing value as zero.
 
@@ -438,6 +448,7 @@ prompts: []
 output:
   traces_dir: ./output
   sandbox_dir: ./sandbox
+  failures_dir: ./failures
   pretty_name: "My Agent Traces"
 
 publish:

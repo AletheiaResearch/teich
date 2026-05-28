@@ -9,6 +9,7 @@ from typing import Any
 
 
 _INLINE_THINKING_BLOCK_PATTERN = re.compile(r"<(think|thinking)>(.*?)</\1>", re.DOTALL)
+PI_SYSTEM_PROMPT_CUSTOM_TYPE = "teich-system-prompt"
 
 _CLAUDE_CODE_BUILTIN_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "Task": {
@@ -257,7 +258,7 @@ class TrainingExample:
 
 def _first_text_block(content_blocks: Any) -> str:
     if isinstance(content_blocks, str):
-        return content_blocks.strip()
+        return _unwrap_teich_prompt_file(content_blocks).strip()
     if not isinstance(content_blocks, list):
         return ""
     parts: list[str] = []
@@ -269,7 +270,19 @@ def _first_text_block(content_blocks: Any) -> str:
             text = block.get("text")
             if isinstance(text, str) and text:
                 parts.append(text)
-    return "\n".join(parts).strip()
+    return _unwrap_teich_prompt_file("\n".join(parts)).strip()
+
+
+def _unwrap_teich_prompt_file(prompt: str) -> str:
+    normalized = prompt.strip()
+    match = re.fullmatch(
+        r'<file\s+name=["\'][^"\']*\.teich-prompt\.txt["\']>\s*(?P<prompt>.*?)\s*</file>',
+        normalized,
+        flags=re.DOTALL,
+    )
+    if match:
+        return match.group("prompt")
+    return prompt
 
 
 def _split_inline_thinking(text: str) -> tuple[str, str | None]:
@@ -336,6 +349,18 @@ def _is_tool_not_found_result(tool_name: str | None, payload: dict[str, Any]) ->
     if tool_name:
         return content == f"Tool {tool_name} not found"
     return content == "Tool  not found"
+
+
+def _pi_teich_system_prompt_from_event(event: dict[str, Any]) -> str | None:
+    if event.get("type") != "custom" or event.get("customType") != PI_SYSTEM_PROMPT_CUSTOM_TYPE:
+        return None
+    data = event.get("data")
+    if not isinstance(data, dict):
+        return None
+    system_prompt = data.get("systemPrompt")
+    if not isinstance(system_prompt, str) or not system_prompt.strip():
+        return None
+    return system_prompt.strip()
 
 
 def _reasoning_summary(payload: dict[str, Any]) -> str | None:
@@ -711,7 +736,7 @@ def _detect_trace_type(events: list[dict[str, Any]]) -> str:
 
 def _claude_text_from_content(content: Any) -> str:
     if isinstance(content, str):
-        return content.strip()
+        return _unwrap_teich_prompt_file(content).strip()
     if not isinstance(content, list):
         return ""
     parts: list[str] = []
@@ -727,7 +752,7 @@ def _claude_text_from_content(content: Any) -> str:
             text = block.get("content")
             if isinstance(text, str) and text.strip():
                 parts.append(text.strip())
-    return "\n".join(parts).strip()
+    return _unwrap_teich_prompt_file("\n".join(parts)).strip()
 
 
 def _claude_reasoning_from_content(content: Any) -> str | None:
@@ -1523,6 +1548,7 @@ def _convert_pi_trace_to_training_example(
     model_change: dict[str, Any] = {}
     session_names: list[str] = []
     thinking_level: str | None = None
+    teich_system_prompt: str | None = None
     prompt = ""
     invalid_tool_call_ids: set[str] = set()
 
@@ -1558,6 +1584,9 @@ def _convert_pi_trace_to_training_example(
             name = event.get("name")
             if isinstance(name, str) and name.strip():
                 session_names.append(name.strip())
+            continue
+        if event_type == "custom":
+            teich_system_prompt = teich_system_prompt or _pi_teich_system_prompt_from_event(event)
             continue
         if event_type != "message":
             continue
@@ -1642,6 +1671,9 @@ def _convert_pi_trace_to_training_example(
             continue
         messages.append(message)
 
+    if teich_system_prompt and not _has_same_system_message(messages, teich_system_prompt):
+        messages.insert(0, {"role": "system", "content": teich_system_prompt})
+
     tools = [
         _build_tool_entry(
             name,
@@ -1674,6 +1706,8 @@ def _convert_pi_trace_to_training_example(
     }
     if thinking_level:
         metadata["thinking_level"] = thinking_level
+    if teich_system_prompt:
+        metadata["system_prompt"] = teich_system_prompt
     if session_names:
         metadata["session_names"] = session_names
         metadata["session_name"] = session_names[-1]
@@ -1824,7 +1858,7 @@ def _jsonl_files(source: Path) -> list[Path]:
     return sorted(
         path
         for path in source.rglob("*.jsonl")
-        if path.is_file() and "partials" not in path.relative_to(source).parts
+        if path.is_file() and not {"partials", "failures"}.intersection(path.relative_to(source).parts)
     )
 
 

@@ -101,6 +101,10 @@ output:
   # Where Teich stores workspace snapshots for each run.
   sandbox_dir: ./sandbox
 
+  # Where Teich stores failed or interrupted traces for debugging.
+  # These files are excluded from resume detection, conversion, README generation, and uploads.
+  failures_dir: ./failures
+
   # Used in the generated trace README.
   pretty_name: "My Agent Traces"
 

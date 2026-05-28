@@ -21,6 +21,7 @@ class _SourceMixEntry:
     max_examples: int | None
     percentage: float | None
     has_explicit_mix_value: bool
+    chat_template_kwargs: dict[str, Any] | None
 
 
 @dataclass(slots=True)
@@ -30,6 +31,7 @@ class _ResolvedSourceMix:
     max_examples: int | None
     names: list[str]
     rigid_percentages: bool
+    chat_template_kwargs: list[dict[str, Any] | None]
 
 
 @dataclass(slots=True)
@@ -80,7 +82,7 @@ def prepare_data(
                 messages_column=messages_column,
                 tools_column=tools_column,
                 text_column=text_column,
-                chat_template_kwargs=chat_template_kwargs,
+                chat_template_kwargs=_merge_chat_template_kwargs(chat_template_kwargs, source_chat_template_kwargs),
                 train_on_reasoning=train_on_reasoning,
                 teich_masking=teich_masking,
                 max_length=max_length,
@@ -90,7 +92,11 @@ def prepare_data(
                 strict=strict,
                 verbose=verbose,
             )
-            for source_dataset in dataset.datasets
+            for source_dataset, source_chat_template_kwargs in zip(
+                dataset.datasets,
+                dataset.chat_template_kwargs,
+                strict=True,
+            )
         ]
         return _mix_prepared_datasets(
             formatted_datasets,
@@ -248,6 +254,10 @@ def _source_mix_entry_from_value(value: Any, *, default_name: str) -> _SourceMix
                 max_examples=_optional_non_negative_int(value.get("max_examples"), f"{name_value}.max_examples"),
                 percentage=_optional_mix_value(value, name_value),
                 has_explicit_mix_value=_has_explicit_mix_value(value),
+                chat_template_kwargs=_optional_chat_template_kwargs(
+                    value.get("chat_template_kwargs"),
+                    f"{name_value}.chat_template_kwargs",
+                ),
             )
         raise TypeError("A source mix entry mapping must include a 'source', 'dataset', or 'path' key.")
     return _SourceMixEntry(
@@ -256,6 +266,7 @@ def _source_mix_entry_from_value(value: Any, *, default_name: str) -> _SourceMix
         max_examples=None,
         percentage=None,
         has_explicit_mix_value=False,
+        chat_template_kwargs=None,
     )
 
 
@@ -308,6 +319,27 @@ def _optional_percentage(value: Any, name: str) -> float | None:
     return percentage / 100 if percentage > 1 else percentage
 
 
+def _optional_chat_template_kwargs(value: Any, name: str) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{name} must be a mapping of apply_chat_template keyword arguments.")
+    if not all(isinstance(key, str) for key in value):
+        raise TypeError(f"{name} keys must be strings.")
+    return dict(value)
+
+
+def _merge_chat_template_kwargs(
+    global_kwargs: dict[str, Any] | None,
+    source_kwargs: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if source_kwargs is None:
+        return global_kwargs
+    merged = dict(global_kwargs or {})
+    merged.update(source_kwargs)
+    return merged
+
+
 def _resolve_source_mix(
     entries: Sequence[_SourceMixEntry],
     *,
@@ -353,6 +385,7 @@ def _resolve_source_mix(
         max_examples=max_examples,
         names=[entry.name for entry in entries],
         rigid_percentages=any(entry.has_explicit_mix_value for entry in entries),
+        chat_template_kwargs=[entry.chat_template_kwargs for entry in entries],
     )
 
 

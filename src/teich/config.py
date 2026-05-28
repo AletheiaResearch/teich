@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 GITHUB_REPO_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+PLACEHOLDER_API_KEYS = {"", "none", "null", "dummy", "placeholder", "example", "local"}
 
 
 def _api_key_env_aliases(provider: str | None) -> list[str]:
@@ -31,9 +32,18 @@ def _api_key_env_aliases(provider: str | None) -> list[str]:
 def _get_env_alias(*names: str) -> str | None:
     for name in names:
         value = os.getenv(name)
-        if value:
-            return value
+        if value and _normalize_api_key(value):
+            return _normalize_api_key(value)
     return None
+
+
+def _normalize_api_key(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if normalized.lower() in PLACEHOLDER_API_KEYS:
+        return None
+    return normalized
 
 
 def _raise_csv_field_limit() -> None:
@@ -117,6 +127,7 @@ class OutputConfig(BaseModel):
     """Output configuration."""
     traces_dir: Path = Field(default=Path("./output"))
     sandbox_dir: Path = Field(default=Path("./sandbox"))
+    failures_dir: Path = Field(default=Path("./failures"))
     pretty_name: str = "Agentic Training Traces"
 
 
@@ -282,7 +293,11 @@ class Config(BaseModel):
 
     def get_api_key(self) -> str | None:
         """Get effective API key (from api config or global)."""
-        return self.api.api_key or self.openai_api_key or _get_env_alias(*_api_key_env_aliases(self.api.provider))
+        return (
+            _normalize_api_key(self.api.api_key)
+            or _normalize_api_key(self.openai_api_key)
+            or _get_env_alias(*_api_key_env_aliases(self.api.provider))
+        )
 
     def get_effective_model(self) -> str:
         """Get effective model identifier."""

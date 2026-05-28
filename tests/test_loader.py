@@ -57,14 +57,17 @@ def test_load_traces_from_local_split_directory(tmp_path: Path):
     assert row["tools"][0]["function"]["name"] == "bash"
 
 
-def test_load_traces_reads_nested_jsonl_files_and_skips_partials(tmp_path: Path):
+def test_load_traces_reads_nested_jsonl_files_and_skips_non_data_dirs(tmp_path: Path):
     train_dir = tmp_path / "train"
     nested_dir = train_dir / "nested"
     partials_dir = train_dir / "partials"
+    failures_dir = train_dir / "failures"
     nested_dir.mkdir(parents=True)
     partials_dir.mkdir(parents=True)
+    failures_dir.mkdir(parents=True)
     _write_codex_trace(nested_dir / "trace.jsonl", prompt="Nested prompt")
     _write_codex_trace(partials_dir / "partial.jsonl", prompt="Partial prompt")
+    _write_codex_trace(failures_dir / "failed.jsonl", prompt="Failed prompt")
 
     dataset = load_traces(tmp_path, split="train")
 

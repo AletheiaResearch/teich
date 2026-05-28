@@ -16,6 +16,7 @@ def test_default_config():
     assert config.model.pi_model_overrides == {"maxTokens": 131072}
     assert config.output.traces_dir == Path("./output")
     assert config.output.sandbox_dir == Path("./sandbox")
+    assert config.output.failures_dir == Path("./failures")
     assert config.max_concurrency == 1
     assert config.timeout_seconds == 600
     assert config.mcp_servers == []
@@ -58,6 +59,7 @@ prompts:
 output:
   traces_dir: ./traces
   sandbox_dir: ./sandboxes
+  failures_dir: ./failed-traces
   pretty_name: "Test Traces"
 
 publish:
@@ -80,6 +82,7 @@ openai_api_key: sk-test123
     assert config.mcp_servers[0].command == "npx"
     assert config.output.traces_dir == Path("./traces")
     assert config.output.sandbox_dir == Path("./sandboxes")
+    assert config.output.failures_dir == Path("./failed-traces")
     assert config.output.pretty_name == "Test Traces"
     assert config.publish.repo_id == "armand0e/test-dataset"
     assert config.publish.hf_token == "hf-test123"
@@ -106,6 +109,16 @@ prompts:
 
     assert config.api.api_key == "sk-or-v1-test"
     assert Config(api={"provider": "openrouter"}).get_api_key() == "sk-or-v1-test"
+
+
+def test_placeholder_api_keys_are_treated_as_absent(monkeypatch):
+    monkeypatch.delenv("TEICH_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    assert Config(api={"api_key": "none"}).get_api_key() is None
+    assert Config(api={"api_key": " null "}).get_api_key() is None
+    assert Config(openai_api_key="local").get_api_key() is None
 
 
 def test_openrouter_api_key_env_alias_does_not_override_explicit_config(tmp_path: Path, monkeypatch):

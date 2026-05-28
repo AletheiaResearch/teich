@@ -35,6 +35,21 @@ app = typer.Typer(
     help="Generate agent training data using Codex, Pi, Claude Code, Hermes, or chat",
     no_args_is_help=True,
 )
+NON_DATA_TRACE_DIR_NAMES = {"partials", "failures"}
+UPLOAD_IGNORE_PATTERNS = ["partials/**", "failures/**"]
+
+
+def _upload_ignore_patterns(cfg: Config) -> list[str]:
+    patterns = list(UPLOAD_IGNORE_PATTERNS)
+    try:
+        relative_failures_dir = cfg.output.failures_dir.resolve().relative_to(cfg.output.traces_dir.resolve())
+    except ValueError:
+        return patterns
+    if relative_failures_dir.parts:
+        pattern = f"{relative_failures_dir.as_posix()}/**"
+        if pattern not in patterns:
+            patterns.append(pattern)
+    return patterns
 
 
 def _has_non_empty_trace_outputs(traces_dir: Path) -> bool:
@@ -44,7 +59,7 @@ def _has_non_empty_trace_outputs(traces_dir: Path) -> bool:
         if not path.is_file():
             continue
         try:
-            if "partials" in path.relative_to(traces_dir).parts:
+            if any(part in NON_DATA_TRACE_DIR_NAMES for part in path.relative_to(traces_dir).parts):
                 continue
         except ValueError:
             pass
@@ -61,6 +76,7 @@ def _write_output_metadata(cfg: Config) -> Path:
         model_id=cfg.model.model,
         repo_id=cfg.get_publish_repo_id(),
         tools=snapshot_configured_tools(cfg),
+        excluded_dirs=[cfg.output.failures_dir],
     )
 
 
@@ -112,7 +128,7 @@ def _publish_dataset_to_hub(cfg: Config) -> str:
             folder_path=str(cfg.output.traces_dir),
             repo_type="dataset",
             private=cfg.publish.private,
-            ignore_patterns=["partials/**"],
+            ignore_patterns=_upload_ignore_patterns(cfg),
         )
     else:
         api.upload_folder(
@@ -120,7 +136,7 @@ def _publish_dataset_to_hub(cfg: Config) -> str:
             repo_id=repo_id,
             repo_type="dataset",
             commit_message="Upload teich dataset output",
-            ignore_patterns=["partials/**"],
+            ignore_patterns=_upload_ignore_patterns(cfg),
         )
     return str(repo_url)
 
@@ -146,7 +162,8 @@ def _print_interrupted_upload_hint(cfg: Config) -> None:
     if not repo_id:
         return
     private_flag = " --private" if cfg.publish.private else ""
-    upload_command = f'hf upload {repo_id} . . --repo-type dataset --exclude "partials/**"{private_flag}'
+    exclude_flags = " ".join(f'--exclude "{pattern}"' for pattern in _upload_ignore_patterns(cfg))
+    upload_command = f"hf upload {repo_id} . . --repo-type dataset {exclude_flags}{private_flag}"
     console.print("[yellow]Skipping Hugging Face upload for interrupted run.[/yellow]")
     console.print("[cyan]To upload the completed outputs later, run this from the output folder:[/cyan]")
     console.print(f"  {upload_command}", soft_wrap=True)
@@ -198,8 +215,16 @@ def generate(
     # Ensure output dir exists
     cfg.output.traces_dir.mkdir(parents=True, exist_ok=True)
     if resume:
-        completed_keys = completed_prompt_keys_from_outputs(cfg.output.traces_dir)
-        pending_prompt_inputs = prompt_inputs_for_run(prompt_inputs, cfg.output.traces_dir, resume=True)
+        completed_keys = completed_prompt_keys_from_outputs(
+            cfg.output.traces_dir,
+            excluded_dirs=[cfg.output.failures_dir],
+        )
+        pending_prompt_inputs = prompt_inputs_for_run(
+            prompt_inputs,
+            cfg.output.traces_dir,
+            resume=True,
+            excluded_dirs=[cfg.output.failures_dir],
+        )
         skipped_count = len(prompt_inputs) - len(pending_prompt_inputs)
     else:
         completed_keys = set()
@@ -617,6 +642,10 @@ output:
 
   # Where Teich stores workspace snapshots for each run.
   sandbox_dir: ./sandbox
+
+  # Where Teich stores failed or interrupted traces for debugging.
+  # These files are excluded from resume detection, conversion, README generation, and uploads.
+  failures_dir: ./failures
 
   # Used in the generated trace README.
   pretty_name: "My Agent Traces"

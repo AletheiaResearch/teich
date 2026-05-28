@@ -338,7 +338,7 @@ api:
             folder_path=str(output_dir),
             repo_type="dataset",
             private=True,
-            ignore_patterns=["partials/**"],
+            ignore_patterns=["partials/**", "failures/**"],
         )
         mock_api.upload_folder.assert_not_called()
 
@@ -423,7 +423,10 @@ api:
         assert "Wrote README for completed outputs" in result.output
         assert "Upload successful traces to Hugging Face dataset" not in result.output
         assert "Skipping Hugging Face upload for interrupted run" in result.output
-        assert 'hf upload armand0e/test-dataset . . --repo-type dataset --exclude "partials/**"' in result.output
+        assert (
+            'hf upload armand0e/test-dataset . . --repo-type dataset --exclude "partials/**" --exclude "failures/**"'
+            in result.output
+        )
         assert "Interrupted. Completed outputs remain on disk" in result.output
         mock_api_cls.assert_not_called()
 
@@ -457,6 +460,8 @@ api:
     )
     (output_dir / "partials").mkdir()
     (output_dir / "partials" / "partial.jsonl").write_text("partial\n", encoding="utf-8")
+    (output_dir / "failures").mkdir()
+    (output_dir / "failures" / "failed.jsonl").write_text("failed\n", encoding="utf-8")
 
     with patch('teich.cli.ChatRunner') as mock_runner, patch('teich.cli.HfApi') as mock_api_cls:
         mock_instance = MagicMock()
@@ -482,7 +487,7 @@ api:
             folder_path=str(output_dir),
             repo_type="dataset",
             private=False,
-            ignore_patterns=["partials/**"],
+            ignore_patterns=["partials/**", "failures/**"],
         )
         mock_api.upload_folder.assert_not_called()
 

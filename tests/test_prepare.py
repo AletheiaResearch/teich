@@ -48,6 +48,25 @@ class TinyChatTokenizer:
         return "".join(self._reverse_vocab[token_id] for token_id in token_ids)
 
 
+class ThinkingModeTokenizer(TinyChatTokenizer):
+    def apply_chat_template(self, messages, *, tokenize=False, add_generation_prompt=False, tools=None, **kwargs):
+        rendered = super().apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=add_generation_prompt,
+            tools=tools,
+            **kwargs,
+        )
+        rendered = (
+            f"<template enable_thinking={kwargs.get('enable_thinking')} "
+            f"preserve_thinking={kwargs.get('preserve_thinking')}>"
+            f"{rendered}"
+        )
+        if tokenize:
+            return self(rendered)
+        return rendered
+
+
 def _dataset() -> Dataset:
     return Dataset.from_list(
         [
@@ -155,6 +174,117 @@ def test_prepare_data_loads_local_source(tmp_path: Path):
     assert set(prepared.column_names) == {"text", "teich_supervised_spans"}
 
 
+def test_prepare_data_loads_native_agent_traces_end_to_end(tmp_path: Path):
+    prompt_wrapper = '<file name="/workspace/.teich-prompt.txt">\nBuild from file\n</file>'
+    (tmp_path / "codex.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "session_meta", "payload": {"id": "codex-1", "source": "codex"}}),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": prompt_wrapper}],
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "Codex done"}],
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "claude.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "user",
+                        "sessionId": "claude-1",
+                        "message": {"role": "user", "content": "Build Claude"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "sessionId": "claude-1",
+                        "message": {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "Claude done"}],
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "hermes.jsonl").write_text(
+        json.dumps(
+            {
+                "id": "hermes-1",
+                "source": "cli",
+                "model": "Opus-Agent",
+                "messages": [
+                    {"role": "user", "content": "Build Hermes"},
+                    {"role": "assistant", "content": "Hermes done"},
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pi.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "session", "id": "pi-1"}),
+                json.dumps(
+                    {
+                        "type": "message",
+                        "message": {
+                            "role": "user",
+                            "content": [{"type": "text", "text": "Build Pi"}],
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "message",
+                        "message": {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "Pi done"}],
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    prepared = prepare_data(tmp_path, TinyChatTokenizer(), split=None, verbose=False)
+
+    assert prepared.num_rows == 4
+    rendered = "\n".join(prepared["text"])
+    assert "Build from file" in rendered
+    assert ".teich-prompt.txt" not in rendered
+    assert "Codex done" in rendered
+    assert "Claude done" in rendered
+    assert "Hermes done" in rendered
+    assert "Pi done" in rendered
+
+
 def test_prepare_data_forwards_hf_token_alias_to_loader():
     tokenizer = TinyChatTokenizer()
 
@@ -196,6 +326,48 @@ def test_prepare_data_accepts_source_mix_with_percentages_and_caps():
     assert prepared.num_rows == 10
     assert sum("agent answer" in text for text in texts) == 7
     assert sum("chat answer" in text for text in texts) == 3
+
+
+def test_prepare_data_source_mix_supports_dataset_level_chat_template_kwargs():
+    tokenizer = ThinkingModeTokenizer()
+
+    prepared = prepare_data(
+        {
+            "reasoning": {
+                "source": _dataset_with_answers("reasoning", 1),
+                "chat_template_kwargs": {"enable_thinking": True},
+            },
+            "instruct": {
+                "source": _dataset_with_answers("instruct", 1),
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+        },
+        tokenizer,
+        chat_template_kwargs={"enable_thinking": True, "preserve_thinking": True},
+        verbose=False,
+    )
+
+    texts = [prepared[index]["text"] for index in range(prepared.num_rows)]
+    reasoning_text = next(text for text in texts if "reasoning answer" in text)
+    instruct_text = next(text for text in texts if "instruct answer" in text)
+    assert "<template enable_thinking=True preserve_thinking=True>" in reasoning_text
+    assert "<template enable_thinking=False preserve_thinking=True>" in instruct_text
+
+
+def test_prepare_data_source_mix_rejects_invalid_dataset_level_chat_template_kwargs():
+    tokenizer = TinyChatTokenizer()
+
+    with pytest.raises(TypeError, match="chat_template_kwargs must be a mapping"):
+        prepare_data(
+            {
+                "bad": {
+                    "source": _dataset(),
+                    "chat_template_kwargs": ["enable_thinking", False],
+                }
+            },
+            tokenizer,
+            verbose=False,
+        )
 
 
 def test_prepare_data_source_mix_applies_each_source_tools_snapshot_independently(tmp_path: Path):
