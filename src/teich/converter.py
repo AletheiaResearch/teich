@@ -1232,6 +1232,11 @@ def _convert_claude_code_trace_to_training_example(
             reasoning_content = _claude_reasoning_from_content(content_blocks)
             if reasoning_content:
                 message["reasoning_content"] = reasoning_content
+            if event.get("isApiErrorMessage") is True:
+                message["teich_provider_error"] = True
+            error_kind = event.get("error")
+            if isinstance(error_kind, str) and error_kind.strip():
+                message["teich_provider_error"] = error_kind.strip()
             tool_calls: list[dict[str, Any]] = []
             if isinstance(content_blocks, list):
                 for block in content_blocks:

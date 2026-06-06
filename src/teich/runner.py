@@ -333,11 +333,20 @@ async function readRequestBody(req) {
   return chunks.length ? Buffer.concat(chunks) : undefined;
 }
 
+function responseHeadersForClient(upstream) {
+  const headers = Object.fromEntries(upstream.headers.entries());
+  delete headers['content-encoding'];
+  delete headers['content-length'];
+  delete headers['transfer-encoding'];
+  return headers;
+}
+
 const server = http.createServer(async (req, res) => {
   const upstreamUrl = new URL(req.url || '/', target);
   const headers = { ...req.headers };
   delete headers.host;
   delete headers['content-length'];
+  headers['accept-encoding'] = 'identity';
 
   try {
     const body = req.method === 'GET' || req.method === 'HEAD' ? undefined : await readRequestBody(req);
@@ -349,7 +358,7 @@ const server = http.createServer(async (req, res) => {
       dispatcher: upstreamUrl.protocol === 'https:' ? undefined : undefined,
     });
 
-    res.writeHead(upstream.status, Object.fromEntries(upstream.headers.entries()));
+    res.writeHead(upstream.status, responseHeadersForClient(upstream));
     if (!upstream.body) {
       res.end();
       return;
@@ -379,6 +388,14 @@ async function readRequestBody(req) {
     chunks.push(chunk);
   }
   return chunks.length ? Buffer.concat(chunks) : undefined;
+}
+
+function responseHeadersForClient(upstream) {
+  const headers = Object.fromEntries(upstream.headers.entries());
+  delete headers['content-encoding'];
+  delete headers['content-length'];
+  delete headers['transfer-encoding'];
+  return headers;
 }
 
 function upstreamUrlFor(reqUrl) {
@@ -427,6 +444,7 @@ const server = http.createServer(async (req, res) => {
   const headers = { ...req.headers };
   delete headers.host;
   delete headers['content-length'];
+  headers['accept-encoding'] = 'identity';
   const apiKey = headers['x-api-key'] || headers.authorization?.replace(/^Bearer\\s+/i, '');
   if (apiKey && !headers.authorization) {
     headers.authorization = `Bearer ${apiKey}`;
@@ -442,7 +460,7 @@ const server = http.createServer(async (req, res) => {
       duplex: body ? 'half' : undefined,
     });
 
-    res.writeHead(upstream.status, Object.fromEntries(upstream.headers.entries()));
+    res.writeHead(upstream.status, responseHeadersForClient(upstream));
     if (!upstream.body) {
       res.end();
       return;
@@ -865,6 +883,30 @@ def _assistant_message_has_tool_calls(message: dict[str, Any]) -> bool:
     return isinstance(tool_calls, list) and bool(tool_calls)
 
 
+def _assistant_message_is_provider_error(message: dict[str, Any]) -> bool:
+    if message.get("role") not in {"assistant", "model"}:
+        return False
+    if message.get("teich_provider_error"):
+        return True
+    content = _message_text(message.get("content")).strip()
+    return content.startswith("API Error:") or content.startswith("OpenRouter upstream request failed.")
+
+
+def _training_example_ends_on_provider_error(example: dict[str, Any]) -> bool:
+    messages = example.get("messages")
+    if not isinstance(messages, list):
+        return False
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        if role in {"assistant", "model"}:
+            return _assistant_message_is_provider_error(message)
+        if role == "tool":
+            return False
+    return False
+
+
 def _training_example_completed_turns(example: dict[str, Any], turn_prompts: list[str]) -> bool:
     if not turn_prompts or not _training_example_has_answer(example):
         return False
@@ -904,6 +946,8 @@ def _training_example_completed_turns(example: dict[str, Any], turn_prompts: lis
                 return False
             last_message = turn_messages[-1]
             if last_message.get("role") not in {"assistant", "model"}:
+                return False
+            if _assistant_message_is_provider_error(last_message):
                 return False
             if _assistant_message_has_tool_calls(last_message):
                 return False
@@ -977,8 +1021,21 @@ def completed_prompt_keys_from_outputs(traces_dir: Path, excluded_dirs: list[Pat
             prompt = example.get("prompt") if isinstance(example.get("prompt"), str) else ""
             if not prompt.strip():
                 prompt = _prompt_from_training_messages(example.get("messages"))
-            if isinstance(prompt, str) and prompt.strip() and _training_example_has_answer(example):
-                completed.add(_prompt_resume_key(_prompt_input_from_training_example(example, prompt)))
+            if not isinstance(prompt, str) or not prompt.strip():
+                continue
+            prompt_input = _prompt_input_from_training_example(example, prompt)
+            turn_prompt_input = prompt_input if isinstance(prompt_input, PromptInput) else None
+            messages = example.get("messages")
+            has_user_message = isinstance(messages, list) and any(
+                isinstance(message, dict) and message.get("role") == "user"
+                for message in messages
+            )
+            if has_user_message:
+                is_complete = _training_example_completed_turns(example, _agent_turn_prompts(prompt, turn_prompt_input))
+            else:
+                is_complete = _training_example_has_answer(example) and not _training_example_ends_on_provider_error(example)
+            if is_complete:
+                completed.add(_prompt_resume_key(prompt_input))
     return completed
 
 

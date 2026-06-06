@@ -346,6 +346,43 @@ def test_convert_claude_code_stream_json_trace(tmp_path: Path):
     assert todo_tool["function"]["parameters"]["properties"]["todos"]["type"] == "array"
 
 
+def test_convert_claude_code_marks_native_api_error_message(tmp_path: Path):
+    trace_file = tmp_path / "claude-code-api-error.jsonl"
+    events = [
+        {
+            "type": "user",
+            "message": {"role": "user", "content": "Build app"},
+            "uuid": "user-uuid",
+            "parentUuid": None,
+            "sessionId": "claude-session",
+        },
+        {
+            "type": "assistant",
+            "isApiErrorMessage": True,
+            "error": "api_error",
+            "message": {
+                "role": "assistant",
+                "model": "<synthetic>",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": 'API Error: ZlibError fetching "http://127.0.0.1:17891/v1/messages?beta=true".',
+                    }
+                ],
+            },
+            "uuid": "assistant-uuid",
+            "parentUuid": "user-uuid",
+            "sessionId": "claude-session",
+        },
+    ]
+    trace_file.write_text("\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8")
+
+    example = convert_trace_to_training_example(trace_file)
+
+    assert example.messages[1]["content"].startswith("API Error: ZlibError")
+    assert example.messages[1]["teich_provider_error"] == "api_error"
+
+
 def test_convert_native_claude_code_transcript_with_camel_session_id(tmp_path: Path):
     trace_file = tmp_path / "native-claude.jsonl"
     events = [

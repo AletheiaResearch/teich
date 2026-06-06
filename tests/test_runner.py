@@ -1,13 +1,19 @@
 """Tests for runner module."""
 
 from datetime import datetime, timedelta, timezone
+import gzip
 import io
 import json
+import os
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import shutil
+import socket
 import sqlite3
 import subprocess
 import threading
 import time
+from urllib.request import Request, urlopen
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -17,6 +23,7 @@ from teich.config import APIConfig, Config, MCPConfig, ModelConfig, PromptInput
 from teich.runner import (
     ChatRunner,
     ClaudeCodeRunner,
+    CLAUDE_OPENROUTER_PROXY_SCRIPT,
     CodexRunner,
     DockerRuntimeRunner,
     HermesRunner,
@@ -24,6 +31,23 @@ from teich.runner import (
     RUNTIME_CONTAINER_USER,
     pending_prompt_inputs_for_resume,
 )
+
+
+def _free_tcp_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _wait_for_tcp_port(port: int, timeout: float = 5.0) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.1):
+                return
+        except OSError:
+            time.sleep(0.05)
+    raise TimeoutError(f"port {port} did not open")
 
 
 def _claude_home_from_command(command: list[str]) -> Path:
@@ -576,6 +600,84 @@ def test_claude_code_runner_uses_openrouter_anthropic_skin_auth(tmp_path: Path):
     assert rows[0]["type"] == "user"
     assert rows[0]["message"]["content"] == "smoke"
     assert rows[1]["message"]["model"] == "minimax/minimax-m2.5:free"
+
+
+def test_claude_openrouter_proxy_strips_decoded_compression_headers(tmp_path: Path):
+    if shutil.which("node") is None:
+        pytest.skip("node is required for the proxy smoke test")
+
+    upstream_port = _free_tcp_port()
+    proxy_port = _free_tcp_port()
+    response_payload = b'{"ok":true}\n'
+    seen: dict[str, object] = {}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            body = self.rfile.read(int(self.headers.get("content-length", "0")))
+            seen["accept_encoding"] = self.headers.get("accept-encoding")
+            seen["authorization"] = self.headers.get("authorization")
+            seen["path"] = self.path
+            seen["body"] = json.loads(body.decode("utf-8"))
+            compressed = gzip.compress(response_payload)
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-encoding", "gzip")
+            self.send_header("content-length", str(len(compressed)))
+            self.end_headers()
+            self.wfile.write(compressed)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", upstream_port), Handler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    proxy_script = tmp_path / "claude_openrouter_proxy.js"
+    proxy_script.write_text(CLAUDE_OPENROUTER_PROXY_SCRIPT + "\n", encoding="utf-8")
+    process = subprocess.Popen(
+        ["node", str(proxy_script)],
+        env={
+            **os.environ,
+            "TEICH_CLAUDE_PROXY_TARGET": f"http://127.0.0.1:{upstream_port}/v1",
+            "TEICH_CLAUDE_PROXY_TARGET_MODEL": "minimax/minimax-m3",
+            "TEICH_CLAUDE_PROXY_PORT": str(proxy_port),
+        },
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        _wait_for_tcp_port(proxy_port)
+        request = Request(
+            f"http://127.0.0.1:{proxy_port}/v1/messages?beta=true",
+            data=json.dumps({"model": "claude-sonnet-4-6", "thinking": {"type": "enabled"}}).encode("utf-8"),
+            headers={
+                "content-type": "application/json",
+                "x-api-key": "sk-test",
+                "accept-encoding": "gzip, deflate, br",
+            },
+            method="POST",
+        )
+        with urlopen(request, timeout=5) as response:
+            headers = {key.lower(): value for key, value in response.headers.items()}
+            body = response.read()
+
+        assert body == response_payload
+        assert "content-encoding" not in headers
+        assert "content-length" not in headers
+        assert seen["accept_encoding"] == "identity"
+        assert seen["authorization"] == "Bearer sk-test"
+        assert seen["path"] == "/v1/messages?beta=true"
+        assert seen["body"] == {"model": "minimax/minimax-m3"}
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=2)
+        server.shutdown()
+        server.server_close()
 
 
 def test_claude_code_runner_uses_proxy_for_custom_non_claude_model(tmp_path: Path):
@@ -4116,6 +4218,45 @@ def test_resume_detects_completed_agent_follow_up_prompt_sets(tmp_path: Path):
     ]
 
 
+def test_resume_regenerates_agent_trace_that_ends_on_provider_error(tmp_path: Path):
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "claude-error.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "Build app"},
+                "sessionId": "claude-error-session",
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "assistant",
+                "isApiErrorMessage": True,
+                "error": "api_error",
+                "message": {
+                    "role": "assistant",
+                    "model": "<synthetic>",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": 'API Error: ZlibError fetching "http://127.0.0.1:17891/v1/messages?beta=true".',
+                        }
+                    ],
+                },
+                "sessionId": "claude-error-session",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    pending = pending_prompt_inputs_for_resume([PromptInput(prompt="Build app")], output_dir)
+
+    assert [item.prompt for item in pending] == ["Build app"]
+
+
 def test_completed_turns_rejects_trace_that_ends_on_tool_result():
     incomplete = {
         "messages": [
@@ -4137,6 +4278,29 @@ def test_completed_turns_rejects_trace_that_ends_on_tool_result():
 
     assert not runner_module._training_example_completed_turns(incomplete, ["Build app"])
     assert runner_module._training_example_completed_turns(complete, ["Build app"])
+
+
+def test_completed_turns_rejects_trace_that_ends_on_provider_error():
+    trace = {
+        "messages": [
+            {"role": "user", "content": "Build app"},
+            {"role": "assistant", "content": "I created the app."},
+            {
+                "role": "assistant",
+                "content": 'API Error: ZlibError fetching "http://127.0.0.1:17891/v1/messages?beta=true".',
+                "teich_provider_error": True,
+            },
+        ]
+    }
+    recovered = {
+        "messages": [
+            *trace["messages"],
+            {"role": "assistant", "content": "Recovered and finished."},
+        ]
+    }
+
+    assert not runner_module._training_example_completed_turns(trace, ["Build app"])
+    assert runner_module._training_example_completed_turns(recovered, ["Build app"])
 
 
 def test_resume_deduplicates_new_configured_prompts(tmp_path: Path):
