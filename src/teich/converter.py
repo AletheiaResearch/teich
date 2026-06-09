@@ -1594,6 +1594,8 @@ def _convert_droid_trace_to_training_example(
         payload = event.get("message")
         if not isinstance(payload, dict):
             continue
+        if payload.get("visibility") == "user_only":
+            continue
         role = payload.get("role")
         content_blocks = payload.get("content")
 

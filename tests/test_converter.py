@@ -646,6 +646,59 @@ def test_convert_droid_trace_without_settings_sidecar(tmp_path: Path):
     assert "usage" not in example.metadata
 
 
+def test_convert_droid_trace_skips_user_only_and_state_events(tmp_path: Path):
+    trace_file = tmp_path / "droid-edge-cases.jsonl"
+    events = [
+        {"type": "session_start", "id": "droid-session", "version": 2, "cwd": "/workspace/project"},
+        {
+            "type": "message",
+            "id": "message-1",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "No active subscription found."}],
+                "visibility": "user_only",
+            },
+        },
+        {
+            "type": "message",
+            "id": "message-2",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this screenshot"},
+                    {"type": "image", "source": {"type": "base64", "data": "abc123"}},
+                ],
+                "visibility": "llm_only",
+            },
+        },
+        {
+            "type": "todo_state",
+            "id": "todo-1",
+            "todos": {"todos": "1. [in_progress] Describe the screenshot"},
+            "messageIndex": 1,
+        },
+        {
+            "type": "compaction_state",
+            "id": "compaction-1",
+            "summaryText": "USER: earlier conversation summary",
+        },
+        {
+            "type": "message",
+            "id": "message-3",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "It shows a terminal."}]},
+        },
+    ]
+    trace_file.write_text("\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8")
+
+    example = convert_trace_to_training_example(trace_file)
+
+    assert example.prompt == "Describe this screenshot"
+    assert example.messages == [
+        {"role": "user", "content": "Describe this screenshot"},
+        {"role": "assistant", "content": "It shows a terminal."},
+    ]
+
+
 def test_convert_droid_trace_includes_builtin_tools(tmp_path: Path):
     trace_file = tmp_path / "droid-tools.jsonl"
     events = [
