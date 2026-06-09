@@ -23,6 +23,13 @@ def test_detect_trace_type_returns_known_trace_type():
             "hermes",
         ),
         ([{"type": "external_session_meta", "payload": {"source": "custom-agent"}}], "external_agent"),
+        (
+            [
+                {"type": "session_start", "id": "droid-session", "version": 2, "cwd": "/workspace/project"},
+                {"type": "message", "id": "message-1", "message": {"role": "user", "content": [{"type": "text", "text": "hello"}]}},
+            ],
+            "droid",
+        ),
     ]
 
     for events, expected_trace_type in cases:

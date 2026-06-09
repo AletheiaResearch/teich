@@ -12,7 +12,7 @@ _INLINE_THINKING_BLOCK_PATTERN = re.compile(r"<(think|thinking)>(.*?)</\1>", re.
 PI_SYSTEM_PROMPT_CUSTOM_TYPE = "teich-system-prompt"
 TEICH_AVAILABLE_TOOLS_CUSTOM_TYPE = "teich-available-tools"
 TEICH_TRACE_CONTEXT_ITEM_TYPE = "teich_context"
-TraceType = Literal["claude_code", "codex", "external_agent", "hermes", "pi"]
+TraceType = Literal["claude_code", "codex", "droid", "external_agent", "hermes", "pi"]
 
 _CLAUDE_CODE_BUILTIN_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "Task": {
@@ -978,6 +978,8 @@ def _detect_trace_type(events: list[Any], default: TraceType | None = "codex") -
             return "claude_code"
         if event_type in {"session_meta", "turn_context", "response_item", "event_msg"}:
             return "codex"
+        if event_type == "session_start" and isinstance(event.get("cwd"), str) and event.get("version") is not None:
+            return "droid"
         if event_type in {
             "session",
             "message",
