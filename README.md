@@ -523,6 +523,8 @@ Training examples include:
 - `tools`: tool schemas available to the session, including tools that were not called
 - `metadata`: session info, model, timestamps, and usage when available
 
+When the source format exposes per-message timestamps, converted rows include `metadata.first_message_timestamp` from the first timestamp-bearing source event that becomes a user message.
+
 Structured chat datasets can also include convenience top-level fields like:
 
 - `system` when provided by the prompt row

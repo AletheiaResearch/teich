@@ -282,7 +282,8 @@ def build_traces_readme(
                 "- `task`: first user prompt extracted from the trace",
                 "- `traces`: native conversation messages in `from` / `value` form",
                 "- `tools`: the tool schema available to that session, including tools that were not called",
-                "- `metadata`: provider, model, token, cost, parent-session, and export details",
+                "- `metadata`: provider, model, first-message timestamp, token, cost, parent-session, and export details",
+                "- `metadata.first_message_timestamp`: first timestamp-bearing source user message when the trace format provides one",
                 "",
             ]
         )

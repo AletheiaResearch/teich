@@ -217,6 +217,7 @@ Important details:
 - **`teich_supervised_spans`** are typed character span metadata. `prepare_data()` records candidate spans; `mask_data()` decides which kinds become labels.
 - **`teich_masking=False`** skips span metadata and returns plain rendered `text` rows for standard next-token training without Teich labels.
 - **Original columns are removed** after formatting unless `preserve_columns=True` or an explicit `preserve_columns=[...]` list is passed. `source`, `metadata`, `raw_index`, and `source_key` are the default provenance columns.
+- **Raw trace conversion** stores `metadata.first_message_timestamp` when a source user message has its own timestamp. It is not synthesized from session-start metadata.
 - **Oversized examples use `oversized_policy`** when `max_length` is set: `"drop"`, `"trim_followups"`, or `"error"`. The older `drop_oversized_examples` and `trim_oversized_followups` flags still work as aliases.
 - **Preparation reports** are available with `return_report=True`. The returned `PrepareReport` includes dropped rows, oversized rows, trimmed rows, token lengths, max token lengths, kept-row ids, and returned row count.
 - **Public preflight helpers**: `row_fits_context(row, tokenizer, max_length, chat_template_kwargs)` renders and measures one row, `validate_tool_calls(row)` checks declared tool names and required args, and `trace_is_complete(row)` flags rows that end on a tool result.

@@ -245,8 +245,18 @@ def test_load_traces_loads_structured_chat_dataset_file(tmp_path: Path):
                 json.dumps(
                     {
                         "messages": [
-                            {"role": "system", "content": "You are a helpful assistant", "thinking": None},
-                            {"role": "user", "content": "Hello", "thinking": None},
+                            {
+                                "role": "system",
+                                "content": "You are a helpful assistant",
+                                "thinking": None,
+                                "timestamp": "2026-05-18T00:00:01.000Z",
+                            },
+                            {
+                                "role": "user",
+                                "content": "Hello",
+                                "thinking": None,
+                                "timestamp": "2026-05-18T00:00:02.000Z",
+                            },
                             {"role": "assistant", "content": "Hi!", "thinking": "I should greet the user."},
                         ],
                         "system": "You are a helpful assistant",
@@ -274,6 +284,7 @@ def test_load_traces_loads_structured_chat_dataset_file(tmp_path: Path):
     assert row["metadata"]["trace_type"] == "chat"
     assert row["metadata"]["model"] == "gpt-4.1-mini"
     assert row["metadata"]["usage"]["prompt_tokens"] == 4
+    assert row["metadata"]["first_message_timestamp"] == "2026-05-18T00:00:02.000Z"
 
 
 def test_load_traces_normalizes_separate_assistant_thinking_field(tmp_path: Path):
