@@ -722,6 +722,7 @@ def test_convert_droid_trace(tmp_path: Path):
     assert example.metadata["cwd"] == "/workspace/project"
     assert example.metadata["title"] == "Inspect project files"
     assert example.metadata["turn_count"] == 1
+    assert example.metadata["first_message_timestamp"] == "2026-06-02T18:55:30.274Z"
     assert example.prompt == "Inspect the project"
     assert example.messages[0] == {"role": "user", "content": "Inspect the project"}
     assert example.messages[1]["role"] == "assistant"

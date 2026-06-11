@@ -466,6 +466,19 @@ def _is_claude_code_user_message(event: dict[str, Any]) -> bool:
     )
 
 
+def _is_droid_user_message(event: dict[str, Any]) -> bool:
+    if event.get("type") != "message":
+        return False
+    message = event.get("message")
+    if not isinstance(message, dict) or message.get("role") != "user":
+        return False
+    content = message.get("content")
+    return not (
+        isinstance(content, list)
+        and any(isinstance(block, dict) and block.get("type") == "tool_result" for block in content)
+    )
+
+
 def _first_text_block(content_blocks: Any) -> str:
     if isinstance(content_blocks, str):
         return _unwrap_teich_prompt_file(content_blocks).strip()
@@ -1681,6 +1694,7 @@ def _convert_droid_trace_to_training_example(
     cwd: str | None = None
     title: str | None = None
     prompt = ""
+    first_message_timestamp = _first_message_timestamp_from_events(events, _is_droid_user_message)
 
     for event in events:
         if not isinstance(event, dict):
@@ -1798,6 +1812,7 @@ def _convert_droid_trace_to_training_example(
         "title": title,
         "turn_count": sum(1 for message in messages if message.get("role") == "user"),
     }
+    _add_first_message_timestamp(metadata, first_message_timestamp)
     usage = settings.get("tokenUsage")
     if isinstance(usage, dict) and usage:
         metadata["usage"] = usage
