@@ -67,6 +67,35 @@ def test_prompts_round_trip(tmp_path):
     assert loaded[1]["follow_up_prompts"] == ["Add tests"]
 
 
+def test_read_prompts_supports_csv_prompt_file(tmp_path):
+    state = ProjectState(tmp_path)
+    state.ensure_initialized()
+    (tmp_path / "prompts.csv").write_text(
+        "prompt,system,github_repo\n"
+        "Build the feature,Be concise,owner/repo\n",
+        encoding="utf-8",
+    )
+    state.write_config_data({"prompts_file": "prompts.csv"})
+
+    assert state.read_prompts() == [
+        {"prompt": "Build the feature", "system": "Be concise", "github_repo": "owner/repo"}
+    ]
+
+
+def test_write_prompts_migrates_non_jsonl_prompt_file(tmp_path):
+    state = ProjectState(tmp_path)
+    state.ensure_initialized()
+    (tmp_path / "prompts.csv").write_text("prompt\nold prompt\n", encoding="utf-8")
+    state.write_config_data({"prompts_file": "prompts.csv"})
+
+    path = state.write_prompts([{"prompt": "new prompt"}])
+
+    assert path == tmp_path / "prompts.jsonl"
+    assert json.loads(path.read_text(encoding="utf-8").strip()) == {"prompt": "new prompt"}
+    config = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    assert config["prompts_file"] == "prompts.jsonl"
+
+
 def test_import_prompts_append_and_replace(tmp_path):
     state = ProjectState(tmp_path)
     state.ensure_initialized()
@@ -171,6 +200,52 @@ def test_config_endpoints(client):
     assert response.json()["config"]["model"]["model"] == "acme/model-1"
     bad = client.put("/api/config", json={"config": {"max_concurrency": -1}})
     assert bad.status_code == 400
+
+
+def test_config_rejects_chat_with_direct_anthropic_api(client):
+    response = client.put(
+        "/api/config",
+        json={
+            "config": {
+                "agent": {"provider": "chat"},
+                "api": {"provider": "anthropic", "base_url": "https://api.anthropic.com"},
+            }
+        },
+    )
+
+    assert response.status_code == 400
+    assert "OpenAI-compatible" in response.json()["detail"]
+    assert client.get("/api/config").json()["config"]["agent"]["provider"] != "chat"
+
+    custom_direct = client.put(
+        "/api/config",
+        json={
+            "config": {
+                "agent": {"provider": "chat"},
+                "api": {"provider": "custom", "base_url": "https://api.anthropic.com/"},
+            }
+        },
+    )
+    assert custom_direct.status_code == 400
+    assert "OpenAI-compatible" in custom_direct.json()["detail"]
+
+
+def test_session_override_rejects_chat_with_direct_anthropic_api(client):
+    response = client.put(
+        "/api/config",
+        json={
+            "config": {
+                "agent": {"provider": "claude-code"},
+                "api": {"provider": "anthropic", "base_url": "https://api.anthropic.com"},
+            }
+        },
+    )
+    assert response.status_code == 200
+
+    session = client.post("/api/sessions", json={"provider": "chat"})
+
+    assert session.status_code == 400
+    assert "OpenAI-compatible" in session.json()["detail"]
 
 
 def test_prompts_endpoints(client):

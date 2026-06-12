@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from .events import summarize_chat_row, summarize_trace_events
 from .generation import GenerationManager
 from .interactive import EventLog, SessionManager
-from .project import ProjectState
+from .project import ProjectState, validate_chat_api_compatibility
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -336,6 +336,10 @@ def create_app(project_dir: Path) -> FastAPI:
             cfg.agent.provider = payload.provider
         if payload.model:
             cfg.model.model = payload.model
+        try:
+            validate_chat_api_compatibility(cfg)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
         if cfg.get_agent_provider() != "chat" and not _docker_status()["available"]:
             raise HTTPException(
                 status_code=409,

@@ -153,6 +153,7 @@ function renderProviderCards() {
       state.config.agent = state.config.agent || {};
       state.config.agent.provider = provider.id;
       renderProviderCards();
+      syncApiProviderOptions();
     });
     grid.appendChild(card);
   }
@@ -163,6 +164,27 @@ const API_DEFAULT_URLS = {
   openai: "https://api.openai.com/v1",
   anthropic: "https://api.anthropic.com",
 };
+const DIRECT_ANTHROPIC_BASE_URL = "https://api.anthropic.com";
+
+function normalizeBaseUrl(value) {
+  return String(value || "").trim().replace(/\/+$/, "").toLowerCase();
+}
+
+function syncApiProviderOptions() {
+  const select = $("#cfg-api-provider");
+  const anthropicOption = select.querySelector('option[value="anthropic"]');
+  const agentProvider = String(get(state.config, "agent.provider", "pi")).trim().toLowerCase();
+  const isChat = agentProvider === "chat";
+  if (anthropicOption) {
+    anthropicOption.disabled = isChat;
+    anthropicOption.hidden = isChat;
+  }
+  if (isChat && select.value === "anthropic") {
+    select.value = "openrouter";
+    $("#cfg-base-url").value = API_DEFAULT_URLS.openrouter;
+    delete select.dataset.customValue;
+  }
+}
 
 function fillConfigForm() {
   const c = state.config;
@@ -174,6 +196,7 @@ function fillConfigForm() {
   select.value = ["openrouter", "openai", "anthropic"].includes(apiProvider) ? apiProvider : "custom";
   if (select.value === "custom") select.dataset.customValue = apiProvider;
   $("#cfg-base-url").value = get(c, "api.base_url", "") || "";
+  syncApiProviderOptions();
   $("#cfg-api-key").value = get(c, "api.api_key", "") || "";
   $("#cfg-concurrency").value = get(c, "max_concurrency", 1);
   $("#cfg-timeout").value = get(c, "timeout_seconds", 600);
@@ -187,6 +210,7 @@ function fillConfigForm() {
 $("#cfg-api-provider").addEventListener("change", (event) => {
   const value = event.target.value;
   if (value !== "custom") $("#cfg-base-url").value = API_DEFAULT_URLS[value] || "";
+  syncApiProviderOptions();
 });
 
 function collectConfigUpdates() {
@@ -219,12 +243,23 @@ function collectConfigUpdates() {
   };
 }
 
+function isDirectAnthropicChatConfig(updates) {
+  const provider = String(updates.api.provider || "").trim().toLowerCase();
+  const agentProvider = String(updates.agent.provider || "").trim().toLowerCase();
+  return agentProvider === "chat"
+    && (provider === "anthropic" || normalizeBaseUrl(updates.api.base_url) === DIRECT_ANTHROPIC_BASE_URL);
+}
+
 $("#btn-save-config").addEventListener("click", async () => {
   const note = $("#save-note");
   note.textContent = "";
   const updates = collectConfigUpdates();
   if (!updates.model.model) {
     toast("Please set a model ID first", "error");
+    return;
+  }
+  if (isDirectAnthropicChatConfig(updates)) {
+    toast("Chat runs need an OpenAI-compatible API. Use OpenRouter, OpenAI, or a compatible custom base URL.", "error");
     return;
   }
   try {

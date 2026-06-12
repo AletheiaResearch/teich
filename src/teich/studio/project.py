@@ -9,9 +9,15 @@ from typing import Any
 
 import yaml
 
-from ..config import Config
+from ..config import Config, PromptInput
 
 PROMPT_FIELDS = ("prompt", "system", "github_repo", "follow_up_prompts")
+JSONL_PROMPT_SUFFIXES = {".jsonl", ".ndjson"}
+DIRECT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
+CHAT_API_COMPATIBILITY_ERROR = (
+    "Chat sessions require an OpenAI-compatible API. Use OpenRouter, OpenAI, "
+    "or a compatible custom base URL instead of Anthropic's direct API."
+)
 
 DEFAULT_CONFIG_DATA: dict[str, Any] = {
     "agent": {"provider": "pi"},
@@ -50,6 +56,18 @@ def _deep_merge(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]
         else:
             merged[key] = value
     return merged
+
+
+def _normalize_base_url(value: str | None) -> str:
+    return (value or "").strip().rstrip("/").lower()
+
+
+def validate_chat_api_compatibility(config: Config) -> None:
+    if config.get_agent_provider() != "chat":
+        return
+    api_provider = config.api.provider.strip().lower()
+    if api_provider == "anthropic" or _normalize_base_url(config.get_base_url()) == DIRECT_ANTHROPIC_BASE_URL:
+        raise ValueError(CHAT_API_COMPATIBILITY_ERROR)
 
 
 class ProjectState:
@@ -97,7 +115,7 @@ class ProjectState:
             payload = {**payload, "prompts_file": str(resolved) if resolved.exists() else None}
         elif prompts_file is not None and not isinstance(prompts_file, str):
             payload = {**payload, "prompts_file": None}
-        Config(**payload)
+        validate_chat_api_compatibility(Config(**payload))
 
     def load_config(self) -> Config:
         """Load a validated Config the same way the CLI does (env overrides included)."""
@@ -105,6 +123,7 @@ class ProjectState:
             if not self.config_path.exists():
                 raise FileNotFoundError(f"Config file not found: {self.config_path}")
             cfg = Config.from_yaml(self.config_path)
+            validate_chat_api_compatibility(cfg)
         cfg.output.traces_dir = self.resolve_path(cfg.output.traces_dir)
         cfg.output.sandbox_dir = self.resolve_path(cfg.output.sandbox_dir)
         cfg.output.failures_dir = self.resolve_path(cfg.output.failures_dir)
@@ -131,19 +150,14 @@ class ProjectState:
         path = self.prompts_path()
         if not path.exists():
             return []
-        rows: list[dict[str, Any]] = []
-        with path.open("r", encoding="utf-8-sig") as handle:
-            for line_number, raw_line in enumerate(handle, start=1):
-                line = raw_line.strip()
-                if not line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise ValueError(f"Invalid JSONL on line {line_number}: {exc.msg}") from exc
-                if isinstance(row, dict):
-                    rows.append(self._normalize_prompt_row(row))
-        return rows
+        return [self._row_from_prompt_input(item) for item in Config._load_prompt_inputs_from_file(path)]
+
+    @staticmethod
+    def _row_from_prompt_input(prompt_input: PromptInput) -> dict[str, Any]:
+        row = prompt_input.model_dump(exclude_none=True)
+        if not row.get("follow_up_prompts"):
+            row.pop("follow_up_prompts", None)
+        return ProjectState._normalize_prompt_row(row)
 
     @staticmethod
     def _normalize_prompt_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -160,7 +174,8 @@ class ProjectState:
         return normalized
 
     def write_prompts(self, rows: list[dict[str, Any]]) -> Path:
-        path = self.prompts_path()
+        configured_path = self.prompts_path()
+        path = self._writable_prompts_path(configured_path)
         normalized = []
         for index, row in enumerate(rows, start=1):
             if not isinstance(row, dict):
@@ -176,13 +191,22 @@ class ProjectState:
                     handle.write(json.dumps(row, ensure_ascii=False) + "\n")
             # Make sure config points at the prompts file we just wrote.
             data = self.read_config_data()
-            if not data.get("prompts_file") and self.config_path.exists():
-                try:
-                    relative = path.relative_to(self.root)
-                    self.write_config_data({"prompts_file": relative.as_posix()})
-                except ValueError:
-                    self.write_config_data({"prompts_file": str(path)})
+            if self.config_path.exists() and (path != configured_path or not data.get("prompts_file")):
+                self.write_config_data({"prompts_file": self._config_path_value(path)})
         return path
+
+    def _writable_prompts_path(self, path: Path) -> Path:
+        if path.suffix.lower() in JSONL_PROMPT_SUFFIXES:
+            return path
+        if path.suffix:
+            return path.with_suffix(".jsonl")
+        return path.with_name(f"{path.name}.jsonl")
+
+    def _config_path_value(self, path: Path) -> str:
+        try:
+            return path.relative_to(self.root).as_posix()
+        except ValueError:
+            return str(path)
 
     def import_prompts_text(self, text: str, *, replace: bool) -> list[dict[str, Any]]:
         """Parse uploaded JSONL text and merge or replace the current prompts."""
