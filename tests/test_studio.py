@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 
 import pytest
 import yaml
@@ -11,9 +12,18 @@ from fastapi import WebSocketDisconnect
 from fastapi.testclient import TestClient
 
 from teich.cli import _configure_studio_event_loop_policy
+from teich.config import Config
+from teich.runner import SessionProgressUpdate
 from teich.studio.events import summarize_chat_row, summarize_event, summarize_trace_events
+from teich.studio.generation import RUNNER_CLASSES, GenerationJob
 from teich.studio.project import ProjectState
-from teich.studio.server import _settle_terminal_tasks, create_app, detect_trace_provider
+from teich.studio import server as server_module
+from teich.studio.server import (
+    _settle_terminal_tasks,
+    _wait_for_terminal_session_ready,
+    create_app,
+    detect_trace_provider,
+)
 
 
 @pytest.fixture()
@@ -192,6 +202,18 @@ def test_status_endpoint(client):
     assert {p["id"] for p in payload["providers"]} == {"pi", "codex", "claude-code", "hermes", "chat"}
 
 
+def test_status_counts_inline_config_prompts(client):
+    response = client.put(
+        "/api/config",
+        json={"config": {"prompts_file": None, "prompts": [{"prompt": "inline prompt"}]}},
+    )
+    assert response.status_code == 200
+
+    payload = client.get("/api/status").json()
+
+    assert payload["prompts_count"] == 1
+
+
 def test_config_endpoints(client):
     config = client.get("/api/config").json()["config"]
     assert config["agent"]["provider"]
@@ -306,6 +328,61 @@ def test_session_endpoints_validation(client):
     assert client.get("/api/sessions").json()["sessions"] == []
 
 
+def test_generation_stop_prevents_later_prompt_starts(tmp_path, monkeypatch):
+    first_started = threading.Event()
+    stop_called = threading.Event()
+    launched: list[int] = []
+
+    class FakeRunner:
+        def __init__(self, config):
+            self.config = config
+
+        def run_all(self, *, max_concurrency, progress_callback, prompt_inputs, resume):
+            for prompt_index, prompt_input in enumerate(prompt_inputs, start=1):
+                progress_callback(
+                    SessionProgressUpdate(
+                        prompt_id=f"prompt-{prompt_index}",
+                        prompt_index=prompt_index,
+                        total_prompts=len(prompt_inputs),
+                        prompt=prompt_input.prompt,
+                        prompt_preview=prompt_input.prompt,
+                        status="running",
+                    )
+                )
+                launched.append(prompt_index)
+                if prompt_index == 1:
+                    first_started.set()
+                    assert stop_called.wait(timeout=2)
+            return []
+
+        def _terminate_active_processes(self):
+            stop_called.set()
+
+    monkeypatch.setitem(RUNNER_CLASSES, "chat", FakeRunner)
+    config = Config(
+        agent={"provider": "chat"},
+        model={"model": "test/model"},
+        api={"provider": "openai", "base_url": "https://api.openai.com/v1"},
+        prompts=[{"prompt": "one"}, {"prompt": "two"}],
+        prompts_file=None,
+        output={"traces_dir": tmp_path / "output", "sandbox_dir": tmp_path / "sandbox"},
+    )
+    job = GenerationJob(config)
+
+    job.start()
+    assert first_started.wait(timeout=2)
+    job.stop()
+    wait_for_worker = threading.Event()
+    for _ in range(200):
+        if job.finished_at is not None:
+            break
+        wait_for_worker.wait(timeout=0.01)
+
+    assert job.finished_at is not None
+    assert launched == [1]
+    assert job.status == "stopped"
+
+
 def test_studio_uses_selector_event_loop_policy_on_windows():
     class DummyPolicy:
         pass
@@ -370,3 +447,40 @@ def test_terminal_task_cleanup_propagates_unexpected_errors():
         assert pending_task.cancelled()
 
     asyncio.run(run())
+
+
+def test_terminal_wait_keeps_socket_open_until_session_ready(monkeypatch):
+    class DummyWebSocket:
+        def __init__(self) -> None:
+            self.messages: list[dict[str, str]] = []
+
+        async def send_json(self, message: dict[str, str]) -> None:
+            self.messages.append(message)
+
+    class DummySession:
+        status = "starting"
+
+    websocket = DummyWebSocket()
+    session = DummySession()
+    sleep_calls = 0
+
+    async def fake_sleep(_seconds: float) -> None:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls == 3:
+            session.status = "ready"
+
+    monkeypatch.setattr(server_module.asyncio, "sleep", fake_sleep)
+
+    asyncio.run(
+        _wait_for_terminal_session_ready(
+            websocket,
+            session,
+            notice_seconds=0,
+            sleep_seconds=0.01,
+        )
+    )
+
+    assert sleep_calls == 3
+    assert websocket.messages
+    assert websocket.messages[0]["type"] == "status"

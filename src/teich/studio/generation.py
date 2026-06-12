@@ -34,6 +34,10 @@ RUNNER_CLASSES = {
 }
 
 
+class GenerationStopped(RuntimeError):
+    """Raised inside runner progress callbacks to prevent queued prompts from starting."""
+
+
 def _metrics_dict(update: SessionProgressUpdate) -> dict[str, Any] | None:
     metrics = update.metrics
     if metrics is None:
@@ -78,6 +82,8 @@ class GenerationJob:
         self.events.append(event)
 
     def _progress(self, update: SessionProgressUpdate) -> None:
+        if self._should_stop() and update.status in {"queued", "running"}:
+            raise GenerationStopped("Run stopped.")
         with self._lock:
             previous = self._prompt_states.get(update.prompt_id, {})
             state = {
@@ -141,12 +147,17 @@ class GenerationJob:
                 self._emit_status("stopped", "Run stopped. Completed traces were kept.")
             else:
                 self._emit_status("completed", f"Generated {len(self.result_files)} trace file(s).")
-        except Exception as exc:
-            self.error = str(exc)
+        except GenerationStopped:
+            self.error = None
             self._write_readme()
-            if self._stop_requested:
+            self._emit_status("stopped", "Run stopped. Completed traces were kept.")
+        except Exception as exc:
+            self._write_readme()
+            if self._should_stop():
+                self.error = None
                 self._emit_status("stopped", "Run stopped. Completed traces were kept.")
             else:
+                self.error = str(exc)
                 self._emit_status("failed", str(exc))
         finally:
             self._finish()
@@ -187,6 +198,10 @@ class GenerationJob:
                 runner._terminate_active_processes()
             except Exception:
                 pass
+
+    def _should_stop(self) -> bool:
+        with self._lock:
+            return self._stop_requested
 
     def to_dict(self) -> dict[str, Any]:
         with self._lock:

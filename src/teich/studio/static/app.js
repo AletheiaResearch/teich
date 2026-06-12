@@ -442,7 +442,7 @@ function refreshRunSummary() {
   const stats = [
     [get(state.config, "agent.provider", "—"), "Agent"],
     [get(state.config, "model.model", "—"), "Model"],
-    [String(state.prompts.length), "Prompts"],
+    [String(configuredPromptCount()), "Prompts"],
     [String(get(state.config, "max_concurrency", 1)), "Parallel"],
   ];
   for (const [value, label] of stats) {
@@ -451,6 +451,14 @@ function refreshRunSummary() {
     stat.appendChild(el("span", null, label));
     summary.appendChild(stat);
   }
+}
+
+function configuredPromptCount() {
+  const statusCount = Number(state.status && state.status.prompts_count);
+  if (Number.isFinite(statusCount) && statusCount >= 0) return statusCount;
+  const inlinePrompts = get(state.config, "prompts", []);
+  const inlineCount = Array.isArray(inlinePrompts) ? inlinePrompts.length : 0;
+  return state.prompts.length + inlineCount;
 }
 
 function renderJob() {
@@ -511,7 +519,7 @@ function connectJobEvents() {
 }
 
 $("#btn-start-run").addEventListener("click", async () => {
-  if (!state.prompts.length) {
+  if (configuredPromptCount() < 1) {
     toast("Add some prompts first", "error");
     showView("prompts");
     return;
@@ -687,6 +695,8 @@ function connectTerminalSocket(session, term) {
       term.write(message.data);
     } else if (message.type === "exit") {
       term.writeln(`\r\n\x1b[38;5;208m${message.detail || "Session ended."}\x1b[0m`);
+    } else if (message.type === "status") {
+      $("#term-conn").textContent = message.detail || "waiting...";
     }
   };
   socket.onclose = () => { $("#term-conn").textContent = "disconnected"; };

@@ -87,6 +87,8 @@ class SessionMessage(BaseModel):
 
 
 _docker_cache: dict[str, Any] = {"checked_at": 0.0, "available": False, "detail": None}
+TERMINAL_READY_STATUSES = {"ready", "live", "exited", "error"}
+TERMINAL_STARTUP_NOTICE_SECONDS = 15.0
 
 
 async def _settle_terminal_tasks(
@@ -110,6 +112,26 @@ async def _settle_terminal_tasks(
 
     if unexpected is not None:
         raise unexpected
+
+
+async def _wait_for_terminal_session_ready(
+    websocket: WebSocket,
+    session: Any,
+    *,
+    notice_seconds: float = TERMINAL_STARTUP_NOTICE_SECONDS,
+    sleep_seconds: float = 0.5,
+) -> None:
+    """Wait until the session can attach a terminal, without timing out cold Docker builds."""
+    next_notice = time.monotonic() + max(notice_seconds, 0.0)
+    while session.status not in TERMINAL_READY_STATUSES:
+        now = time.monotonic()
+        if now >= next_notice:
+            await websocket.send_json({
+                "type": "status",
+                "detail": "Still waiting for the Docker runtime to finish starting...",
+            })
+            next_notice = now + max(notice_seconds, sleep_seconds)
+        await asyncio.sleep(sleep_seconds)
 
 
 def _docker_status() -> dict[str, Any]:
@@ -219,17 +241,19 @@ def create_app(project_dir: Path) -> FastAPI:
         api_key_present = False
         provider = None
         model = None
+        prompts_count = 0
         try:
             cfg = state.load_config()
             api_key_present = bool(cfg.get_api_key())
             provider = cfg.get_agent_provider()
             model = cfg.get_effective_model()
+            prompts_count = len(cfg.get_prompt_inputs())
         except Exception as exc:
             config_error = str(exc)
-        try:
-            prompts_count = len(state.read_prompts())
-        except ValueError:
-            prompts_count = -1
+            try:
+                prompts_count = len(state.read_prompts())
+            except ValueError:
+                prompts_count = -1
         return {
             "project_dir": str(state.root),
             "config_exists": state.config_path.exists(),
@@ -411,11 +435,7 @@ def create_app(project_dir: Path) -> FastAPI:
         def on_output(text: str) -> None:
             loop.call_soon_threadsafe(queue.put_nowait, text)
 
-        # Wait briefly for the container to come up if the session is still starting.
-        for _ in range(600):
-            if session.status in {"ready", "live", "exited", "error"}:
-                break
-            await asyncio.sleep(0.25)
+        await _wait_for_terminal_session_ready(websocket, session)
         if session.status == "error":
             await websocket.send_json({"type": "exit", "detail": "Session failed to start — see the session log."})
             await websocket.close()

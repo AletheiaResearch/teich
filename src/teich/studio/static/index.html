@@ -232,14 +232,18 @@
         </div>
 
         <div id="session-live" hidden>
+          <div class="session-live-toolbar">
+            <div class="session-live-title"><span class="status-dot" id="sess-status-dot"></span><span id="term-title-text">agent @ /workspace</span></div>
+            <div class="term-actions">
+              <button class="btn small success" id="btn-save-session">Save trace</button>
+              <button class="btn small danger ghost" id="btn-discard-session">Discard</button>
+            </div>
+          </div>
+
           <div class="term-window" id="term-window">
             <div class="term-titlebar">
               <div class="term-lights"><span></span><span></span><span></span></div>
-              <div class="term-title"><span class="status-dot" id="sess-status-dot"></span><span id="term-title-text">agent @ /workspace</span></div>
-              <div class="term-actions">
-                <button class="btn small success" id="btn-save-session">Save trace</button>
-                <button class="btn small danger ghost" id="btn-discard-session">Discard</button>
-              </div>
+              <div class="term-title">terminal</div>
             </div>
             <div class="term-banner" id="term-banner" hidden></div>
             <div class="term-body" id="terminal"></div>
