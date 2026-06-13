@@ -100,9 +100,17 @@ def _is_non_data_trace_path(path: Path, traces_dir: Path, excluded_dirs: list[Pa
             return True
     except ValueError:
         pass
+    try:
+        resolved_path = path.resolve()
+    except OSError:
+        resolved_path = path
     for excluded_dir in excluded_dirs or []:
         try:
-            path.resolve().relative_to(excluded_dir.resolve())
+            resolved_excluded_dir = excluded_dir.resolve()
+        except OSError:
+            continue
+        try:
+            resolved_path.relative_to(resolved_excluded_dir)
             return True
         except ValueError:
             continue

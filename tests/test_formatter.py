@@ -1874,6 +1874,34 @@ def test_mask_data_can_fallback_when_trainer_drops_text_columns():
     assert "<tool_response>" in masked_text
 
 
+def test_mask_data_fallback_masks_attributed_gemma_tool_responses():
+    tokenizer = FakeTokenizer()
+    rendered = (
+        "<bos><|turn>user\nrun tests<turn|>\n"
+        "<|turn>model\n"
+        '<|tool_call>call:Bash{command:"pytest"}<tool_call|>'
+        "<tool_response name='Bash'>ERROR tests/test_checker.py</tool_response>"
+        "done<turn|>\n"
+    )
+    trainer = SimpleNamespace(
+        train_dataset=Dataset.from_list([{"input_ids": tokenizer(text=rendered)["input_ids"]}]),
+        eval_dataset=None,
+        processing_class=tokenizer,
+        args=SimpleNamespace(dataset_text_field="text", packing=False),
+    )
+
+    trainer = mask_data(trainer, audit=True, verbose=False)
+
+    row = trainer.train_dataset[0]
+    supervised_text = tokenizer.decode([token for token in row["labels"] if token != -100])
+    masked_text = tokenizer.decode([token_id for token_id, label in zip(row["input_ids"], row["labels"]) if label == -100])
+    assert '<|tool_call>call:Bash{command:"pytest"}<tool_call|>' in supervised_text
+    assert "done" in supervised_text
+    assert "ERROR tests/test_checker.py" not in supervised_text
+    assert "<tool_response name='Bash'>" not in supervised_text
+    assert "ERROR tests/test_checker.py" in masked_text
+
+
 def test_mask_data_rejects_packing_because_row_boundaries_are_required():
     tokenizer = TrainerStyleTokenizer()
     trainer = SimpleNamespace(
@@ -2935,6 +2963,103 @@ def test_new_gemma4_template_trains_write_tool_call_arguments_not_tool_outputs()
     assert "#[test]" not in masked_text
     assert "Successfully wrote 1518 bytes" in masked_text
     assert "cargo: command not found" in masked_text
+
+
+def test_latest_gemma_template_trains_repeated_tool_call_protocol_not_outputs():
+    jinja2 = pytest.importorskip("jinja2")
+    template_path = Path("gemma-template.jinja")
+    if not template_path.exists():
+        pytest.skip(f"{template_path} is not available")
+
+    tokenizer = RealJinjaChatTemplateTokenizer(template_path, jinja2)
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "write",
+                "description": "write file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"content": {"type": "string"}, "path": {"type": "string"}},
+                    "required": ["content", "path"],
+                },
+            },
+        },
+        _real_template_tool_call_dataset()[0]["tools"][0],
+    ]
+    messages = [
+        {"role": "user", "content": "write a file"},
+        {
+            "role": "assistant",
+            "content": "I will write first.",
+            "reasoning_content": "plan tool call",
+            "tool_calls": [
+                {
+                    "id": "call_write",
+                    "type": "function",
+                    "function": {"name": "write", "arguments": {"content": "hello", "path": "/tmp/a.txt"}},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_write", "name": "write", "content": "wrote file"},
+        {
+            "role": "assistant",
+            "content": "Now verify.",
+            "reasoning_content": "need test",
+            "tool_calls": [
+                {
+                    "id": "call_bash",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": {"command": "cat /tmp/a.txt"}},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_bash", "name": "bash", "content": "hello"},
+        {"role": "assistant", "content": "done"},
+    ]
+    prepared = prepare_data(
+        Dataset.from_list([{"messages": messages, "tools": tools}]),
+        tokenizer,
+        chat_template_kwargs={"enable_thinking": True, "preserve_thinking": True},
+        tokenize=True,
+        strict=True,
+        verbose=False,
+    )
+    trainer = SimpleNamespace(
+        train_dataset=prepared,
+        eval_dataset=None,
+        args=SimpleNamespace(dataset_text_field="text", max_length=None, packing=False),
+        tokenizer=tokenizer,
+    )
+    trainer = mask_data(
+        trainer,
+        tokenizer=tokenizer,
+        train_on_reasoning=True,
+        train_on_final_answers=True,
+        train_on_tools=True,
+        audit=False,
+        verbose=False,
+    )
+
+    row = trainer.train_dataset[0]
+    supervised_text = tokenizer.decode([token for token in row["labels"] if token != -100])
+    masked_text = tokenizer.decode([token_id for token_id, label in zip(row["input_ids"], row["labels"]) if label == -100])
+
+    assert "<|channel>thought\nplan tool call\n<channel|>" in supervised_text
+    assert "<|channel>thought\nneed test\n<channel|>" in supervised_text
+    assert "<|tool_call>call:write" in supervised_text
+    assert "<|tool_call>call:bash" in supervised_text
+    assert 'path:<|"|>/tmp/a.txt<|"|>' in supervised_text
+    assert 'command:<|"|>cat /tmp/a.txt<|"|>' in supervised_text
+    assert "I will write first." in supervised_text
+    assert "Now verify." in supervised_text
+    assert "done" in supervised_text
+    assert "wrote file" not in supervised_text
+    assert 'response:bash{value:<|"|>hello<|"|>}' not in supervised_text
+    assert "<|channel>thought\nneed test\n<channel|>" not in masked_text
+    assert "<|tool_call>call:bash" not in masked_text
+    assert "wrote file" in masked_text
+    assert 'response:bash{value:<|"|>hello<|"|>}' in masked_text
 
 
 def test_new_gemma4_template_strict_markers_tolerate_trimmed_embedded_thinking():

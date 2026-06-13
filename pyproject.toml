@@ -58,6 +58,7 @@ include = [
     "/config.example.yaml",
     "/teich_example.py",
     "/gemma4_example.py",
+    "/gemma-template.jinja",
     "/gemma-4-chat-template.jinja",
     "/new_gemma_4_template.jinja",
     "/qwen3.6_chat_template.jinja",

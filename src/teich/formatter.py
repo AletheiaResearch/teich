@@ -16,7 +16,7 @@ from .converter import normalize_training_messages
 
 _GEMMA_TURN_START_PATTERN = re.compile(r"<\|turn>(model|user|system)\n")
 _GEMMA_ASSISTANT_TURN_PREFIX = "<|turn>model\n"
-_GEMMA_TURN_END = "<turn|>\n"
+_GEMMA_TURN_END = "<turn|>"
 _GEMMA_THOUGHT_PREFIX = "<|channel>thought\n"
 _GEMMA_TOOL_RESPONSE_START = "<|tool_response>"
 _GEMMA_TOOL_RESPONSE_END = "<tool_response|>"
@@ -24,6 +24,8 @@ _TOOL_RESPONSE_DELIMITERS = (
     (_GEMMA_TOOL_RESPONSE_START, _GEMMA_TOOL_RESPONSE_END),
     ("<tool_response>", "</tool_response>"),
 )
+_TOOL_RESPONSE_START_TAG_PATTERN = re.compile(r"<tool_response(?:\s+[^>]*)?>")
+_TOOL_RESPONSE_END_TOKENS = ("</tool_response>", _GEMMA_TOOL_RESPONSE_END)
 _ASSISTANT_BLOCK_START_TOKENS = (
     "<|im_start|>assistant\n",
     "<|start_header_id|>assistant<|end_header_id|>\n\n",
@@ -514,7 +516,38 @@ def _tool_response_spans(text: str) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     for start_token, end_token in _TOOL_RESPONSE_DELIMITERS:
         spans.extend(_find_delimited_spans(text, start_token, end_token))
+    cursor = 0
+    while True:
+        match = _TOOL_RESPONSE_START_TAG_PATTERN.search(text, cursor)
+        if match is None:
+            break
+        end_candidates: list[tuple[int, str]] = []
+        for end_token in _TOOL_RESPONSE_END_TOKENS:
+            end_start = text.find(end_token, match.end())
+            if end_start >= 0:
+                end_candidates.append((end_start, end_token))
+        if not end_candidates:
+            cursor = match.end()
+            continue
+        end_start, end_token = min(end_candidates, key=lambda item: item[0])
+        spans.append((match.start(), end_start + len(end_token)))
+        cursor = end_start + len(end_token)
     return _merge_spans(spans)
+
+
+def _expand_span_to_containing_span(
+    span: tuple[int, int],
+    candidate_spans: list[tuple[int, int]],
+) -> tuple[int, int]:
+    start, end = span
+    containing_spans = [
+        (candidate_start, candidate_end)
+        for candidate_start, candidate_end in candidate_spans
+        if candidate_start <= start and end <= candidate_end
+    ]
+    if not containing_spans:
+        return span
+    return min(containing_spans, key=lambda item: item[1] - item[0])
 
 
 def _marker_dict_keys(value: dict[Any, Any]) -> list[Any]:
@@ -1027,8 +1060,19 @@ def _expand_typed_spans(
             )
             if expanded:
                 expanded_start, expanded_end = expanded[0]
+            if (expanded_start, expanded_end) == (start, end):
+                if kind == _SPAN_KIND_REASONING:
+                    expanded_start, expanded_end = _expand_span_to_containing_span(
+                        (start, end),
+                        _reasoning_spans(text),
+                    )
+                elif kind == _SPAN_KIND_TOOL_CALL:
+                    expanded_start, expanded_end = _expand_span_to_containing_span(
+                        (start, end),
+                        _tool_call_spans(text),
+                    )
         elif kind == _SPAN_KIND_TOOL_RESPONSE:
-            expanded_start, expanded_end = _expand_span_to_containing_delimiters(text, (start, end), _TOOL_RESPONSE_DELIMITERS)
+            expanded_start, expanded_end = _expand_span_to_containing_span((start, end), _tool_response_spans(text))
         updated = dict(span)
         updated["start"] = expanded_start
         updated["end"] = expanded_end

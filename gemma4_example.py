@@ -9,7 +9,7 @@ MODEL_NAME = os.environ.get("MODEL_NAME", "google/gemma-4-26B-A4B-it")
 OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "outputs/gemma-tool-sft")
 HUB_REPO_ID = os.environ.get("HUB_REPO_ID") or ""
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
-CHAT_TEMPLATE_PATH = os.environ.get("CHAT_TEMPLATE_PATH") or "new_gemma_4_template.jinja"
+CHAT_TEMPLATE_PATH = os.environ.get("CHAT_TEMPLATE_PATH") or "gemma-template.jinja"
 
 model, tokenizer = FastModel.from_pretrained(
     model_name=MODEL_NAME,
