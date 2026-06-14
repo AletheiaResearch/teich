@@ -48,7 +48,7 @@ teich extract pi
 teich extract hermes
 ```
 
-By default, extracted datasets are written to `data/` under the current directory. Use `--out` or `--output` to choose a different folder:
+By default, extracted datasets are written to `data/` under the current directory. JSONL traces are staged directly in that folder, matching the generated Hugging Face `*.jsonl` dataset metadata. Use `--out` or `--output` to choose a different folder:
 
 ```bash
 teich extract codex --model gpt-5-codex --out codex-data

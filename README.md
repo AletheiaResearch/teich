@@ -112,7 +112,7 @@ If you already have local agent sessions, Teich can stage them as an anonymized 
 teich extract claude --model fable-5
 ```
 
-`extract` supports `claude`, `codex`, `pi`, and `hermes`. It writes anonymized traces to `data/` by default, generates a dataset `README.md`, and then asks whether to upload the folder to Hugging Face. Use `--out` / `--output` to choose another folder.
+`extract` supports `claude`, `codex`, `pi`, and `hermes`. It writes anonymized traces to `data/` by default, with JSONL files directly in that folder so the generated Hugging Face dataset metadata can match `*.jsonl`. It generates a dataset `README.md`, and then asks whether to upload the folder to Hugging Face. Use `--out` / `--output` to choose another folder.
 
 ## What Teich Supports
 

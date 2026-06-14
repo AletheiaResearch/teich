@@ -77,15 +77,12 @@ def extract_local_sessions(
     model_filter: str | None = None,
     clear_destination: bool = False,
 ) -> ExtractResult:
-    """Extract local sessions for provider into output_dir/provider."""
+    """Extract local sessions for provider into output_dir."""
     resolved_sources = _existing_unique_paths(list(sources) if sources is not None else default_session_sources(provider, home))
-    destination_dir = output_dir / _provider_output_name(provider)
-    if clear_destination and destination_dir.exists():
-        if destination_dir.is_dir():
-            shutil.rmtree(destination_dir)
-        else:
-            destination_dir.unlink()
+    destination_dir = output_dir
     destination_dir.mkdir(parents=True, exist_ok=True)
+    if clear_destination:
+        _clear_extract_destination(destination_dir)
     if provider == "hermes":
         copied_files = _extract_hermes_state_dbs(resolved_sources, destination_dir, model_filter=model_filter)
     else:
@@ -131,6 +128,23 @@ def _existing_unique_paths(paths: Iterable[Path | None]) -> list[Path]:
         seen.add(key)
         result.append(expanded)
     return result
+
+
+def _clear_extract_destination(destination_dir: Path) -> None:
+    """Remove stale extract artifacts while leaving unrelated files alone."""
+    for path in destination_dir.glob("*.jsonl"):
+        if path.is_file():
+            path.unlink()
+    for artifact_name in ("README.md", "tools.json"):
+        artifact_path = destination_dir / artifact_name
+        if artifact_path.is_file():
+            artifact_path.unlink()
+    for provider in ("claude", "codex", "hermes", "pi"):
+        legacy_dir = destination_dir / _provider_output_name(provider)
+        if legacy_dir.is_dir():
+            shutil.rmtree(legacy_dir)
+        elif legacy_dir.exists():
+            legacy_dir.unlink()
 
 
 def _provider_output_name(provider: ExtractProvider) -> str:

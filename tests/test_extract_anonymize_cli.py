@@ -59,7 +59,7 @@ def test_extract_codex_from_explicit_sessions_dir(tmp_path: Path):
     )
 
     assert result.exit_code == 0
-    extracted = output_dir / "codex" / "session.jsonl"
+    extracted = output_dir / "session.jsonl"
     assert extracted.exists()
     assert (output_dir / "README.md").exists()
     assert "Extracted 1 codex trace" in result.output
@@ -95,7 +95,7 @@ def test_extract_hermes_from_explicit_state_db(tmp_path: Path):
     )
 
     assert result.exit_code == 0
-    extracted = output_dir / "hermes" / "hermes-agent-session-1.jsonl"
+    extracted = output_dir / "hermes-agent-session-1.jsonl"
     assert extracted.exists()
     rows = [json.loads(line) for line in extracted.read_text(encoding="utf-8").splitlines()]
     assert rows[0]["type"] == "external_session_meta"
@@ -137,7 +137,7 @@ def test_extract_defaults_to_data_folder_and_anonymizes_before_prompt(tmp_path: 
     with runner.isolated_filesystem(temp_dir=tmp_path):
         result = runner.invoke(app, ["extract", "codex", "--sessions-dir", str(sessions_dir)], input="n\n")
         data_dir = Path("data")
-        text = (data_dir / "codex" / "session.jsonl").read_text(encoding="utf-8")
+        text = (data_dir / "session.jsonl").read_text(encoding="utf-8")
 
     assert result.exit_code == 0
     assert "Extracted 1 codex trace" in result.output
@@ -205,12 +205,12 @@ def test_extract_model_filter_for_codex_claude_pi_and_hermes(tmp_path: Path):
         connection.close()
 
     cases = [
-        ("codex", codex_dir, "codex", "fable.jsonl"),
-        ("claude", claude_dir, "claude-code", "fable.jsonl"),
-        ("pi", pi_dir, "pi", "fable.jsonl"),
-        ("hermes", state_db, "hermes", "hermes-agent-hermes-fable.jsonl"),
+        ("codex", codex_dir, "fable.jsonl"),
+        ("claude", claude_dir, "fable.jsonl"),
+        ("pi", pi_dir, "fable.jsonl"),
+        ("hermes", state_db, "hermes-agent-hermes-fable.jsonl"),
     ]
-    for provider, source, output_name, expected_file in cases:
+    for provider, source, expected_file in cases:
         output_dir = tmp_path / f"out-{provider}"
         result = runner.invoke(
             app,
@@ -229,11 +229,11 @@ def test_extract_model_filter_for_codex_claude_pi_and_hermes(tmp_path: Path):
 
         assert result.exit_code == 0, result.output
         assert f"Extracted 1 {provider} trace with fable-5" in result.output
-        assert (output_dir / output_name / expected_file).exists()
-        assert len(list((output_dir / output_name).glob("*.jsonl"))) == 1
+        assert (output_dir / expected_file).exists()
+        assert len(list(output_dir.glob("*.jsonl"))) == 1
 
 
-def test_extract_refreshes_provider_output_before_writing(tmp_path: Path):
+def test_extract_refreshes_flat_output_before_writing(tmp_path: Path):
     sessions_dir = tmp_path / "codex"
     sessions_dir.mkdir()
     (sessions_dir / "fable.jsonl").write_text(
@@ -241,10 +241,16 @@ def test_extract_refreshes_provider_output_before_writing(tmp_path: Path):
         encoding="utf-8",
     )
     output_dir = tmp_path / "data"
-    stale_file = output_dir / "codex" / "old-opus.jsonl"
-    stale_file.parent.mkdir(parents=True)
+    output_dir.mkdir(parents=True)
+    stale_file = output_dir / "old-opus.jsonl"
     stale_file.write_text(
         json.dumps({"type": "session_meta", "payload": {"id": "codex-opus", "model": "codex-opus"}}) + "\n",
+        encoding="utf-8",
+    )
+    stale_legacy_file = output_dir / "codex" / "old-nested-opus.jsonl"
+    stale_legacy_file.parent.mkdir(parents=True)
+    stale_legacy_file.write_text(
+        json.dumps({"type": "session_meta", "payload": {"id": "codex-nested-opus", "model": "codex-opus"}}) + "\n",
         encoding="utf-8",
     )
     (output_dir / "README.md").write_text("old staged path: /home/stale/project\n", encoding="utf-8")
@@ -267,8 +273,10 @@ def test_extract_refreshes_provider_output_before_writing(tmp_path: Path):
     assert result.exit_code == 0
     assert "Automatically scrambled 0 API keys, 0 email addresses, and 0 username references" in result.output
     assert not stale_file.exists()
-    assert (output_dir / "codex" / "fable.jsonl").exists()
-    assert len(list((output_dir / "codex").glob("*.jsonl"))) == 1
+    assert not stale_legacy_file.exists()
+    assert not stale_legacy_file.parent.exists()
+    assert (output_dir / "fable.jsonl").exists()
+    assert len(list(output_dir.glob("*.jsonl"))) == 1
 
 
 def test_extract_can_upload_staged_anonymized_output_to_huggingface(tmp_path: Path):
@@ -319,6 +327,7 @@ def test_extract_can_upload_staged_anonymized_output_to_huggingface(tmp_path: Pa
     )
     readme = (output_dir / "README.md").read_text(encoding="utf-8")
     assert "armand0e/fable-traces" in readme
+    assert 'path: "*.jsonl"' in readme
 
 
 def test_extract_prompts_for_hf_token_when_env_token_is_missing(tmp_path: Path):
