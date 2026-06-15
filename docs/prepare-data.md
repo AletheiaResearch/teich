@@ -137,6 +137,62 @@ train_dataset = prepare_data(
 
 Rows contain rendered `text` only, plus tokens if `tokenize=True`.
 
+## Export ShareGPT-Style JSONL
+
+Teich does not currently have a dedicated ShareGPT export command. Use `load_traces()` to normalize extracted data into `messages`, then write the `conversations` shape expected by ShareGPT-style trainers:
+
+```python
+import json
+from pathlib import Path
+
+from teich import load_traces
+
+
+ROLE_MAP = {
+    "system": "system",
+    "developer": "system",
+    "user": "human",
+    "assistant": "gpt",
+    "model": "gpt",
+}
+
+
+def message_text(content):
+    if isinstance(content, str):
+        return content.strip()
+    if not isinstance(content, list):
+        return ""
+    parts = []
+    for item in content:
+        if isinstance(item, str) and item.strip():
+            parts.append(item.strip())
+        elif isinstance(item, dict) and isinstance(item.get("text"), str):
+            parts.append(item["text"].strip())
+    return "\n".join(part for part in parts if part).strip()
+
+
+dataset = load_traces("./data")
+output_path = Path("sharegpt.jsonl")
+
+with output_path.open("w", encoding="utf-8") as handle:
+    for row in dataset:
+        conversations = []
+        for message in row["messages"]:
+            role = ROLE_MAP.get(message.get("role"))
+            if role is None:
+                continue
+            text = message_text(message.get("content"))
+            reasoning = message.get("reasoning_content")
+            if role == "gpt" and isinstance(reasoning, str) and reasoning.strip():
+                text = f"<think>\n{reasoning.strip()}\n</think>\n{text}".strip()
+            if text:
+                conversations.append({"from": role, "value": text})
+        if any(turn["from"] == "gpt" for turn in conversations):
+            handle.write(json.dumps({"conversations": conversations}, ensure_ascii=False) + "\n")
+```
+
+This simple export is best for text chat data. ShareGPT-style schemas usually do not preserve Teich's full agent surface, including tool schemas, tool result messages, tool-call arguments, provenance metadata, and typed supervision spans. Keep the native Teich JSONL format when training agent/tool-use models with `prepare_data()` and `mask_data()`.
+
 ## Manual Flow with `load_traces`
 
 Use `load_traces()` directly when you want to own chat-template rendering, filtering, tokenization, label masking, and packing policy.

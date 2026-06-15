@@ -48,6 +48,25 @@ teich extract pi
 teich extract hermes
 ```
 
+By default, Teich looks in the provider's usual home-directory store:
+
+- Claude Code: `~/.claude/projects`
+- Codex: `~/.codex/sessions`
+- Pi: `~/.pi/agent/sessions` or `~/.pi/sessions`
+- Hermes: `~/.hermes/state.db`
+
+If the store is somewhere else, point `--sessions-dir` at the folder or file to scan. You can pass it more than once:
+
+```bash
+teich extract claude --sessions-dir /path/to/.claude --out data
+teich extract claude --sessions-dir /path/to/.claude/projects --out data
+teich extract codex --sessions-dir /path/to/.codex --out data
+teich extract codex --sessions-dir /path/to/.codex/sessions --out data
+teich extract pi --sessions-dir /path/to/.pi --out data
+teich extract hermes --sessions-dir /path/to/.hermes --out data
+teich extract hermes --sessions-dir /path/to/.hermes/state.db --out data
+```
+
 By default, extracted datasets are written to `data/` under the current directory. JSONL traces are staged directly in that folder, matching the generated Hugging Face `*.jsonl` dataset metadata. Use `--out` or `--output` to choose a different folder:
 
 ```bash
@@ -56,7 +75,13 @@ teich extract codex --model gpt-5-codex --out codex-data
 
 `--model` filters by provider model metadata, not by arbitrary prompt text. This keeps traces that actually ran with matching model identifiers such as `claude-fable-5` and excludes traces that only mention the model name in conversation text.
 
-After extraction, Teich automatically scrubs API keys, emails, and home-directory usernames while preserving embedded media payloads for conversation context. It then prints the replacement counts and asks whether to upload to Hugging Face. If you choose upload, Teich asks for a dataset repo id and uses `HF_TOKEN`, `HUGGINGFACE_HUB_TOKEN`, or `TEICH_HF_TOKEN`; if none are set, it prompts for `HF_TOKEN`.
+After extraction, Teich automatically scrubs API keys, emails, and home-directory usernames while preserving embedded media payloads for conversation context. It then prints the replacement counts and asks whether to upload to Hugging Face. If you need a raw, unchanged local export, pass `--no-anon` or `--no-anonymize`:
+
+```bash
+teich extract codex --sessions-dir /path/to/.codex --out raw-codex-data --no-anon
+```
+
+If you choose upload, Teich asks for a dataset repo id and uses `HF_TOKEN`, `HUGGINGFACE_HUB_TOKEN`, or `TEICH_HF_TOKEN`; if none are set, it prompts for `HF_TOKEN`.
 
 Important: anonymization is a best-effort safety pass, not a guarantee. Review the staged data yourself before uploading or publishing it, and remove anything you would not want released.
 

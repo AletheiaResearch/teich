@@ -114,6 +114,17 @@ teich extract claude --model fable-5
 
 `extract` supports `claude`, `codex`, `pi`, and `hermes`. It writes anonymized traces to `data/` by default, with JSONL files directly in that folder so the generated Hugging Face dataset metadata can match `*.jsonl`. It generates a dataset `README.md`, and then asks whether to upload the folder to Hugging Face. Use `--out` / `--output` to choose another folder.
 
+If the agent store is somewhere other than the default home-directory location, pass it explicitly. `--sessions-dir` accepts either the agent root, such as `.claude`, `.codex`, `.pi`, or `.hermes`, or the native store under it, such as `.claude/projects`, `.codex/sessions`, or `.hermes/state.db`:
+
+```bash
+teich extract claude --sessions-dir /path/to/.claude --out data
+teich extract codex --sessions-dir /path/to/.codex/sessions --out data
+teich extract pi --sessions-dir /path/to/.pi --out data
+teich extract hermes --sessions-dir /path/to/.hermes/state.db --out data
+```
+
+Extraction anonymizes staged traces by default. To keep the raw extracted data unchanged, pass `--no-anon` or `--no-anonymize` and review the output carefully before sharing or uploading it.
+
 ## What Teich Supports
 
 | Use case | Start here |

@@ -39,7 +39,12 @@ app = typer.Typer(
     help="Generate agent training data using Codex, Pi, Claude Code, Hermes, or chat",
     no_args_is_help=True,
 )
-extract_app = typer.Typer(help="Extract local agent sessions into Teich output folders.")
+extract_app = typer.Typer(
+    help=(
+        "Extract local agent sessions into Teich output folders. Use a provider subcommand with "
+        "--sessions-dir PATH to read a .claude, .codex, .pi, or .hermes folder outside the default location."
+    )
+)
 pool_app = typer.Typer(help="Upload anonymized traces to the Teich community pool.")
 app.add_typer(extract_app, name="extract")
 app.add_typer(pool_app, name="pool")
@@ -292,6 +297,7 @@ def _run_extract_command(
     sessions_dir: list[Path] | None,
     *,
     model_filter: str | None = None,
+    skip_anonymize: bool = False,
     private: bool = False,
 ) -> None:
     console.print(Panel.fit("Teich Extract", style="bold blue"))
@@ -315,20 +321,26 @@ def _run_extract_command(
     stale_readme_path = output / "README.md"
     if stale_readme_path.exists() and stale_readme_path.is_file():
         stale_readme_path.unlink()
-    anonymize_report = anonymize_path(output, output, in_place=True)
+    anonymize_report = None if skip_anonymize else anonymize_path(output, output, in_place=True)
     readme_path = _write_extract_readme(provider, output, model_filter=model_filter)
-    totals = anonymize_report.totals
     extracted_message = f"Extracted {result.count} {provider} trace{'s' if result.count != 1 else ''}"
     if model_filter:
         extracted_message += f" with {model_filter}"
     console.print(f"[green]{extracted_message}[/green]", soft_wrap=True)
-    console.print(
-        "[cyan]Automatically scrambled[/cyan] "
-        f"{totals.get('api_key', 0)} API keys, "
-        f"{totals.get('email', 0)} email addresses, and "
-        f"{totals.get('username', 0)} username references",
-        soft_wrap=True,
-    )
+    if anonymize_report is None:
+        console.print(
+            "[yellow]Skipped anonymization because --no-anon was passed. Review the data before sharing or uploading.[/yellow]",
+            soft_wrap=True,
+        )
+    else:
+        totals = anonymize_report.totals
+        console.print(
+            "[cyan]Automatically scrambled[/cyan] "
+            f"{totals.get('api_key', 0)} API keys, "
+            f"{totals.get('email', 0)} email addresses, and "
+            f"{totals.get('username', 0)} username references",
+            soft_wrap=True,
+        )
     console.print(f"[green]Wrote README:[/green] {readme_path}", soft_wrap=True)
     console.print(f"[cyan]Data was written to[/cyan] {output}", soft_wrap=True)
     for source in result.source_paths:
@@ -341,7 +353,10 @@ def _extract_sources_option() -> list[Path] | None:
         None,
         "--sessions-dir",
         "-s",
-        help="Explicit session folder or file. Can be passed more than once.",
+        help=(
+            "Explicit agent data folder or file. Examples: .claude, .claude/projects, "
+            ".codex, .codex/sessions, .pi, .hermes, or .hermes/state.db. Can be passed more than once."
+        ),
     )
 
 
@@ -353,15 +368,20 @@ def _extract_model_option() -> str | None:
     return typer.Option(None, "--model", "-m", help="Only extract traces whose model metadata contains this value.")
 
 
+def _extract_no_anonymize_option() -> bool:
+    return typer.Option(False, "--no-anon", "--no-anonymize", help="Skip automatic anonymization of extracted traces.")
+
+
 @extract_app.command()
 def codex(
     output: Path = _extract_output_option(),
     sessions_dir: list[Path] | None = _extract_sources_option(),
     model: str | None = _extract_model_option(),
+    no_anon: bool = _extract_no_anonymize_option(),
     private: bool = typer.Option(False, "--private", help="Create the Hugging Face dataset as private if upload is confirmed."),
 ) -> None:
     """Extract local Codex sessions."""
-    _run_extract_command("codex", output, sessions_dir, model_filter=model, private=private)
+    _run_extract_command("codex", output, sessions_dir, model_filter=model, skip_anonymize=no_anon, private=private)
 
 
 @extract_app.command()
@@ -369,10 +389,11 @@ def claude(
     output: Path = _extract_output_option(),
     sessions_dir: list[Path] | None = _extract_sources_option(),
     model: str | None = _extract_model_option(),
+    no_anon: bool = _extract_no_anonymize_option(),
     private: bool = typer.Option(False, "--private", help="Create the Hugging Face dataset as private if upload is confirmed."),
 ) -> None:
     """Extract local Claude Code sessions."""
-    _run_extract_command("claude", output, sessions_dir, model_filter=model, private=private)
+    _run_extract_command("claude", output, sessions_dir, model_filter=model, skip_anonymize=no_anon, private=private)
 
 
 @extract_app.command()
@@ -380,10 +401,11 @@ def pi(
     output: Path = _extract_output_option(),
     sessions_dir: list[Path] | None = _extract_sources_option(),
     model: str | None = _extract_model_option(),
+    no_anon: bool = _extract_no_anonymize_option(),
     private: bool = typer.Option(False, "--private", help="Create the Hugging Face dataset as private if upload is confirmed."),
 ) -> None:
     """Extract local Pi sessions."""
-    _run_extract_command("pi", output, sessions_dir, model_filter=model, private=private)
+    _run_extract_command("pi", output, sessions_dir, model_filter=model, skip_anonymize=no_anon, private=private)
 
 
 @extract_app.command()
@@ -391,10 +413,11 @@ def hermes(
     output: Path = _extract_output_option(),
     sessions_dir: list[Path] | None = _extract_sources_option(),
     model: str | None = _extract_model_option(),
+    no_anon: bool = _extract_no_anonymize_option(),
     private: bool = typer.Option(False, "--private", help="Create the Hugging Face dataset as private if upload is confirmed."),
 ) -> None:
     """Extract local Hermes Agent state sessions."""
-    _run_extract_command("hermes", output, sessions_dir, model_filter=model, private=private)
+    _run_extract_command("hermes", output, sessions_dir, model_filter=model, skip_anonymize=no_anon, private=private)
 
 
 @app.command()

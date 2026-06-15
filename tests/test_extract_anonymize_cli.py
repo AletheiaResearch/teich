@@ -17,7 +17,37 @@ def _plain_cli_output(output: str) -> str:
     return ANSI_ESCAPE_RE.sub("", output)
 
 
+def _write_minimal_hermes_state_db(state_db: Path, *, session_id: str = "session/1", model: str = "test-model") -> None:
+    connection = sqlite3.connect(state_db)
+    try:
+        connection.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, started_at TEXT, model TEXT)")
+        connection.execute(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, timestamp TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO sessions (id, source, started_at, model) VALUES (?, ?, ?, ?)",
+            (session_id, "cli", "2026-06-13T00:00:00Z", model),
+        )
+        connection.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+            (session_id, "user", "hello", "2026-06-13T00:00:01Z"),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def test_extract_subcommands_exist():
+    group_help = runner.invoke(app, ["extract", "--help"])
+
+    assert group_help.exit_code == 0
+    group_output = _plain_cli_output(group_help.output)
+    assert "--sessions-dir PATH" in group_output
+    assert ".claude" in group_output
+    assert ".codex" in group_output
+    assert ".pi" in group_output
+    assert ".hermes" in group_output
+
     for provider in ("claude", "codex", "hermes", "pi"):
         result = runner.invoke(app, ["extract", provider, "--help"])
 
@@ -27,6 +57,12 @@ def test_extract_subcommands_exist():
         assert "--out" in output
         assert "--sessions-dir" in output
         assert "--model" in output
+        assert "--no-anon" in output
+        assert "--no-anonymize" in output
+        assert ".claude" in output
+        assert ".codex" in output
+        assert ".pi" in output
+        assert ".hermes" in output
 
 
 def test_extract_codex_from_explicit_sessions_dir(tmp_path: Path):
@@ -70,23 +106,7 @@ def test_extract_codex_from_explicit_sessions_dir(tmp_path: Path):
 
 def test_extract_hermes_from_explicit_state_db(tmp_path: Path):
     state_db = tmp_path / "state.db"
-    connection = sqlite3.connect(state_db)
-    try:
-        connection.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, started_at TEXT, model TEXT)")
-        connection.execute(
-            "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, timestamp TEXT)"
-        )
-        connection.execute(
-            "INSERT INTO sessions (id, source, started_at, model) VALUES (?, ?, ?, ?)",
-            ("session/1", "cli", "2026-06-13T00:00:00Z", "test-model"),
-        )
-        connection.execute(
-            "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
-            ("session/1", "user", "hello", "2026-06-13T00:00:01Z"),
-        )
-        connection.commit()
-    finally:
-        connection.close()
+    _write_minimal_hermes_state_db(state_db)
 
     output_dir = tmp_path / "output"
     result = runner.invoke(
@@ -104,6 +124,59 @@ def test_extract_hermes_from_explicit_state_db(tmp_path: Path):
     assert rows[1]["type"] == "external_message"
     assert rows[1]["role"] == "user"
     assert (output_dir / "README.md").exists()
+
+
+def test_extract_accepts_agent_root_or_native_session_store(tmp_path: Path):
+    claude_root = tmp_path / ".claude"
+    claude_projects = claude_root / "projects" / "-repo"
+    claude_projects.mkdir(parents=True)
+    (claude_projects / "session.jsonl").write_text(
+        json.dumps({"type": "assistant", "message": {"role": "assistant", "model": "claude-fable-5", "content": []}})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    codex_root = tmp_path / ".codex"
+    codex_sessions = codex_root / "sessions"
+    codex_sessions.mkdir(parents=True)
+    (codex_sessions / "session.jsonl").write_text(
+        json.dumps({"type": "session_meta", "payload": {"id": "session", "model": "codex-fable-5"}}) + "\n",
+        encoding="utf-8",
+    )
+
+    pi_root = tmp_path / ".pi"
+    pi_sessions = pi_root / "agent" / "sessions"
+    pi_sessions.mkdir(parents=True)
+    (pi_sessions / "session.jsonl").write_text(
+        json.dumps({"type": "session_info", "modelId": "pi-fable-5"}) + "\n",
+        encoding="utf-8",
+    )
+
+    hermes_root = tmp_path / ".hermes"
+    hermes_root.mkdir()
+    _write_minimal_hermes_state_db(hermes_root / "state.db", model="hermes-fable-5")
+
+    cases = [
+        ("claude-root", "claude", claude_root, "session.jsonl"),
+        ("claude-projects", "claude", claude_root / "projects", "session.jsonl"),
+        ("codex-root", "codex", codex_root, "session.jsonl"),
+        ("codex-sessions", "codex", codex_sessions, "session.jsonl"),
+        ("pi-root", "pi", pi_root, "session.jsonl"),
+        ("pi-sessions", "pi", pi_sessions, "session.jsonl"),
+        ("hermes-root", "hermes", hermes_root, "hermes-agent-session-1.jsonl"),
+        ("hermes-state-db", "hermes", hermes_root / "state.db", "hermes-agent-session-1.jsonl"),
+    ]
+    for label, provider, source, expected_file in cases:
+        output_dir = tmp_path / f"out-{label}"
+        result = runner.invoke(
+            app,
+            ["extract", provider, "--sessions-dir", str(source), "--output", str(output_dir)],
+            input="n\n",
+        )
+
+        assert result.exit_code == 0, result.output
+        assert (output_dir / expected_file).exists()
+        assert "Extracted 1" in result.output
 
 
 def test_extract_defaults_to_data_folder_and_anonymizes_before_prompt(tmp_path: Path):
@@ -150,6 +223,51 @@ def test_extract_defaults_to_data_folder_and_anonymizes_before_prompt(tmp_path: 
     assert "sk-or-v1-" in text
     assert original_key not in text
     assert "alice@example.com" not in text
+
+
+def test_extract_no_anon_skips_automatic_anonymization(tmp_path: Path):
+    sessions_dir = tmp_path / "codex" / "sessions"
+    sessions_dir.mkdir(parents=True)
+    original_key = "sk-or-v1-abcdefghijklmnopqrstuvwxyz123456"
+    (sessions_dir / "session.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "session_meta", "payload": {"id": "session", "model": "test-model"}}),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "input_text",
+                                    "text": f"hello from /home/alice/project alice@example.com {original_key}",
+                                }
+                            ],
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "output"
+
+    result = runner.invoke(
+        app,
+        ["extract", "codex", "--sessions-dir", str(sessions_dir), "--output", str(output_dir), "--no-anon"],
+        input="n\n",
+    )
+
+    assert result.exit_code == 0
+    text = (output_dir / "session.jsonl").read_text(encoding="utf-8")
+    assert "Skipped anonymization because --no-anon was passed" in result.output
+    assert "Automatically scrambled" not in result.output
+    assert "/home/alice/project" in text
+    assert "alice@example.com" in text
+    assert original_key in text
 
 
 def test_extract_model_filter_for_codex_claude_pi_and_hermes(tmp_path: Path):
