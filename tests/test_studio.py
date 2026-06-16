@@ -402,6 +402,93 @@ def test_dataset_preview_endpoint_returns_rows_features_and_trace_previews(clien
     assert filtered["dataset"]["num_rows"] == 0
 
 
+def test_dataset_row_delete_removes_single_backing_trace(client):
+    output_dir = client.project_dir / "output"
+    output_dir.mkdir()
+    trace = output_dir / "hermes-agent-test.jsonl"
+    events = [
+        {"type": "external_session_meta", "payload": {"id": "x"}},
+        {"type": "external_message", "role": "user", "content": "delete me"},
+        {"type": "external_message", "role": "assistant", "content": "deleted"},
+    ]
+    trace.write_text("\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
+
+    response = client.delete("/api/dataset-preview/rows/0")
+
+    assert response.status_code == 200
+    assert response.json()["mode"] == "file"
+    assert not trace.exists()
+
+
+def test_dataset_row_update_rewrites_single_raw_trace_as_structured_row(client):
+    output_dir = client.project_dir / "output"
+    output_dir.mkdir()
+    trace = output_dir / "hermes-agent-test.jsonl"
+    events = [
+        {"type": "external_session_meta", "payload": {"id": "x"}},
+        {"type": "external_message", "role": "user", "content": "old prompt"},
+        {"type": "external_message", "role": "assistant", "content": "old answer"},
+    ]
+    trace.write_text("\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
+    updated = {
+        "prompt": "new prompt",
+        "messages": [
+            {"role": "user", "content": "new prompt"},
+            {"role": "assistant", "content": "new answer"},
+        ],
+        "tools": [],
+        "metadata": {"source_file": "hermes-agent-test.jsonl"},
+    }
+
+    response = client.put("/api/dataset-preview/rows/0", json={"row": updated})
+
+    assert response.status_code == 200
+    assert response.json()["mode"] == "file"
+    rows = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
+    assert rows == [updated]
+    preview = client.get("/api/dataset-preview").json()
+    assert preview["dataset"]["rows"][0]["preview"]["prompt"] == "new prompt"
+
+
+def test_dataset_row_update_replaces_structured_jsonl_line(client):
+    output_dir = client.project_dir / "output"
+    output_dir.mkdir()
+    trace = output_dir / "rows.jsonl"
+    original_rows = [
+        {
+            "messages": [
+                {"role": "user", "content": "one"},
+                {"role": "assistant", "content": "two"},
+            ],
+            "tools": [],
+        },
+        {
+            "messages": [
+                {"role": "user", "content": "three"},
+                {"role": "assistant", "content": "four"},
+            ],
+            "tools": [],
+        },
+    ]
+    trace.write_text("\n".join(json.dumps(row) for row in original_rows) + "\n", encoding="utf-8")
+    updated = {
+        "messages": [
+            {"role": "user", "content": "three"},
+            {"role": "assistant", "content": "updated"},
+        ],
+        "tools": [],
+        "metadata": {"source_file": "rows.jsonl", "source_line": 2},
+    }
+
+    response = client.put("/api/dataset-preview/rows/1", json={"row": updated})
+
+    assert response.status_code == 200
+    assert response.json()["mode"] == "line"
+    rows = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
+    assert rows[0] == original_rows[0]
+    assert rows[1] == updated
+
+
 def _wait_for_extract_job(client) -> dict:
     delay = threading.Event()
     for _ in range(200):

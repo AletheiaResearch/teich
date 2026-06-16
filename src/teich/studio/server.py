@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from ..extract import ExtractProvider, default_session_sources
-from .dataset_preview import build_dataset_preview
+from .dataset_preview import build_dataset_preview, dataset_row_context, delete_dataset_row, update_dataset_row
 from .events import summarize_chat_row, summarize_trace_events
 from .extraction import ExtractionManager
 from .generation import GenerationManager
@@ -96,6 +96,10 @@ class SessionCreate(BaseModel):
 
 class SessionMessage(BaseModel):
     text: str = Field(min_length=1)
+
+
+class DatasetRowUpdate(BaseModel):
+    row: dict[str, Any]
 
 
 _docker_cache: dict[str, Any] = {"checked_at": 0.0, "available": False, "detail": None}
@@ -626,6 +630,15 @@ def create_app(project_dir: Path) -> FastAPI:
     # Dataset preview
     # ------------------------------------------------------------------
 
+    def _dataset_root(path: str | None = None) -> tuple[Path, str | None]:
+        data = state.read_config_data()
+        output = data.get("output") if isinstance(data.get("output"), dict) else {}
+        publish = data.get("publish") if isinstance(data.get("publish"), dict) else {}
+        root_value = (path or "").strip() or str(output.get("traces_dir") or "./output")
+        root = state.resolve_path(Path(root_value).expanduser())
+        repo_id = publish.get("repo_id") if isinstance(publish.get("repo_id"), str) else None
+        return root, repo_id
+
     @app.get("/api/dataset-preview")
     def dataset_preview(
         path: str | None = None,
@@ -633,12 +646,7 @@ def create_app(project_dir: Path) -> FastAPI:
         limit: int = 100,
         search: str | None = None,
     ) -> dict[str, Any]:
-        data = state.read_config_data()
-        output = data.get("output") if isinstance(data.get("output"), dict) else {}
-        publish = data.get("publish") if isinstance(data.get("publish"), dict) else {}
-        root_value = (path or "").strip() or str(output.get("traces_dir") or "./output")
-        root = state.resolve_path(Path(root_value).expanduser())
-        repo_id = publish.get("repo_id") if isinstance(publish.get("repo_id"), str) else None
+        root, repo_id = _dataset_root(path)
         try:
             return build_dataset_preview(
                 root,
@@ -648,6 +656,42 @@ def create_app(project_dir: Path) -> FastAPI:
                 search=search,
             )
         except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @app.get("/api/dataset-preview/rows/{row_idx}")
+    def get_dataset_row(row_idx: int, path: str | None = None) -> dict[str, Any]:
+        root, _repo_id = _dataset_root(path)
+        try:
+            return dataset_row_context(root, row_idx)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except IndexError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @app.put("/api/dataset-preview/rows/{row_idx}")
+    def put_dataset_row(row_idx: int, payload: DatasetRowUpdate, path: str | None = None) -> dict[str, Any]:
+        root, _repo_id = _dataset_root(path)
+        try:
+            return update_dataset_row(root, row_idx, payload.row)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except IndexError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @app.delete("/api/dataset-preview/rows/{row_idx}")
+    def remove_dataset_row(row_idx: int, path: str | None = None) -> dict[str, Any]:
+        root, _repo_id = _dataset_root(path)
+        try:
+            return delete_dataset_row(root, row_idx)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except IndexError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc))

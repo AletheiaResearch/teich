@@ -264,6 +264,7 @@ const state = {
   selectedTrace: null,
   datasetPreview: null,
   selectedDatasetRow: null,
+  datasetEditor: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -1112,11 +1113,13 @@ function renderDisplayEvent(data) {
   const text = displayText(data.text);
   const name = displayText(data.name);
   if (kind === "user" || kind === "assistant") {
+    if (!text.trim()) return null;
     const msg = el("div", `msg ${kind}`);
     msg.appendChild(markdownNode("msg-body", text));
     return msg;
   }
   if (kind === "thinking" || kind === "tool_call" || kind === "tool_result") {
+    if (!text.trim() && !name.trim()) return null;
     const msg = el("div", `msg block ${kind}`);
     const details = el("details");
     const summary = el("summary");
@@ -1137,6 +1140,7 @@ function renderDisplayEvent(data) {
     return msg;
   }
   if (kind === "system") {
+    if (!text.trim()) return null;
     const msg = el("div", "msg block system");
     const details = el("details");
     const summary = el("summary");
@@ -1287,6 +1291,25 @@ function summarizeDatasetCell(value, column) {
   return truncateText(value == null ? "" : value, 110);
 }
 
+function datasetPathQuery() {
+  const query = new URLSearchParams();
+  const path = $("#dataset-path").value.trim();
+  if (path) query.set("path", path);
+  return query;
+}
+
+function datasetRowUrl(rowIdx) {
+  const query = datasetPathQuery();
+  const suffix = query.toString();
+  return `/api/dataset-preview/rows/${rowIdx}${suffix ? `?${suffix}` : ""}`;
+}
+
+function messageContentText(content) {
+  if (typeof content === "string") return content;
+  if (content == null) return "";
+  return displayText(content);
+}
+
 function renderDatasetSummary(preview) {
   const summary = $("#dataset-summary");
   summary.innerHTML = "";
@@ -1335,8 +1358,9 @@ function renderDatasetTable(preview) {
   const table = el("table", "dataset-table");
   const thead = document.createElement("thead");
   const headRow = document.createElement("tr");
-  headRow.appendChild(el("th", null, "#"));
+  headRow.appendChild(el("th", "idx-col", "#"));
   for (const column of columns) headRow.appendChild(el("th", null, column));
+  headRow.appendChild(el("th", "actions-col", ""));
   thead.appendChild(headRow);
   table.appendChild(thead);
 
@@ -1344,10 +1368,31 @@ function renderDatasetTable(preview) {
   for (const rowInfo of rows) {
     const tr = document.createElement("tr");
     tr.className = rowInfo.row_idx === state.selectedDatasetRow ? "selected" : "";
-    tr.appendChild(el("td", "mono", String(rowInfo.row_idx)));
+    tr.appendChild(el("td", "mono idx-col", String(rowInfo.row_idx)));
     for (const column of columns) {
-      tr.appendChild(el("td", null, summarizeDatasetCell(rowInfo.row[column], column)));
+      const cell = el("td");
+      cell.appendChild(el("span", "dataset-cell", summarizeDatasetCell(rowInfo.row[column], column)));
+      tr.appendChild(cell);
     }
+    const actions = el("td", "dataset-row-actions");
+    const actionWrap = el("div", "dataset-row-actions-inner");
+    const editBtn = el("button", "icon-btn", "✎");
+    editBtn.type = "button";
+    editBtn.title = "Edit row";
+    editBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openDatasetEditor(rowInfo);
+    });
+    const deleteBtn = el("button", "icon-btn danger", "×");
+    deleteBtn.type = "button";
+    deleteBtn.title = "Delete row";
+    deleteBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      deleteDatasetRow(rowInfo);
+    });
+    actionWrap.append(editBtn, deleteBtn);
+    actions.appendChild(actionWrap);
+    tr.appendChild(actions);
     tr.addEventListener("click", () => {
       state.selectedDatasetRow = rowInfo.row_idx;
       renderDatasetTable(preview);
@@ -1357,9 +1402,10 @@ function renderDatasetTable(preview) {
   }
   table.appendChild(tbody);
   container.appendChild(table);
-  if (state.selectedDatasetRow == null && rows.length) {
-    state.selectedDatasetRow = rows[0].row_idx;
-    renderDatasetDetail(rows[0]);
+  const selected = rows.find((rowInfo) => rowInfo.row_idx === state.selectedDatasetRow) || rows[0];
+  if (selected) {
+    state.selectedDatasetRow = selected.row_idx;
+    renderDatasetDetail(selected);
   }
 }
 
@@ -1368,15 +1414,18 @@ function renderTrainingMessages(row) {
   const wrap = el("div", "dataset-message-list");
   for (const message of messages) {
     if (!message || typeof message !== "object") continue;
-    if (message.thinking) {
-      const thinking = renderDisplayEvent({ kind: "thinking", text: message.thinking });
+    const thinkingText = message.thinking || message.reasoning_content || "";
+    if (thinkingText.trim()) {
+      const thinking = renderDisplayEvent({ kind: "thinking", text: thinkingText });
       if (thinking) wrap.appendChild(thinking);
     }
     const role = message.role || "assistant";
-    const content = typeof message.content === "string" ? message.content : JSON.stringify(message.content || "", null, 2);
+    const content = messageContentText(message.content);
     const kind = role === "tool" ? "tool_result" : role;
-    const node = renderDisplayEvent({ kind, text: content, name: message.name || message.tool_call_id || "" });
-    if (node) wrap.appendChild(node);
+    if (content.trim()) {
+      const node = renderDisplayEvent({ kind, text: content, name: message.name || message.tool_call_id || "" });
+      if (node) wrap.appendChild(node);
+    }
     if (Array.isArray(message.tool_calls)) {
       for (const toolCall of message.tool_calls) {
         const fn = toolCall && (toolCall.function || toolCall);
@@ -1400,6 +1449,17 @@ function renderDatasetDetail(rowInfo) {
   const preview = rowInfo.preview || {};
   if (preview.trace_type) head.appendChild(el("span", "muted", preview.trace_type));
   if (preview.model) head.appendChild(el("span", "muted", preview.model));
+  const actions = el("div", "dataset-detail-actions");
+  const editBtn = el("button", "icon-btn", "✎");
+  editBtn.type = "button";
+  editBtn.title = "Edit row";
+  editBtn.addEventListener("click", () => openDatasetEditor(rowInfo));
+  const deleteBtn = el("button", "icon-btn danger", "×");
+  deleteBtn.type = "button";
+  deleteBtn.title = "Delete row";
+  deleteBtn.addEventListener("click", () => deleteDatasetRow(rowInfo));
+  actions.append(editBtn, deleteBtn);
+  head.appendChild(actions);
   detail.appendChild(head);
   detail.appendChild(renderTrainingMessages(rowInfo.row));
 
@@ -1408,6 +1468,473 @@ function renderDatasetDetail(rowInfo) {
   raw.appendChild(summary);
   raw.appendChild(el("pre", null, JSON.stringify(rowInfo.row, null, 2)));
   detail.appendChild(raw);
+}
+
+async function deleteDatasetRow(rowInfo) {
+  const label = rowInfo && rowInfo.preview && rowInfo.preview.prompt
+    ? truncateText(rowInfo.preview.prompt, 80)
+    : `row ${rowInfo.row_idx}`;
+  if (!confirm(`Delete ${label}? This removes the backing trace row or file.`)) return;
+  try {
+    await api("DELETE", datasetRowUrl(rowInfo.row_idx));
+    toast(`Deleted row ${rowInfo.row_idx}`, "success");
+    state.selectedDatasetRow = null;
+    await loadDatasetPreview();
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+function closeDatasetEditor() {
+  if (!state.datasetEditor) return;
+  document.removeEventListener("keydown", state.datasetEditor.onKeydown);
+  state.datasetEditor.overlay.remove();
+  state.datasetEditor = null;
+}
+
+function toolCallView(toolCall) {
+  const fn = toolCall && typeof toolCall === "object" && toolCall.function && typeof toolCall.function === "object"
+    ? toolCall.function
+    : toolCall;
+  if (!fn || typeof fn !== "object") return null;
+  const rawKey = Object.prototype.hasOwnProperty.call(fn, "arguments") ? "arguments"
+    : Object.prototype.hasOwnProperty.call(fn, "input") ? "input"
+      : "arguments";
+  return {
+    fn,
+    name: displayText(fn.name || fn.toolName || ""),
+    rawKey,
+    rawArgs: fn[rawKey],
+  };
+}
+
+function parseToolArguments(rawArgs) {
+  if (typeof rawArgs === "string") {
+    try {
+      const parsed = JSON.parse(rawArgs);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+    } catch (e) {
+      return null;
+    }
+  }
+  return rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs) ? { ...rawArgs } : null;
+}
+
+function setToolArguments(view, args) {
+  view.fn[view.rawKey] = typeof view.rawArgs === "string" ? JSON.stringify(args) : args;
+}
+
+function argPath(args) {
+  return displayText(args.path || args.file_path || args.filePath || args.resource || args.filename || "");
+}
+
+function writeContentKey(args) {
+  for (const key of ["content", "file_text", "fileText", "text", "contents"]) {
+    if (typeof args[key] === "string") return key;
+  }
+  return null;
+}
+
+function editSteps(args) {
+  const rawSteps = Array.isArray(args.edits) ? args.edits : [args];
+  const steps = [];
+  for (const step of rawSteps) {
+    if (!step || typeof step !== "object") continue;
+    const oldText = step.old_string ?? step.old_str ?? step.oldString ?? step.search ?? step.find;
+    const newText = step.new_string ?? step.new_str ?? step.newString ?? step.replace ?? step.replacement ?? "";
+    if (typeof oldText === "string" && oldText) steps.push({ oldText, newText: displayText(newText) });
+  }
+  return steps;
+}
+
+function collectToolCalls(message) {
+  return Array.isArray(message && message.tool_calls) ? message.tool_calls : [];
+}
+
+function applyWriteEditMerge(row) {
+  const messages = Array.isArray(row.messages) ? row.messages : [];
+  const writes = [];
+  for (let messageIndex = 0; messageIndex < messages.length; messageIndex += 1) {
+    const message = messages[messageIndex];
+    if (!message || message.role !== "assistant") continue;
+    for (const toolCall of collectToolCalls(message)) {
+      const view = toolCallView(toolCall);
+      if (!view) continue;
+      const args = parseToolArguments(view.rawArgs);
+      if (!args) continue;
+      const name = view.name.toLowerCase();
+      const contentKey = writeContentKey(args);
+      const path = argPath(args);
+      const isWrite = contentKey && /write|create/.test(name);
+      if (isWrite) {
+        writes.push({ messageIndex, view, args, contentKey, path });
+        continue;
+      }
+      const steps = editSteps(args);
+      const isEdit = steps.length && (/edit|replace|str_replace/.test(name) || steps.length);
+      if (!isEdit) continue;
+      const target = [...writes].reverse().find((write) => !path || !write.path || write.path === path);
+      if (!target) continue;
+      let content = target.args[target.contentKey];
+      let applied = 0;
+      for (const step of steps) {
+        if (!content.includes(step.oldText)) {
+          applied = 0;
+          break;
+        }
+        content = content.replace(step.oldText, step.newText);
+        applied += 1;
+      }
+      if (!applied) continue;
+      target.args[target.contentKey] = content;
+      setToolArguments(target.view, target.args);
+
+      let keepEnd = target.messageIndex + 1;
+      while (messages[keepEnd] && messages[keepEnd].role === "tool") keepEnd += 1;
+      let removeEnd = messageIndex + 1;
+      while (messages[removeEnd] && messages[removeEnd].role === "tool") removeEnd += 1;
+      if (removeEnd > keepEnd) messages.splice(keepEnd, removeEnd - keepEnd);
+      return { applied, path: path || target.path || "matching file" };
+    }
+  }
+  return null;
+}
+
+function cloneDatasetRow(row) {
+  return JSON.parse(JSON.stringify(row || {}));
+}
+
+function editorMessages(row) {
+  if (!Array.isArray(row.messages)) row.messages = [];
+  return row.messages;
+}
+
+function editorMessageHasPayload(message) {
+  if (!message || typeof message !== "object") return false;
+  if (typeof message.content === "string" && message.content.trim()) return true;
+  if (message.thinking || message.reasoning_content) return true;
+  return Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
+}
+
+function cleanupEditorMessage(row, messageIndex) {
+  const messages = editorMessages(row);
+  const message = messages[messageIndex];
+  if (message && message.role === "assistant" && !editorMessageHasPayload(message)) {
+    messages.splice(messageIndex, 1);
+  }
+}
+
+function editorDisplayForItem(item) {
+  if (item.type === "thinking") {
+    return { kind: "thinking", text: item.text };
+  }
+  if (item.type === "tool_call") {
+    return { kind: "tool_call", name: item.name || "tool", text: item.text };
+  }
+  const kind = item.role === "tool" ? "tool_result" : item.role;
+  return { kind, text: item.text, name: item.name || "" };
+}
+
+function editorItems(editor) {
+  const items = [];
+  const row = editor.row;
+  const messages = editorMessages(row);
+  for (let messageIndex = 0; messageIndex < messages.length; messageIndex += 1) {
+    const message = messages[messageIndex];
+    if (!message || typeof message !== "object") continue;
+    const pending = editor.pendingEdit && editor.pendingEdit.messageIndex === messageIndex ? editor.pendingEdit : null;
+    const pendingThinking = pending && pending.type === "thinking";
+    const pendingContent = pending && pending.type === "content";
+    const thinkingField = message.thinking
+      ? "thinking"
+      : message.reasoning_content || pendingThinking
+        ? "reasoning_content"
+        : null;
+    const thinkingText = thinkingField ? displayText(message[thinkingField]) : "";
+    if (thinkingField && (thinkingText.trim() || pendingThinking)) {
+      items.push({
+        type: "thinking",
+        label: "Thinking",
+        text: thinkingText,
+        messageIndex,
+        field: thinkingField,
+        pending: Boolean(pendingThinking),
+      });
+    }
+    const content = messageContentText(message.content);
+    if (content.trim() || pendingContent) {
+      items.push({
+        type: "content",
+        label: message.role || "assistant",
+        role: message.role || "assistant",
+        text: content,
+        messageIndex,
+        field: "content",
+        name: message.name || message.tool_call_id || "",
+        pending: Boolean(pendingContent),
+      });
+    }
+    if (Array.isArray(message.tool_calls)) {
+      for (let toolCallIndex = 0; toolCallIndex < message.tool_calls.length; toolCallIndex += 1) {
+        const toolCall = message.tool_calls[toolCallIndex];
+        const view = toolCallView(toolCall);
+        if (!view) continue;
+        items.push({
+          type: "tool_call",
+          label: "Tool call",
+          text: displayText(view.rawArgs),
+          name: view.name || "tool",
+          messageIndex,
+          toolCallIndex,
+        });
+      }
+    }
+  }
+  return items;
+}
+
+function setEditorItemValue(editor, item, value) {
+  const messages = editorMessages(editor.row);
+  const message = messages[item.messageIndex];
+  if (!message) return true;
+  if (item.type === "thinking") {
+    const field = item.field || "reasoning_content";
+    if (value.trim()) {
+      message[field] = value;
+    } else {
+      delete message[field];
+    }
+    return true;
+  }
+  if (item.type === "content") {
+    message.content = value;
+    return true;
+  }
+  if (item.type === "tool_call") {
+    const toolCall = collectToolCalls(message)[item.toolCallIndex];
+    const view = toolCallView(toolCall);
+    if (!view) return false;
+    if (typeof view.rawArgs === "string") {
+      view.fn[view.rawKey] = value;
+      return true;
+    }
+    try {
+      view.fn[view.rawKey] = JSON.parse(value);
+      return true;
+    } catch (err) {
+      toast("Tool arguments must stay valid JSON.", "error");
+      return false;
+    }
+  }
+  return false;
+}
+
+function deleteEditorItem(editor, item) {
+  const messages = editorMessages(editor.row);
+  const message = messages[item.messageIndex];
+  if (!message) return;
+  if (item.type === "thinking") {
+    delete message[item.field || "reasoning_content"];
+    cleanupEditorMessage(editor.row, item.messageIndex);
+  } else if (item.type === "content") {
+    if (message.role === "assistant" && (message.thinking || message.reasoning_content || collectToolCalls(message).length)) {
+      message.content = "";
+      cleanupEditorMessage(editor.row, item.messageIndex);
+    } else {
+      messages.splice(item.messageIndex, 1);
+    }
+  } else if (item.type === "tool_call") {
+    const toolCalls = collectToolCalls(message);
+    const [removed] = toolCalls.splice(item.toolCallIndex, 1);
+    const removedId = removed && (removed.id || removed.tool_call_id);
+    const next = messages[item.messageIndex + 1];
+    if (next && next.role === "tool" && (!removedId || next.tool_call_id === removedId || next.id === removedId)) {
+      messages.splice(item.messageIndex + 1, 1);
+    }
+    cleanupEditorMessage(editor.row, item.messageIndex);
+  }
+  renderDatasetEditorList(editor);
+}
+
+function addEditorItem(editor, afterMessageIndex, type) {
+  const message = type === "thinking"
+    ? { role: "assistant", content: "", reasoning_content: "" }
+    : { role: "assistant", content: "" };
+  const messages = editorMessages(editor.row);
+  const insertAt = Math.max(0, Math.min(afterMessageIndex + 1, messages.length));
+  messages.splice(insertAt, 0, message);
+  editor.pendingEdit = {
+    messageIndex: insertAt,
+    type,
+    field: type === "thinking" ? "reasoning_content" : "content",
+  };
+  renderDatasetEditorList(editor);
+}
+
+function showEditorAddMenu(editor, item, button) {
+  const existing = button.parentElement.querySelector(".editor-add-menu");
+  if (existing) {
+    existing.remove();
+    return;
+  }
+  $$(".editor-add-menu", editor.list).forEach((node) => node.remove());
+  const menu = el("div", "editor-add-menu");
+  const contentBtn = el("button", null, "Assistant content");
+  contentBtn.type = "button";
+  contentBtn.addEventListener("click", () => addEditorItem(editor, item.messageIndex, "content"));
+  const thinkingBtn = el("button", null, "Thinking");
+  thinkingBtn.type = "button";
+  thinkingBtn.addEventListener("click", () => addEditorItem(editor, item.messageIndex, "thinking"));
+  menu.append(contentBtn, thinkingBtn);
+  button.parentElement.appendChild(menu);
+}
+
+function startEditorItemEdit(editor, item, card) {
+  const node = card.querySelector(".editor-item-rendered");
+  node.innerHTML = "";
+  const textarea = el("textarea", "editor-inline-textarea");
+  textarea.value = item.text;
+  textarea.spellcheck = false;
+  node.appendChild(textarea);
+  const controls = card.querySelector(".editor-hover-actions");
+  controls.innerHTML = "";
+  const save = el("button", "icon-btn", "✓");
+  save.type = "button";
+  save.title = "Save edit";
+  save.addEventListener("click", () => {
+    if (!setEditorItemValue(editor, item, textarea.value)) return;
+    editor.pendingEdit = null;
+    cleanupEditorMessage(editor.row, item.messageIndex);
+    renderDatasetEditorList(editor);
+  });
+  const cancel = el("button", "icon-btn", "×");
+  cancel.type = "button";
+  cancel.title = "Cancel edit";
+  cancel.addEventListener("click", () => {
+    if (item.pending) cleanupEditorMessage(editor.row, item.messageIndex);
+    editor.pendingEdit = null;
+    renderDatasetEditorList(editor);
+  });
+  controls.append(save, cancel);
+  textarea.focus();
+}
+
+function renderDatasetEditorList(editor) {
+  editor.list.innerHTML = "";
+  const items = editorItems(editor);
+  if (!items.length) {
+    const empty = el("div", "empty-state small");
+    empty.appendChild(el("div", "empty-icon", "▦"));
+    empty.appendChild(el("p", null, "No messages in this row."));
+    const addContent = el("button", "btn small", "Add assistant content");
+    addContent.type = "button";
+    addContent.addEventListener("click", () => addEditorItem(editor, -1, "content"));
+    const addThinking = el("button", "btn small", "Add thinking");
+    addThinking.type = "button";
+    addThinking.addEventListener("click", () => addEditorItem(editor, -1, "thinking"));
+    const actions = el("div", "row-actions");
+    actions.append(addContent, addThinking);
+    empty.appendChild(actions);
+    editor.list.appendChild(empty);
+    return;
+  }
+  for (const item of items) {
+    const card = el("div", "editor-message-item");
+    const rendered = el("div", "editor-item-rendered");
+    const node = renderDisplayEvent(editorDisplayForItem(item));
+    if (node) rendered.appendChild(node);
+    const controls = el("div", "editor-hover-actions");
+    const editBtn = el("button", "icon-btn", "✎");
+    editBtn.type = "button";
+    editBtn.title = "Edit";
+    editBtn.addEventListener("click", () => startEditorItemEdit(editor, item, card));
+    const deleteBtn = el("button", "icon-btn danger", "×");
+    deleteBtn.type = "button";
+    deleteBtn.title = "Delete";
+    deleteBtn.addEventListener("click", () => deleteEditorItem(editor, item));
+    const addBtn = el("button", "icon-btn", "+");
+    addBtn.type = "button";
+    addBtn.title = "Add after";
+    addBtn.addEventListener("click", () => showEditorAddMenu(editor, item, addBtn));
+    controls.append(editBtn, deleteBtn, addBtn);
+    card.append(rendered, controls);
+    editor.list.appendChild(card);
+    if (item.pending) startEditorItemEdit(editor, item, card);
+  }
+}
+
+function openDatasetEditor(rowInfo) {
+  closeDatasetEditor();
+
+  const editor = {
+    row: cloneDatasetRow(rowInfo.row),
+    rowInfo,
+    overlay: null,
+    onKeydown: null,
+    list: null,
+    pendingEdit: null,
+  };
+  const overlay = el("div", "modal-backdrop");
+  editor.overlay = overlay;
+  const modal = el("div", "dataset-editor");
+  const head = el("div", "dataset-editor-head");
+  const title = el("div", "dataset-editor-title");
+  title.appendChild(el("span", "badge", `row ${rowInfo.row_idx}`));
+  if (rowInfo.preview && rowInfo.preview.trace_type) title.appendChild(el("span", "muted", rowInfo.preview.trace_type));
+  head.appendChild(title);
+  const closeBtn = el("button", "icon-btn", "×");
+  closeBtn.type = "button";
+  closeBtn.title = "Close";
+  closeBtn.addEventListener("click", closeDatasetEditor);
+  head.appendChild(closeBtn);
+
+  const body = el("div", "dataset-editor-body");
+  const list = el("div", "dataset-editor-preview editable");
+  editor.list = list;
+  body.appendChild(list);
+
+  const actions = el("div", "dataset-editor-actions");
+  const mergeBtn = el("button", "btn small", "Merge write/edit");
+  mergeBtn.type = "button";
+  mergeBtn.addEventListener("click", () => {
+    const result = applyWriteEditMerge(editor.row);
+    if (!result) {
+      toast("No mergeable write/edit pair found.", "error");
+      return;
+    }
+    renderDatasetEditorList(editor);
+    toast(`Merged ${result.applied} edit into ${result.path}`, "success");
+  });
+  const saveBtn = el("button", "btn primary", "Save row");
+  saveBtn.type = "button";
+  saveBtn.addEventListener("click", async () => {
+    try {
+      await api("PUT", datasetRowUrl(rowInfo.row_idx), { row: editor.row });
+      toast(`Saved row ${rowInfo.row_idx}`, "success");
+      closeDatasetEditor();
+      await loadDatasetPreview({ selectRow: rowInfo.row_idx });
+    } catch (err) {
+      toast(err.message, "error");
+    }
+  });
+  const cancelBtn = el("button", "btn", "Cancel");
+  cancelBtn.type = "button";
+  cancelBtn.addEventListener("click", closeDatasetEditor);
+  actions.append(mergeBtn, el("div", "toolbar-spacer"), cancelBtn, saveBtn);
+
+  modal.append(head, body, actions);
+  overlay.appendChild(modal);
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) closeDatasetEditor();
+  });
+  const onKeydown = (event) => {
+    if (event.key === "Escape") closeDatasetEditor();
+  };
+  editor.onKeydown = onKeydown;
+  document.addEventListener("keydown", onKeydown);
+  document.body.appendChild(overlay);
+  state.datasetEditor = editor;
+  renderDatasetEditorList(editor);
 }
 
 function renderDatasetTraces(preview) {
@@ -1439,7 +1966,7 @@ function renderDatasetTraces(preview) {
   }
 }
 
-async function loadDatasetPreview() {
+async function loadDatasetPreview(options = {}) {
   const path = $("#dataset-path").value.trim();
   const search = $("#dataset-search").value.trim();
   const query = new URLSearchParams();
@@ -1448,7 +1975,7 @@ async function loadDatasetPreview() {
   try {
     const preview = await api("GET", `/api/dataset-preview?${query.toString()}`);
     state.datasetPreview = preview;
-    state.selectedDatasetRow = null;
+    state.selectedDatasetRow = options.selectRow ?? null;
     renderDatasetSummary(preview);
     renderDatasetTable(preview);
     renderDatasetTraces(preview);

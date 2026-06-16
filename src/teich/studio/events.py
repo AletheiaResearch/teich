@@ -354,7 +354,7 @@ def summarize_chat_row(row: dict[str, Any]) -> list[dict[str, Any]]:
         role = message.get("role")
         content = message.get("content")
         text = content if isinstance(content, str) else _content_text(content)
-        thinking = message.get("thinking")
+        thinking = message.get("thinking") or message.get("reasoning_content")
         if role == "system" and text.strip():
             display.append(display_event("system", text))
         elif role == "user" and text.strip():

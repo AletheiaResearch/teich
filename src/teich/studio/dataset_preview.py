@@ -16,6 +16,14 @@ MAX_TRACE_EVENTS = 5_000
 MAX_TRACE_DISPLAY = 80
 
 
+def _write_jsonl_rows(path: Path, rows: list[dict[str, Any]]) -> None:
+    if rows:
+        text = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n"
+        path.write_text(text, encoding="utf-8")
+    else:
+        path.unlink(missing_ok=True)
+
+
 def _jsonl_files(root: Path) -> list[Path]:
     if root.is_file() and root.suffix.lower() == ".jsonl":
         return [root]
@@ -167,6 +175,171 @@ def _read_trace_events(path: Path) -> list[dict[str, Any]]:
     except OSError:
         return []
     return events
+
+
+def _resolve_source_path(root: Path, row: dict[str, Any]) -> Path | None:
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    source_file = metadata.get("source_file")
+    if not isinstance(source_file, str) or not source_file.strip():
+        return None
+
+    root = root.expanduser().resolve()
+    raw_source = Path(source_file)
+    candidates: list[Path] = []
+    if raw_source.is_absolute():
+        candidates.append(raw_source.expanduser().resolve())
+    elif root.is_file():
+        candidates.append(root)
+    else:
+        direct = (root / raw_source).resolve()
+        if direct.exists():
+            candidates.append(direct)
+        for path in _jsonl_files(root):
+            relative = path.relative_to(root).as_posix()
+            if path.name == source_file or relative == source_file:
+                candidates.append(path.resolve())
+
+    unique_candidates = sorted(set(candidates), key=lambda path: str(path))
+    safe_candidates: list[Path] = []
+    for candidate in unique_candidates:
+        if root.is_file():
+            if candidate == root:
+                safe_candidates.append(candidate)
+            continue
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            continue
+        safe_candidates.append(candidate)
+
+    if len(safe_candidates) == 1:
+        return safe_candidates[0]
+    if len(safe_candidates) > 1:
+        raise ValueError(f"Source file {source_file!r} is ambiguous under {root}.")
+    return None
+
+
+def _row_source_line(row: dict[str, Any]) -> int | None:
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    source_line = metadata.get("source_line")
+    if isinstance(source_line, int) and source_line > 0:
+        return source_line
+    return None
+
+
+def _structured_row(row: Any) -> bool:
+    return isinstance(row, dict) and (
+        isinstance(row.get("messages"), list)
+        or isinstance(row.get("prompt"), str)
+        or isinstance(row.get("response"), str)
+    )
+
+
+def _source_usage_count(root: Path, rows: list[dict[str, Any]], source_path: Path) -> int:
+    count = 0
+    for row in rows:
+        try:
+            if _resolve_source_path(root, row) == source_path:
+                count += 1
+        except ValueError:
+            continue
+    return count
+
+
+def _dataset_rows(root: Path) -> tuple[Path, list[dict[str, Any]]]:
+    root = root.expanduser().resolve()
+    if not root.exists():
+        raise FileNotFoundError(f"Dataset output path not found: {root}")
+    return root, convert_traces_to_training_data(root)
+
+
+def dataset_row_context(root: Path, row_idx: int) -> dict[str, Any]:
+    root, rows = _dataset_rows(root)
+    if row_idx < 0 or row_idx >= len(rows):
+        raise IndexError(f"Dataset row {row_idx} is out of range.")
+    row = rows[row_idx]
+    source_path = _resolve_source_path(root, row)
+    source_file: str | None = None
+    if source_path is not None:
+        try:
+            source_file = source_path.relative_to(root).as_posix()
+        except ValueError:
+            source_file = source_path.name
+    return {
+        "row_idx": row_idx,
+        "row": row,
+        "preview": _row_preview(row),
+        "source_file": source_file,
+        "can_edit": source_path is not None,
+        "can_delete": source_path is not None,
+    }
+
+
+def update_dataset_row(root: Path, row_idx: int, updated_row: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(updated_row, dict):
+        raise TypeError("Updated row must be a JSON object.")
+    root, rows = _dataset_rows(root)
+    if row_idx < 0 or row_idx >= len(rows):
+        raise IndexError(f"Dataset row {row_idx} is out of range.")
+    current_row = rows[row_idx]
+    source_path = _resolve_source_path(root, current_row)
+    if source_path is None:
+        raise ValueError("This dataset row does not have a resolvable source file.")
+
+    row_to_write = dict(updated_row)
+    metadata = dict(row_to_write.get("metadata")) if isinstance(row_to_write.get("metadata"), dict) else {}
+    metadata.setdefault("source_file", source_path.name)
+    row_to_write["metadata"] = metadata
+
+    source_rows = _read_trace_events(source_path)
+    source_line = _row_source_line(current_row)
+    if source_line is not None and source_line <= len(source_rows) and _structured_row(source_rows[source_line - 1]):
+        metadata.setdefault("source_line", source_line)
+        source_rows[source_line - 1] = row_to_write
+        _write_jsonl_rows(source_path, source_rows)
+        mode = "line"
+    elif _source_usage_count(root, rows, source_path) == 1:
+        _write_jsonl_rows(source_path, [row_to_write])
+        mode = "file"
+    else:
+        raise ValueError("This source file maps to multiple dataset rows; refusing to rewrite it as one row.")
+
+    try:
+        source_file = source_path.relative_to(root).as_posix()
+    except ValueError:
+        source_file = source_path.name
+    return {"row_idx": row_idx, "source_file": source_file, "mode": mode, "row": row_to_write}
+
+
+def delete_dataset_row(root: Path, row_idx: int) -> dict[str, Any]:
+    root, rows = _dataset_rows(root)
+    if row_idx < 0 or row_idx >= len(rows):
+        raise IndexError(f"Dataset row {row_idx} is out of range.")
+    row = rows[row_idx]
+    source_path = _resolve_source_path(root, row)
+    if source_path is None:
+        raise ValueError("This dataset row does not have a resolvable source file.")
+
+    source_rows = _read_trace_events(source_path)
+    source_line = _row_source_line(row)
+    if source_line is not None and source_line <= len(source_rows) and _structured_row(source_rows[source_line - 1]):
+        del source_rows[source_line - 1]
+        _write_jsonl_rows(source_path, source_rows)
+        mode = "line"
+    elif _source_usage_count(root, rows, source_path) == 1:
+        source_path.unlink()
+        metadata_path = source_path.with_suffix(".metadata.json")
+        if metadata_path.exists():
+            metadata_path.unlink()
+        mode = "file"
+    else:
+        raise ValueError("This source file maps to multiple dataset rows; refusing to delete it as one row.")
+
+    try:
+        source_file = source_path.relative_to(root).as_posix()
+    except ValueError:
+        source_file = source_path.name
+    return {"row_idx": row_idx, "source_file": source_file, "mode": mode}
 
 
 def _trace_preview(root: Path, path: Path) -> dict[str, Any]:
