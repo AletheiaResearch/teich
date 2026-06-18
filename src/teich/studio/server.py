@@ -15,9 +15,13 @@ import asyncio
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from huggingface_hub import HfApi
 from pydantic import BaseModel, Field
 
+from ..config import PublishConfig
 from ..extract import ExtractProvider, default_session_sources
+from ..trace_readme import write_traces_readme
+from ..tool_schema import snapshot_configured_tools
 from .dataset_preview import build_dataset_preview, dataset_row_context, delete_dataset_row, update_dataset_row
 from .events import summarize_chat_row, summarize_trace_events
 from .extraction import ExtractionManager
@@ -102,10 +106,18 @@ class DatasetRowUpdate(BaseModel):
     row: dict[str, Any]
 
 
+class DatasetUploadRequest(BaseModel):
+    repo_id: str = Field(min_length=1)
+    hf_token: str | None = None
+    path: str | None = None
+    private: bool | None = None
+
+
 _docker_cache: dict[str, Any] = {"checked_at": 0.0, "available": False, "detail": None}
 TERMINAL_READY_STATUSES = {"ready", "live", "exited", "error"}
 TERMINAL_STARTUP_NOTICE_SECONDS = 15.0
 EXTRACT_PROVIDERS = {"claude", "codex", "hermes", "pi"}
+UPLOAD_IGNORE_PATTERNS = ["partials/**", "failures/**"]
 
 
 def _normalize_extract_provider(provider: str) -> ExtractProvider:
@@ -236,6 +248,81 @@ def _sse(log: EventLog, after: int) -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+def _upload_ignore_patterns(traces_dir: Path, failures_dir: Path) -> list[str]:
+    patterns = list(UPLOAD_IGNORE_PATTERNS)
+    try:
+        relative_failures_dir = failures_dir.resolve().relative_to(traces_dir.resolve())
+    except (OSError, ValueError):
+        return patterns
+    if relative_failures_dir.parts:
+        pattern = f"{relative_failures_dir.as_posix()}/**"
+        if pattern not in patterns:
+            patterns.append(pattern)
+    return patterns
+
+
+def _has_non_empty_dataset_outputs(root: Path) -> bool:
+    if not root.exists() or not root.is_dir():
+        return False
+    for path in root.rglob("*.jsonl"):
+        if not path.is_file():
+            continue
+        try:
+            if any(part in {"partials", "failures"} for part in path.relative_to(root).parts):
+                continue
+        except ValueError:
+            pass
+        if path.stat().st_size > 0:
+            return True
+    return False
+
+
+def _upload_dataset_folder(
+    *,
+    folder_path: Path,
+    repo_id: str,
+    hf_token: str | None,
+    private: bool,
+    ignore_patterns: list[str],
+) -> str:
+    api = HfApi(token=hf_token)
+    repo_url = api.create_repo(
+        repo_id=repo_id,
+        repo_type="dataset",
+        private=private,
+        exist_ok=True,
+    )
+    delete_file = getattr(api, "delete_file", None)
+    if callable(delete_file):
+        try:
+            delete_file(
+                path_in_repo="tools.json",
+                repo_id=repo_id,
+                repo_type="dataset",
+                commit_message="Remove legacy teich tools snapshot",
+            )
+        except Exception:
+            pass
+    upload_large_folder = getattr(api, "upload_large_folder", None)
+    if callable(upload_large_folder):
+        upload_large_folder(
+            repo_id=repo_id,
+            folder_path=str(folder_path),
+            repo_type="dataset",
+            private=private,
+            ignore_patterns=ignore_patterns,
+        )
+    else:
+        api.upload_folder(
+            folder_path=str(folder_path),
+            repo_id=repo_id,
+            repo_type="dataset",
+            commit_message="Upload teich dataset output",
+            ignore_patterns=ignore_patterns,
+        )
+    return str(repo_url)
 
 
 def create_app(project_dir: Path) -> FastAPI:
@@ -695,6 +782,71 @@ def create_app(project_dir: Path) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc))
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+
+    @app.post("/api/dataset-preview/upload")
+    def upload_dataset(payload: DatasetUploadRequest) -> dict[str, Any]:
+        root, _repo_id = _dataset_root(payload.path)
+        root = root.expanduser().resolve()
+        if not root.exists():
+            raise HTTPException(status_code=404, detail=f"Dataset output path not found: {root}")
+        if not root.is_dir():
+            raise HTTPException(status_code=400, detail="Dataset uploads must point at an output folder.")
+        if not _has_non_empty_dataset_outputs(root):
+            raise HTTPException(status_code=400, detail="No non-empty JSONL dataset files found to upload.")
+
+        try:
+            cfg = state.load_config()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid config: {exc}")
+        cfg.output.traces_dir = root
+        repo_id = payload.repo_id.strip()
+        hf_token = payload.hf_token.strip() if isinstance(payload.hf_token, str) and payload.hf_token.strip() else None
+        private = cfg.publish.private if payload.private is None else payload.private
+        try:
+            publish = PublishConfig(
+                repo_id=repo_id,
+                hf_token=hf_token or cfg.get_hf_token(),
+                private=private,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        if not publish.repo_id:
+            raise HTTPException(status_code=400, detail="Hugging Face dataset repo id is required.")
+
+        try:
+            readme_path = write_traces_readme(
+                cfg.output.traces_dir,
+                pretty_name=cfg.output.pretty_name,
+                tags=cfg.get_dataset_tags(),
+                model_id=cfg.model.model,
+                repo_id=publish.repo_id,
+                tools=snapshot_configured_tools(cfg),
+                excluded_dirs=[cfg.output.failures_dir],
+            )
+            repo_url = _upload_dataset_folder(
+                folder_path=cfg.output.traces_dir,
+                repo_id=publish.repo_id,
+                hf_token=publish.hf_token,
+                private=publish.private,
+                ignore_patterns=_upload_ignore_patterns(cfg.output.traces_dir, cfg.output.failures_dir),
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        config_update: dict[str, Any] = {"publish": {"repo_id": publish.repo_id, "private": publish.private}}
+        if payload.path and payload.path.strip():
+            config_update["output"] = {"traces_dir": payload.path.strip()}
+        try:
+            state.write_config_data(config_update)
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "repo_id": publish.repo_id,
+            "repo_url": repo_url,
+            "readme": str(readme_path),
+            "root": str(root),
+        }
 
     # ------------------------------------------------------------------
     # Static UI

@@ -1,0 +1,129 @@
+# Teich configuration
+#
+# Quick start:
+# 1. Choose agent.provider: codex, pi, claude-code, hermes, or chat
+# 2. Set model.model to the model you want to run
+# 3. Keep prompts in prompts.jsonl, or add inline prompts below
+# 4. Prefer TEICH_API_KEY / OPENROUTER_API_KEY / OPENAI_API_KEY in your environment for secrets
+# 5. Run: uvx teich generate -c config.yaml
+
+agent:
+  # codex = Codex CLI in Docker
+  # pi = Pi coding agent in Docker
+  # claude-code = Claude Code CLI in Docker
+  # hermes = Hermes Agent CLI in Docker
+  # chat = direct text-only dataset generation via an OpenAI-compatible API
+  provider: pi
+
+model:
+  # Model id passed to the selected agent/provider.
+  model: deepseek/deepseek-v4-flash
+
+  # Codex approval behavior. Common values: never, on-request.
+  approval_policy: never
+
+  # Codex sandbox mode.
+  sandbox: danger-full-access
+
+  # Optional reasoning / thinking level.
+  # - Codex: forwarded as model_reasoning_effort
+  # - Pi: normalized to low / medium / high when supported
+  # - Claude Code / Hermes: model/provider specific
+  # Hermes also enables built-in toolsets:
+  # safe,terminal,file,skills,memory,session_search,delegation
+  reasoning_effort: medium
+
+  # Optional context length override for providers that support it.
+  # Useful for Hermes custom endpoints when /v1/models reports a served
+  # context below Hermes' minimum but the endpoint supports a larger window.
+  context_length: null
+
+  # Optional Pi-specific provider overrides.
+  # Teich already defaults maxTokens to 131072 even if this block is omitted.
+  # Uncomment to customize the Pi/OpenRouter model entry further.
+  # pi_model_overrides:
+  #   maxTokens: 131072
+  #   compat:
+  #     maxTokensField: max_tokens
+
+# Optional API/provider configuration.
+# Leave this section commented out to use the runtime defaults.
+#
+# Common setups:
+# - OpenAI: provider=openai
+# - OpenRouter: provider=openrouter, base_url=https://openrouter.ai/api/v1
+# - Local OpenAI-compatible server: provider=openai, base_url=http://localhost:1234/v1
+#
+# You can also put secrets in env vars instead of committing them here:
+#   TEICH_API_KEY=...
+#   OPENROUTER_API_KEY=...
+#   OPENAI_API_KEY=...
+#   TEICH_BASE_URL=...
+#   TEICH_PROVIDER=...
+#   TEICH_MODEL=...
+api:
+  provider: openrouter
+  base_url: https://openrouter.ai/api/v1
+  api_key: null
+  # Pi uses OpenRouter through chat/completions even if this is set to responses;
+  # the Responses adapter can stall before the first native session event.
+  wire_api: responses
+
+# Optional MCP servers exposed inside the agent runtime.
+# mcp_servers:
+#   - name: filesystem
+#     command: npx
+#     args: ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
+
+# Prompts can come from a file, inline below, or both.
+# Relative paths are resolved from the location of this config file.
+# JSONL is recommended because it safely supports multiline prompts, prompt-level system messages, and follow_up_prompts.
+# CSV is still supported, but prompt files with commas/newlines are easier to maintain as JSONL.
+prompts_file: prompts.jsonl
+
+# Optional inline prompts. Use objects when you need metadata or chat follow-up turns.
+# prompts:
+#   - prompt: "Draft a compact project plan"
+#     system: "Answer as a concise project manager."
+#     follow_up_prompts:
+#       - "Revise it for a solo developer"
+#       - "Add a risk checklist"
+prompts: []
+
+output:
+  # Where generated .jsonl files are written.
+  # - codex / pi: normalized copies of native agent session traces
+  # - claude-code: native Claude Code transcript JSONL from .claude/projects/...
+  # - hermes: one Teich external trace per Hermes session, including delegated subagents
+  # - chat: text-only training rows with messages/prompt/response/thinking fields
+  traces_dir: ./output
+
+  # Where Teich stores workspace snapshots for each run.
+  sandbox_dir: ./sandbox
+
+  # Where Teich stores failed or interrupted traces for debugging.
+  # These files are excluded from resume detection, conversion, README generation, and uploads.
+  failures_dir: ./failures
+
+  # Used in the generated trace README.
+  pretty_name: "My Agent Traces"
+
+# Optional direct upload to a Hugging Face dataset repo.
+# Tags are auto-generated from the provider and model.
+publish:
+  repo_id: null
+  hf_token: null
+  private: false
+
+# Number of prompts to run in parallel.
+max_concurrency: 1
+
+# Per-session timeout in seconds.
+timeout_seconds: 600
+
+# Legacy global API key field.
+# Prefer env vars or api.api_key above for new configs.
+openai_api_key: null
+
+# Optional developer instructions injected into the runtime.
+developer_instructions: null

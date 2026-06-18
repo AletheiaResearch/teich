@@ -637,23 +637,6 @@ input::placeholder, textarea::placeholder { color: var(--text-faint); }
 
 .row-actions { margin-top: 16px; display: flex; align-items: center; gap: 12px; }
 
-/* ----------------------------- Output ----------------------------- */
-
-.output-layout { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 14px; align-items: start; }
-.trace-list { padding: 8px; max-height: 72vh; overflow-y: auto; }
-.trace-item {
-  width: 100%; text-align: left; background: none; border: none; color: var(--text);
-  font: inherit; padding: 10px 12px; border-radius: 9px; cursor: pointer;
-  display: flex; flex-direction: column; gap: 3px;
-  transition: background var(--speed);
-}
-.trace-item:hover { background: var(--bg-panel); }
-.trace-item.selected { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
-.trace-item .trace-name { font-size: 12px; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.trace-item.selected .trace-name { color: var(--accent-text); }
-.trace-item .trace-meta { font-size: 11px; color: var(--text-faint); }
-.trace-preview { max-height: 72vh; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
-.trace-preview .msg { max-width: 100%; }
 .preview-head { display: flex; align-items: center; gap: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--border-soft); }
 .preview-head .badge { text-transform: capitalize; border-color: var(--accent-glow); color: var(--accent-text); }
 .preview-head .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 11.5px; }
@@ -801,6 +784,16 @@ input::placeholder, textarea::placeholder { color: var(--text-faint); }
   box-shadow: 0 24px 90px rgba(0, 0, 0, 0.55);
   overflow: hidden;
 }
+.dataset-upload-modal {
+  width: min(520px, 100%);
+  display: flex;
+  flex-direction: column;
+  background: linear-gradient(180deg, var(--bg-raised), #17171a);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 24px 90px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
 .dataset-editor-head,
 .dataset-editor-actions {
   display: flex;
@@ -812,6 +805,12 @@ input::placeholder, textarea::placeholder { color: var(--text-faint); }
 .dataset-editor-actions {
   border-top: 1px solid var(--border-soft);
   border-bottom: 0;
+}
+.dataset-upload-body {
+  padding: 16px 14px;
+}
+.dataset-upload-body .form-grid {
+  grid-template-columns: 1fr;
 }
 .dataset-editor-title { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .dataset-editor-title .muted {
@@ -906,8 +905,6 @@ input::placeholder, textarea::placeholder { color: var(--text-faint); }
   .main { padding: 22px 18px 80px; }
   .form-grid { grid-template-columns: 1fr; }
   .field.span-2 { grid-column: span 1; }
-  .output-layout { grid-template-columns: 1fr; }
-  .trace-list { max-height: 32vh; }
   .dataset-layout { grid-template-columns: 1fr; }
   .editor-message-item { padding-right: 0; padding-top: 38px; }
   .editor-hover-actions { opacity: 1; pointer-events: auto; }

@@ -41,16 +41,6 @@ function el(tag, className, text) {
   return node;
 }
 
-function formatBytes(bytes) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function formatTime(epochSeconds) {
-  return new Date(epochSeconds * 1000).toLocaleString();
-}
-
 function displayText(value) {
   if (value == null) return "";
   if (typeof value === "string") return value;
@@ -260,11 +250,10 @@ const state = {
   extractSource: null,
   extractJob: null,
   extractEvents: [],
-  traces: [],
-  selectedTrace: null,
   datasetPreview: null,
   selectedDatasetRow: null,
   datasetEditor: null,
+  hfUploadModal: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -274,7 +263,6 @@ const state = {
 function showView(name) {
   $$(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === name));
   $$(".view").forEach((view) => view.classList.toggle("active", view.id === `view-${name}`));
-  if (name === "output") loadTracesQuiet();
   if (name === "generate") refreshRunSummary();
   if (name === "extract") loadCurrentExtraction();
   if (name === "dataset") loadDatasetPreview();
@@ -704,7 +692,7 @@ function connectJobEvents() {
       state.job.status = data.status;
       state.job.message = data.text || "";
       state.job.error = data.error || null;
-      if (["completed", "failed", "stopped"].includes(data.status)) loadTracesQuiet();
+      if (["completed", "failed", "stopped"].includes(data.status)) refreshDatasetIfVisible();
     } else if (data.kind === "prompt_update") {
       state.job = state.job || { prompts: [] };
       const prompts = state.job.prompts;
@@ -807,7 +795,7 @@ function connectExtractEvents() {
       state.extractJob.error = data.error || null;
       if (data.result_files) state.extractJob.result_files = data.result_files;
       if (["completed", "failed"].includes(data.status)) {
-        loadTracesQuiet();
+        refreshDatasetIfVisible();
         if (data.status === "completed") toast("Extraction complete", "success");
       }
     }
@@ -1207,66 +1195,12 @@ function resetSessionView() {
   state.session = null;
   $("#session-live").hidden = true;
   $("#session-start").hidden = false;
-  loadTracesQuiet();
+  refreshDatasetIfVisible();
 }
 
-// ---------------------------------------------------------------------------
-// Output view
-// ---------------------------------------------------------------------------
-
-async function loadTracesQuiet() { try { await loadTraces(); } catch (e) { /* ignore */ } }
-
-async function loadTraces() {
-  const result = await api("GET", "/api/traces");
-  state.traces = result.traces || [];
-  const badge = $("#nav-traces-count");
-  badge.hidden = !state.traces.length;
-  badge.textContent = state.traces.length || "";
-  const list = $("#trace-list");
-  list.innerHTML = "";
-  if (!state.traces.length) {
-    const empty = el("div", "empty-state small");
-    empty.appendChild(el("div", "empty-icon", "▤"));
-    empty.appendChild(el("p", null, "No traces yet. Generate a batch or save an interactive session."));
-    list.appendChild(empty);
-    return;
-  }
-  for (const trace of state.traces) {
-    const item = el("button", "trace-item" + (state.selectedTrace === trace.name ? " selected" : ""));
-    item.appendChild(el("div", "trace-name", trace.name));
-    item.appendChild(el("div", "trace-meta", `${formatBytes(trace.size_bytes)} · ${formatTime(trace.modified_at)}`));
-    item.addEventListener("click", () => previewTrace(trace.name));
-    list.appendChild(item);
-  }
-}
-
-async function previewTrace(name) {
-  state.selectedTrace = name;
-  $$("#trace-list .trace-item").forEach((item) => {
-    item.classList.toggle("selected", item.querySelector(".trace-name").textContent === name);
-  });
-  const preview = $("#trace-preview");
-  preview.innerHTML = "";
-  preview.appendChild(el("div", "msg status-line", "Loading…"));
-  try {
-    const result = await api("GET", `/api/traces/preview?name=${encodeURIComponent(name)}`);
-    preview.innerHTML = "";
-    const head = el("div", "preview-head");
-    head.appendChild(el("span", "badge", result.provider));
-    head.appendChild(el("span", "muted", name));
-    preview.appendChild(head);
-    if (!result.display.length) {
-      preview.appendChild(el("div", "msg status-line", "No displayable messages in this trace."));
-    }
-    for (const eventData of result.display) {
-      const node = renderDisplayEvent(eventData);
-      if (node) preview.appendChild(node);
-    }
-    if (result.truncated) preview.appendChild(el("div", "msg status-line", "… preview truncated"));
-  } catch (err) {
-    preview.innerHTML = "";
-    preview.appendChild(el("div", "msg error-line", err.message));
-  }
+function refreshDatasetIfVisible() {
+  const view = $("#view-dataset");
+  if (view && view.classList.contains("active")) loadDatasetPreview();
 }
 
 // ---------------------------------------------------------------------------
@@ -1937,6 +1871,100 @@ function openDatasetEditor(rowInfo) {
   renderDatasetEditorList(editor);
 }
 
+function closeHfUploadModal() {
+  if (!state.hfUploadModal) return;
+  document.removeEventListener("keydown", state.hfUploadModal.onKeydown);
+  state.hfUploadModal.overlay.remove();
+  state.hfUploadModal = null;
+}
+
+function openHfUploadModal() {
+  closeHfUploadModal();
+  const preview = state.datasetPreview || {};
+  const overlay = el("div", "modal-backdrop");
+  const modal = el("div", "dataset-upload-modal");
+  const head = el("div", "dataset-editor-head");
+  const title = el("div", "dataset-editor-title");
+  title.appendChild(el("span", "badge", "Hugging Face"));
+  if (preview.root) title.appendChild(el("span", "muted", preview.root));
+  head.appendChild(title);
+  const closeBtn = el("button", "icon-btn", "×");
+  closeBtn.type = "button";
+  closeBtn.title = "Close";
+  closeBtn.addEventListener("click", closeHfUploadModal);
+  head.appendChild(closeBtn);
+
+  const body = el("div", "dataset-upload-body");
+  const form = el("div", "form-grid");
+  const repoField = el("label", "field");
+  repoField.appendChild(el("span", null, "Repo ID"));
+  const repoInput = document.createElement("input");
+  repoInput.type = "text";
+  repoInput.id = "hf-upload-repo-id";
+  repoInput.placeholder = "username/my-dataset";
+  repoInput.value = preview.repo_id || get(state.config, "publish.repo_id", "") || "";
+  repoField.appendChild(repoInput);
+  const tokenField = el("label", "field");
+  tokenField.appendChild(el("span", null, "HF_TOKEN optional"));
+  const tokenInput = document.createElement("input");
+  tokenInput.type = "password";
+  tokenInput.id = "hf-upload-token";
+  tokenInput.placeholder = "Leave blank to use environment";
+  tokenInput.autocomplete = "off";
+  tokenField.appendChild(tokenInput);
+  form.append(repoField, tokenField);
+  body.appendChild(form);
+
+  const actions = el("div", "dataset-editor-actions");
+  const note = el("span", "save-note");
+  const cancelBtn = el("button", "btn", "Cancel");
+  cancelBtn.type = "button";
+  cancelBtn.addEventListener("click", closeHfUploadModal);
+  const uploadBtn = el("button", "btn primary", "Upload");
+  uploadBtn.type = "button";
+  uploadBtn.addEventListener("click", async () => {
+    const repoId = repoInput.value.trim();
+    if (!repoId) {
+      note.textContent = "Repo ID is required.";
+      note.classList.add("error");
+      return;
+    }
+    note.textContent = "Uploading…";
+    note.classList.remove("error");
+    uploadBtn.disabled = true;
+    try {
+      const result = await api("POST", "/api/dataset-preview/upload", {
+        path: $("#dataset-path").value.trim() || null,
+        repo_id: repoId,
+        hf_token: tokenInput.value.trim() || null,
+      });
+      toast(`Uploaded dataset: ${result.repo_id}`, "success");
+      closeHfUploadModal();
+      await loadConfig();
+      await loadDatasetPreview();
+    } catch (err) {
+      note.textContent = err.message;
+      note.classList.add("error");
+      uploadBtn.disabled = false;
+    }
+  });
+  actions.append(note, el("div", "toolbar-spacer"), cancelBtn, uploadBtn);
+
+  modal.append(head, body, actions);
+  overlay.appendChild(modal);
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) closeHfUploadModal();
+  });
+  const onKeydown = (event) => {
+    if (event.key === "Escape") closeHfUploadModal();
+    if (event.key === "Enter" && event.target === repoInput) uploadBtn.click();
+  };
+  state.hfUploadModal = { overlay, onKeydown };
+  document.addEventListener("keydown", onKeydown);
+  document.body.appendChild(overlay);
+  repoInput.focus();
+}
+
 function renderDatasetTraces(preview) {
   const wrap = $("#dataset-traces");
   wrap.innerHTML = "";
@@ -1988,6 +2016,7 @@ async function loadDatasetPreview(options = {}) {
 }
 
 $("#btn-load-dataset").addEventListener("click", loadDatasetPreview);
+$("#btn-upload-dataset").addEventListener("click", openHfUploadModal);
 $("#dataset-search").addEventListener("keydown", (event) => {
   if (event.key === "Enter") loadDatasetPreview();
 });
@@ -2004,7 +2033,6 @@ async function init() {
   renderProviderSeg();
   refreshRunSummary();
   loadCurrentJob();
-  loadTracesQuiet();
   setInterval(loadStatus, 60000);
 }
 

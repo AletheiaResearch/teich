@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
@@ -400,6 +401,55 @@ def test_dataset_preview_endpoint_returns_rows_features_and_trace_previews(clien
 
     filtered = client.get("/api/dataset-preview", params={"search": "missing"}).json()
     assert filtered["dataset"]["num_rows"] == 0
+
+
+def test_dataset_upload_endpoint_generates_readme_and_uploads_with_env_token(client, monkeypatch):
+    output_dir = client.project_dir / "output"
+    output_dir.mkdir()
+    (output_dir / "chat.jsonl").write_text(
+        '{"messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"}],"prompt":"hello","response":"hi","model":"gpt-test"}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HF_TOKEN", "hf-env-token")
+
+    with patch("teich.studio.server.HfApi") as mock_api_cls:
+        mock_api = MagicMock()
+        mock_api.create_repo.return_value = "https://huggingface.co/datasets/armand0e/studio-dataset"
+        mock_api_cls.return_value = mock_api
+
+        response = client.post(
+            "/api/dataset-preview/upload",
+            json={"repo_id": "armand0e/studio-dataset"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["repo_id"] == "armand0e/studio-dataset"
+    readme = (output_dir / "README.md").read_text(encoding="utf-8")
+    assert "dataset = load_traces('armand0e/studio-dataset')" in readme
+    mock_api_cls.assert_called_once_with(token="hf-env-token")
+    mock_api.create_repo.assert_called_once_with(
+        repo_id="armand0e/studio-dataset",
+        repo_type="dataset",
+        private=False,
+        exist_ok=True,
+    )
+    mock_api.delete_file.assert_called_once_with(
+        path_in_repo="tools.json",
+        repo_id="armand0e/studio-dataset",
+        repo_type="dataset",
+        commit_message="Remove legacy teich tools snapshot",
+    )
+    mock_api.upload_large_folder.assert_called_once_with(
+        repo_id="armand0e/studio-dataset",
+        folder_path=str(output_dir),
+        repo_type="dataset",
+        private=False,
+        ignore_patterns=["partials/**", "failures/**"],
+    )
+    preview = client.get("/api/dataset-preview").json()
+    assert preview["repo_id"] == "armand0e/studio-dataset"
+    assert preview["hf_embed_url"] == "https://huggingface.co/datasets/armand0e/studio-dataset/embed/viewer"
 
 
 def test_dataset_row_delete_removes_single_backing_trace(client):

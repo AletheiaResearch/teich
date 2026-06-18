@@ -41,11 +41,6 @@
           <svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
           <span class="nav-label">Interactive</span>
         </button>
-        <button class="nav-item" data-view="output" title="Output">
-          <svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
-          <span class="nav-label">Output</span>
-          <span class="nav-badge" id="nav-traces-count" hidden></span>
-        </button>
         <button class="nav-item" data-view="dataset" title="Dataset">
           <svg viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/><path d="M7 4v16"/><path d="M17 4v16"/></svg>
           <span class="nav-label">Dataset</span>
@@ -319,23 +314,6 @@
         </div>
       </section>
 
-      <!-- ============================== OUTPUT ============================== -->
-      <section class="view" id="view-output">
-        <header class="view-header">
-          <h1>Output</h1>
-          <p>Every saved trace in your dataset. Click one to inspect the conversation.</p>
-        </header>
-        <div class="output-layout">
-          <div class="trace-list card" id="trace-list"></div>
-          <div class="trace-preview card" id="trace-preview">
-            <div class="empty-state small">
-              <div class="empty-icon">▤</div>
-              <p>Select a trace to preview it.</p>
-            </div>
-          </div>
-        </div>
-      </section>
-
       <!-- ============================== DATASET ============================== -->
       <section class="view" id="view-dataset">
         <header class="view-header">
@@ -347,6 +325,7 @@
           <input type="text" id="dataset-path" class="toolbar-input" placeholder="./output" />
           <input type="text" id="dataset-search" class="toolbar-input" placeholder="Search rows" />
           <button class="btn primary" id="btn-load-dataset">Reload</button>
+          <button class="btn" id="btn-upload-dataset">Upload to Hugging Face</button>
         </div>
 
         <div class="card dataset-summary" id="dataset-summary"></div>
