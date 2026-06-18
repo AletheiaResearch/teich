@@ -9,23 +9,23 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from teich.config import Config, APIConfig, ModelConfig
+from teich.config import APIConfig, Config, ModelConfig
 from teich.runner import CodexRunner, RUNTIME_CONTAINER_USER, RUNTIME_IMAGE_NAME
 
 
-# Skip integration tests if Docker is not available
-docker_available = subprocess.run(
-    ["docker", "info"], capture_output=True, timeout=5
-).returncode == 0
-
-requires_docker = pytest.mark.skipif(
-    not docker_available,
-    reason="Docker not available"
-)
+@pytest.fixture
+def require_docker():
+    """Skip Docker-backed tests without probing Docker during collection."""
+    try:
+        docker_info = subprocess.run(["docker", "info"], capture_output=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        pytest.skip("Docker not available")
+    if docker_info.returncode != 0:
+        pytest.skip("Docker not available")
 
 requires_api_key = pytest.mark.skipif(
     not os.getenv("OPENAI_API_KEY"),
@@ -41,7 +41,6 @@ requires_runtime_smoke = pytest.mark.skipif(
 class TestDockerImage:
     """Tests for Docker image building."""
 
-    @requires_docker
     def test_dfile_exists(self):
         """Verify Dockerfile exists."""
         dockerfile = Path(__file__).parent.parent / "docker" / "codex-runtime.Dockerfile"
@@ -77,7 +76,6 @@ class TestDockerImage:
         assert "chmod +x /usr/local/bin/apt-get /usr/local/bin/apt" in content
         assert "USER codex" in content
 
-    @requires_docker
     @pytest.mark.slow  # Takes 2-3 minutes, skip by default
     def test_docker_build(self, tmp_path):
         """Test Docker image builds successfully."""
@@ -98,10 +96,9 @@ class TestDockerImage:
 
         assert result.returncode == 0, f"Docker build failed: {result.stderr}"
 
-    @requires_docker
     @requires_runtime_smoke
     @pytest.mark.slow
-    def test_runtime_container_can_install_system_packages(self):
+    def test_runtime_container_can_install_system_packages(self, require_docker):
         """Verify generated agents can use apt-get for missing system dependencies."""
         CodexRunner(Config())
 
@@ -130,7 +127,6 @@ class TestDockerImage:
 class TestRunnerIntegration:
     """Integration tests for CodexRunner with real Docker."""
 
-    @requires_docker
     def test_runner_creates_output_dir(self, tmp_path):
         """Test runner creates output directory."""
         from teich.config import OutputConfig
@@ -240,7 +236,7 @@ class TestOpenRouterIntegration:
 
 @pytest.mark.integration
 @pytest.mark.slow
-@requires_docker
+@pytest.mark.usefixtures("require_docker")
 @requires_api_key
 class TestEndToEnd:
     """Full end-to-end tests requiring real API access."""

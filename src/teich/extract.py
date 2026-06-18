@@ -18,6 +18,9 @@ from typing import Any, Literal
 from .tool_schema import CURSOR_BUILTIN_TOOLS
 
 ExtractProvider = Literal["claude", "codex", "cursor", "hermes", "pi"]
+CURSOR_EXTRACTION_NOTICE = (
+    "Cursor extraction may take a while depending on how much local Cursor data is being scanned."
+)
 CURSOR_RECORD_TERMS = (
     "aichat",
     "ai_chat",
@@ -491,6 +494,10 @@ def _sanitize_cursor_row(row: dict[str, Any]) -> dict[str, Any] | None:
     clean_messages = [_cursor_clean_message(message) for message in messages]
     clean_messages = [message for message in clean_messages if message is not None]
     clean_messages = _cursor_drop_adjacent_duplicate_messages(clean_messages)
+    if not any(_cursor_message_is_user_prompt(message) for message in clean_messages):
+        fallback_prompt = _cursor_fallback_prompt(row)
+        if fallback_prompt:
+            clean_messages.insert(0, {"role": "user", "content": fallback_prompt})
     clean_messages = _cursor_trim_messages_to_trainable_conversation(clean_messages)
     if not clean_messages:
         return None
@@ -517,6 +524,16 @@ def _sanitize_cursor_row(row: dict[str, Any]) -> dict[str, Any] | None:
     metadata["cursor_message_count"] = len(clean_messages)
     clean_row["metadata"] = metadata
     return clean_row
+
+
+def _cursor_fallback_prompt(row: dict[str, Any]) -> str:
+    prompt = row.get("prompt")
+    if not isinstance(prompt, str):
+        return ""
+    prompt = _cursor_string_content(prompt).strip()
+    if not prompt or prompt.startswith(("composerData:", "bubbleId:")):
+        return ""
+    return prompt
 
 
 def _cursor_clean_message(message: Any) -> dict[str, Any] | None:
@@ -1301,11 +1318,17 @@ def _cursor_message_content(item: dict[str, Any]) -> str:
 
 def _cursor_string_content(value: Any) -> str:
     if isinstance(value, str):
+        rich_text = _cursor_rich_text_content(value)
+        if rich_text is not None:
+            return rich_text
         return value
     if isinstance(value, list):
         parts = [_cursor_string_content(item) for item in value]
         return "\n".join(part for part in parts if part)
     if isinstance(value, dict):
+        rich_text = _cursor_rich_text_content(value)
+        if rich_text is not None:
+            return rich_text
         for key in ("text", "content", "value", "message"):
             text = _cursor_string_content(value.get(key))
             if text:
@@ -1314,6 +1337,54 @@ def _cursor_string_content(value: Any) -> str:
     if value is None:
         return ""
     return str(value)
+
+
+def _cursor_rich_text_content(value: Any) -> str | None:
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped.startswith(("{", "[")) or not any(term in stripped for term in ('"root"', '"children"', '"type"')):
+            return None
+        try:
+            value = json.loads(stripped)
+        except json.JSONDecodeError:
+            return None
+    if isinstance(value, dict):
+        root = value.get("root")
+        if isinstance(root, dict):
+            return _cursor_rich_text_node_content(root).strip()
+        if _cursor_looks_like_rich_text_node(value):
+            return _cursor_rich_text_node_content(value).strip()
+    if isinstance(value, list) and any(_cursor_looks_like_rich_text_node(item) for item in value):
+        parts = [_cursor_rich_text_node_content(item).strip() for item in value]
+        return "\n".join(part for part in parts if part)
+    return None
+
+
+def _cursor_looks_like_rich_text_node(value: Any) -> bool:
+    return isinstance(value, dict) and (
+        "root" in value
+        or ("children" in value and "type" in value)
+        or (value.get("type") == "text" and "text" in value)
+    )
+
+
+def _cursor_rich_text_node_content(node: Any) -> str:
+    if not isinstance(node, dict):
+        return ""
+    node_type = str(node.get("type") or "").casefold()
+    if node_type == "text":
+        text = node.get("text")
+        return text if isinstance(text, str) else ""
+    if node_type in {"linebreak", "line-break"}:
+        return "\n"
+    children = node.get("children")
+    if not isinstance(children, list):
+        return ""
+    parts = [_cursor_rich_text_node_content(child) for child in children]
+    parts = [part for part in parts if part]
+    if node_type in {"root", "list", "table", "tablebody", "tablerow"}:
+        return "\n".join(part.strip() for part in parts if part.strip())
+    return "".join(parts).strip()
 
 
 def _cursor_prompt(messages: list[dict[str, Any]], key: str, *, explicit_prompt: str | None = None) -> str:
@@ -1360,7 +1431,9 @@ def _cursor_find_string_key(value: Any, target_key: str) -> str | None:
     if isinstance(value, dict):
         for key, item in value.items():
             if key == target_key and isinstance(item, str) and item.strip():
-                return item.strip()
+                text = _cursor_string_content(item).strip()
+                if text:
+                    return text
         for item in value.values():
             found = _cursor_find_string_key(item, target_key)
             if found:

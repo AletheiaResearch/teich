@@ -10,7 +10,7 @@ from typing import Any
 
 from ..anonymize import anonymize_path
 from ..config import Config
-from ..extract import ExtractProvider, extract_local_sessions
+from ..extract import CURSOR_EXTRACTION_NOTICE, ExtractProvider, extract_local_sessions
 from ..trace_readme import write_traces_readme
 from .interactive import EventLog
 
@@ -85,6 +85,8 @@ class ExtractionJob:
     def _run(self) -> None:
         try:
             self._emit_status("running", f"Extracting local {self.provider} sessions...")
+            if self.provider == "cursor":
+                self.events.append({"kind": "extract_warning", "text": CURSOR_EXTRACTION_NOTICE})
             result = extract_local_sessions(
                 self.provider,
                 output_dir=self.output_dir,

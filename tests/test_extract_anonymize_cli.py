@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 from typer.testing import CliRunner
 
 from teich.converter import convert_traces_to_training_data
-from teich.extract import default_session_sources
+from teich.extract import CURSOR_EXTRACTION_NOTICE, default_session_sources
 from teich.cli import app
 
 runner = CliRunner()
@@ -38,6 +38,43 @@ def _write_minimal_hermes_state_db(state_db: Path, *, session_id: str = "session
         connection.close()
 
 
+def _cursor_rich_text(value: str) -> str:
+    children = []
+    if value:
+        children.append(
+            {
+                "detail": 0,
+                "format": 0,
+                "mode": "normal",
+                "style": "",
+                "text": value,
+                "type": "text",
+                "version": 1,
+            }
+        )
+    return json.dumps(
+        {
+            "root": {
+                "children": [
+                    {
+                        "children": children,
+                        "direction": None,
+                        "format": "",
+                        "indent": 0,
+                        "type": "paragraph",
+                        "version": 1,
+                    }
+                ],
+                "direction": None,
+                "format": "",
+                "indent": 0,
+                "type": "root",
+                "version": 1,
+            }
+        }
+    )
+
+
 def _write_minimal_cursor_state_db(state_db: Path) -> None:
     state_db.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(state_db)
@@ -52,7 +89,8 @@ def _write_minimal_cursor_state_db(state_db: Path) -> None:
                     {
                         "model": "cursor-fable-5",
                         "messages": [
-                            {"role": "user", "content": "open chat prompt"},
+                            {"role": "user", "content": _cursor_rich_text("")},
+                            {"role": "user", "content": _cursor_rich_text("open chat prompt")},
                             {
                                 "role": "assistant",
                                 "content": "chat answer",
@@ -133,6 +171,7 @@ def _write_archived_cursor_state_db(state_db: Path) -> None:
                     {
                         "composerId": "archived-composer",
                         "status": "completed",
+                        "text": "archived prompt",
                         "fullConversationHeadersOnly": [
                             {"bubbleId": "user-bubble", "type": 1},
                             {"bubbleId": "assistant-bubble", "type": 2},
@@ -151,7 +190,7 @@ def _write_archived_cursor_state_db(state_db: Path) -> None:
                     {
                         "bubbleId": "user-bubble",
                         "type": 1,
-                        "text": "archived prompt",
+                        "richText": _cursor_rich_text(""),
                         "modelInfo": {"modelName": "cursor-fable-5"},
                     }
                 ),
@@ -440,6 +479,10 @@ def test_extract_cursor_from_workspace_state_db(tmp_path: Path):
     assert {row["metadata"]["cursor_workspace_id"] for row in rows} == {"workspace-hash"}
     assert rows_by_table["composerSessions"]["prompt"] == "composer prompt"
     assert rows_by_table["ItemTable"]["prompt"] == "open chat prompt"
+    assert [message["content"] for message in rows_by_table["ItemTable"]["messages"] if message["role"] == "user"] == [
+        "open chat prompt"
+    ]
+    assert '"root"' not in rows_by_table["ItemTable"]["prompt"]
     assert rows_by_table["ItemTable"]["tools"][0]["function"]["name"] == "read_file"
     assert rows_by_table["ItemTable"]["messages"][1]["tool_calls"][0]["function"]["name"] == "read_file"
     converted = convert_traces_to_training_data(output_dir)
@@ -477,6 +520,8 @@ def test_extract_cursor_reconstructs_archived_composer_data(tmp_path: Path):
     assert row["metadata"]["cursor_scope"] == "global"
     assert row["metadata"]["cursor_headers"] == 4
     assert row["prompt"] == "archived prompt"
+    assert row["messages"][0]["content"] == "archived prompt"
+    assert '"root"' not in row["prompt"]
     assert row["response"] == "final response"
     assert row["model"] == "cursor-fable-5"
     assert [message["role"] for message in row["messages"]] == ["user", "assistant", "assistant", "tool", "assistant"]
@@ -814,6 +859,10 @@ def test_extract_model_filter_for_codex_claude_cursor_pi_and_hermes(tmp_path: Pa
 
         assert result.exit_code == 0, result.output
         assert f"Extracted 1 {provider} trace with fable-5" in result.output
+        if provider == "cursor":
+            assert CURSOR_EXTRACTION_NOTICE in result.output
+        else:
+            assert CURSOR_EXTRACTION_NOTICE not in result.output
         assert (output_dir / expected_file).exists()
         assert len(list(output_dir.glob("*.jsonl"))) == 1
 

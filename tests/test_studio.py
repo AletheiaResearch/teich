@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from teich.cli import _configure_studio_event_loop_policy
 from teich.config import Config
+from teich.extract import CURSOR_EXTRACTION_NOTICE
 from teich.runner import SessionProgressUpdate
 from teich.studio.events import summarize_chat_row, summarize_event, summarize_trace_events
 from teich.studio.generation import RUNNER_CLASSES, GenerationJob
@@ -738,6 +740,53 @@ def test_extract_endpoint_can_skip_anonymization(client):
     job = _wait_for_extract_job(client)
     assert job["status"] == "completed"
     assert "raw@company.ai" in (client.project_dir / "raw-staged" / "raw.jsonl").read_text(encoding="utf-8")
+
+
+def test_extract_endpoint_warns_cursor_may_take_a_while(client):
+    source = client.project_dir / "state.vscdb"
+    source.write_text("", encoding="utf-8")
+
+    def fake_extract(provider, *, output_dir, sources=None, model_filter=None, clear_destination=False):
+        assert provider == "cursor"
+        assert sources == [source]
+        assert model_filter is None
+        assert clear_destination is True
+        output_dir.mkdir(parents=True, exist_ok=True)
+        trace = output_dir / "cursor-sessions.jsonl"
+        trace.write_text(
+            json.dumps(
+                {
+                    "messages": [
+                        {"role": "user", "content": "hello"},
+                        {"role": "assistant", "content": "hi"},
+                    ],
+                    "metadata": {"trace_type": "cursor"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return SimpleNamespace(source_paths=[source], copied_files=[trace], count=1)
+
+    with patch("teich.studio.extraction.extract_local_sessions", side_effect=fake_extract):
+        response = client.post(
+            "/api/extract",
+            json={
+                "provider": "cursor",
+                "output": "cursor-staged",
+                "sessions_dirs": [str(source)],
+                "skip_anonymize": True,
+            },
+        )
+
+    assert response.status_code == 200
+    job = _wait_for_extract_job(client)
+    assert job["status"] == "completed"
+    events = client.app.state.extraction.current().events.snapshot()
+    assert any(
+        event.get("kind") == "extract_warning" and event.get("text") == CURSOR_EXTRACTION_NOTICE
+        for event in events
+    )
 
 
 def test_extract_sources_rejects_unknown_provider(client):

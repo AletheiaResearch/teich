@@ -20,7 +20,7 @@ from typer.core import TyperCommand, TyperGroup
 from .anonymize import anonymize_path
 from .config import Config
 from .converter import convert_traces_to_training_data
-from .extract import ExtractProvider, extract_local_sessions
+from .extract import CURSOR_EXTRACTION_NOTICE, ExtractProvider, extract_local_sessions
 from .runner import (
     ChatRunner,
     ClaudeCodeRunner,
@@ -430,6 +430,8 @@ def _run_extract_command(
     private: bool = False,
 ) -> None:
     console.print(Panel.fit("Teich Extract", style="bold blue"))
+    if provider == "cursor":
+        console.print(f"[yellow]{CURSOR_EXTRACTION_NOTICE}[/yellow]", soft_wrap=True)
     result = extract_local_sessions(
         provider,
         output_dir=output,
