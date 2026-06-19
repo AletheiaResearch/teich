@@ -6,6 +6,12 @@ from typing import Any, Iterable
 
 from .converter import convert_traces_to_training_data
 
+README_SAMPLE_MAX_CHARS = 12_000
+README_SAMPLE_STRING_MAX_CHARS = 1_200
+README_SAMPLE_MAX_ITEMS = 8
+README_SAMPLE_MAX_DEPTH = 5
+README_INLINE_TOOLS_MAX_CHARS = 80_000
+
 
 def _path_is_relative_to(path: Path, directory: Path) -> bool:
     try:
@@ -124,16 +130,74 @@ def _frontmatter(pretty_name: str, tags: list[str]) -> str:
     return "\n".join(lines)
 
 
+def _truncate_text(value: str, max_chars: int) -> str:
+    if len(value) <= max_chars:
+        return value
+    omitted = len(value) - max_chars
+    return f"{value[:max_chars]}... [truncated {omitted} chars]"
+
+
+def _readme_sample_value(value: Any, *, depth: int = 0) -> Any:
+    if depth >= README_SAMPLE_MAX_DEPTH:
+        return "[truncated: nested value]"
+    if isinstance(value, str):
+        return _truncate_text(value, README_SAMPLE_STRING_MAX_CHARS)
+    if isinstance(value, list):
+        items = [_readme_sample_value(item, depth=depth + 1) for item in value[:README_SAMPLE_MAX_ITEMS]]
+        if len(value) > README_SAMPLE_MAX_ITEMS:
+            items.append(f"[truncated: {len(value) - README_SAMPLE_MAX_ITEMS} items omitted]")
+        return items
+    if isinstance(value, dict):
+        items = list(value.items())
+        sampled = {
+            str(key): _readme_sample_value(item, depth=depth + 1)
+            for key, item in items[:README_SAMPLE_MAX_ITEMS]
+        }
+        if len(items) > README_SAMPLE_MAX_ITEMS:
+            sampled["__truncated__"] = f"{len(items) - README_SAMPLE_MAX_ITEMS} keys omitted"
+        return sampled
+    return value
+
+
+def _readme_sample_line(raw_line: str) -> str:
+    try:
+        value = json.loads(raw_line)
+    except json.JSONDecodeError:
+        return json.dumps({"raw": _truncate_text(raw_line, README_SAMPLE_STRING_MAX_CHARS)}, ensure_ascii=False)
+    return json.dumps(_readme_sample_value(value), ensure_ascii=False)
+
+
 def _sample_lines(trace_files: Iterable[Path], sample_size: int = 3) -> list[str]:
+    total_chars = 0
+    samples: list[str] = []
     for trace_file in trace_files:
         try:
             with trace_file.open("r", encoding="utf-8") as handle:
-                lines = [line.rstrip("\n") for line in handle if line.strip()]
+                for raw_line in handle:
+                    line = raw_line.rstrip("\n")
+                    if not line.strip():
+                        continue
+                    sample = _readme_sample_line(line)
+                    projected_total = total_chars + len(sample) + (1 if samples else 0)
+                    if projected_total > README_SAMPLE_MAX_CHARS:
+                        samples.append(
+                            json.dumps(
+                                {
+                                    "__truncated__": (
+                                        "Additional sample content omitted to keep the Hugging Face dataset card small."
+                                    )
+                                },
+                                ensure_ascii=False,
+                            )
+                        )
+                        return samples
+                    samples.append(sample)
+                    total_chars = projected_total
+                    if len(samples) >= sample_size:
+                        return samples
         except OSError:
             continue
-        if lines:
-            return lines[:sample_size]
-    return []
+    return samples
 
 
 def _row_count(trace_files: Iterable[Path]) -> int:
@@ -178,7 +242,51 @@ def _is_agent_trace_row_dataset(trace_files: Iterable[Path]) -> bool:
     return isinstance(sample_entry, dict) and isinstance(sample_entry.get("traces"), list)
 
 
+def _tools_json(tools: list[dict[str, Any]]) -> str:
+    return json.dumps(tools, indent=2, ensure_ascii=False)
+
+
+def _should_externalize_tools(tools: list[dict[str, Any]]) -> bool:
+    return bool(tools) and len(_tools_json(tools)) > README_INLINE_TOOLS_MAX_CHARS
+
+
+def _tool_name(tool: dict[str, Any]) -> str | None:
+    function = tool.get("function")
+    if not isinstance(function, dict):
+        return None
+    name = function.get("name")
+    return name if isinstance(name, str) and name else None
+
+
 def _tools_details_block(tools: list[dict[str, Any]]) -> list[str]:
+    tools_json = _tools_json(tools)
+    if len(tools_json) > README_INLINE_TOOLS_MAX_CHARS:
+        tool_names = sorted(name for tool in tools if (name := _tool_name(tool)))
+        return [
+            "## Tool schema snapshot",
+            "",
+            (
+                "The complete dataset-level tool schema snapshot was written to `tools.json` because it is "
+                "too large to embed safely in the Hugging Face dataset card."
+            ),
+            "",
+            "<details>",
+            "<summary>Tool names in snapshot</summary>",
+            "",
+            "```json",
+            json.dumps(
+                {
+                    "tool_count": len(tools),
+                    "tools": tool_names,
+                },
+                indent=2,
+                ensure_ascii=False,
+            ),
+            "```",
+            "",
+            "</details>",
+            "",
+        ]
     return [
         "## Tool schema snapshot",
         "",
@@ -186,7 +294,7 @@ def _tools_details_block(tools: list[dict[str, Any]]) -> list[str]:
         "<summary>Training-ready tool schema snapshot</summary>",
         "",
         "```json",
-        json.dumps(tools, indent=2, ensure_ascii=False),
+        tools_json,
         "```",
         "",
         "</details>",
@@ -253,7 +361,11 @@ def build_traces_readme(
                 "",
                 "Generated agent traces carry configured or recovered tool schemas so tools remain available for training even when a session did not call them.",
                 "Native Claude Code imports recover schemas for Claude Code and Claude Desktop built-ins, plus conservative name-derived MCP schemas, when the raw transcript only records tool names or calls.",
-                "A complete dataset-level `tools` schema snapshot is also embedded in the collapsed section at the bottom of this README.",
+                (
+                    "A complete dataset-level `tools` schema snapshot is embedded in the collapsed section at the bottom of this README."
+                    if not _should_externalize_tools(dataset_tools)
+                    else "A complete dataset-level `tools` schema snapshot is stored in `tools.json` to keep this dataset card upload-safe."
+                ),
                 "`load_traces` applies the dataset snapshot to each loaded example as a fallback `tools` field.",
                 "",
             ]
@@ -528,6 +640,8 @@ def write_traces_readme(
         encoding="utf-8",
     )
     tools_path = traces_dir / "tools.json"
-    if tools_path.exists():
+    if _should_externalize_tools(dataset_tools):
+        tools_path.write_text(_tools_json(dataset_tools) + "\n", encoding="utf-8")
+    elif tools_path.exists():
         tools_path.unlink()
     return readme_path

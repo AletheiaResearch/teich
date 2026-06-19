@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from teich.trace_readme import build_traces_readme, write_traces_readme
+from teich.trace_readme import README_INLINE_TOOLS_MAX_CHARS, build_traces_readme, write_traces_readme
 
 
 def test_build_traces_readme_includes_model_and_references_tools(tmp_path: Path):
@@ -89,6 +89,44 @@ def test_write_traces_readme_embeds_tools_snapshot_in_readme(tmp_path: Path):
     assert '"name": "bash"' in readme
     assert '"description": "Run shell commands"' in readme
     assert '"additionalProperties": false' in readme
+
+
+def test_write_traces_readme_externalizes_large_tools_snapshot(tmp_path: Path):
+    trace_file = tmp_path / "trace.jsonl"
+    trace_file.write_text(
+        '{"type":"response_item","payload":{"type":"function_call","name":"huge_tool","call_id":"call_1","arguments":"{}"}}\n',
+        encoding="utf-8",
+    )
+    huge_description = "x" * (README_INLINE_TOOLS_MAX_CHARS + 1)
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "huge_tool",
+                "description": huge_description,
+                "parameters": {
+                    "type": "object",
+                    "properties": {"value": {"type": "string", "description": huge_description}},
+                },
+            },
+        }
+    ]
+
+    readme_path = write_traces_readme(
+        tmp_path,
+        pretty_name="Agentic Training Traces",
+        tags=["agent-traces"],
+        model_id="test-model",
+        tools=tools,
+    )
+
+    readme = readme_path.read_text(encoding="utf-8")
+    tools_json = (tmp_path / "tools.json").read_text(encoding="utf-8")
+    assert "The complete dataset-level tool schema snapshot was written to `tools.json`" in readme
+    assert "<summary>Tool names in snapshot</summary>" in readme
+    assert "<summary>Training-ready tool schema snapshot</summary>" not in readme
+    assert huge_description not in readme
+    assert huge_description in tools_json
 
 
 def test_write_traces_readme_collects_tools_around_malformed_rows(tmp_path: Path):

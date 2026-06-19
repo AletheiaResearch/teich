@@ -535,6 +535,14 @@ def test_dataset_upload_endpoint_generates_readme_and_uploads_with_env_token(cli
         folder_path=str(output_dir),
         repo_type="dataset",
         private=False,
+        ignore_patterns=["partials/**", "failures/**", "README.md", "tools.json"],
+    )
+    mock_api.upload_folder.assert_called_once_with(
+        folder_path=str(output_dir),
+        repo_id="armand0e/studio-dataset",
+        repo_type="dataset",
+        commit_message="Upload teich dataset metadata",
+        allow_patterns=["README.md"],
         ignore_patterns=["partials/**", "failures/**"],
     )
     preview = client.get("/api/dataset-preview").json()

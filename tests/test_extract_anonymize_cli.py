@@ -302,6 +302,73 @@ def _write_id_keyed_cursor_state_db(state_db: Path) -> None:
         connection.close()
 
 
+def _write_cursor_escaped_rich_text_model_info_db(state_db: Path) -> None:
+    state_db.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(state_db)
+    try:
+        connection.execute("CREATE TABLE cursorData (key TEXT PRIMARY KEY, value TEXT)")
+        escaped_empty_editor_state = _cursor_rich_text("").replace('"', '\\"')
+        connection.execute(
+            "INSERT INTO cursorData (key, value) VALUES (?, ?)",
+            (
+                "workbench.panel.aichat.view.aichat.chatdata",
+                json.dumps(
+                    {
+                        "modelInfo": {
+                            "name": "claude-opus-4.5",
+                            "provider": "anthropic",
+                        },
+                        "prompt": "actual cursor prompt",
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": escaped_empty_editor_state,
+                            },
+                            {
+                                "role": "assistant",
+                                "content": "actual cursor answer",
+                            },
+                        ],
+                    }
+                ),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _write_cursor_rich_text_only_selected_model_db(state_db: Path) -> None:
+    state_db.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(state_db)
+    try:
+        connection.execute("CREATE TABLE cursorData (key TEXT PRIMARY KEY, value TEXT)")
+        connection.execute(
+            "INSERT INTO cursorData (key, value) VALUES (?, ?)",
+            (
+                "workbench.panel.aichat.view.aichat.chatdata.richTextOnly",
+                json.dumps(
+                    {
+                        "selectedModelId": "anthropic/claude-opus-4.5",
+                        "messages": [
+                            {
+                                "role": "user",
+                                "richText": _cursor_rich_text("rich text only prompt"),
+                            },
+                            {
+                                "role": "assistant",
+                                "richText": _cursor_rich_text("rich text only answer"),
+                            },
+                        ],
+                    }
+                ),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def _write_unsafe_cursor_state_db(state_db: Path) -> None:
     state_db.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(state_db)
@@ -655,6 +722,77 @@ def test_cursor_state_db_directory_scan_returns_all_dbs_sorted_by_recency(tmp_pa
     assert len(found) == db_count + 1
     assert found[0] == expected_newest
     assert found[-1] == workspace_storage / "workspace-000" / "state.vscdb"
+
+
+def test_extract_cursor_uses_fallback_prompt_for_escaped_empty_editor_state_and_nested_model(
+    tmp_path: Path,
+):
+    state_db = tmp_path / "workspaceStorage" / "workspace-model-info" / "state.vscdb"
+    _write_cursor_escaped_rich_text_model_info_db(state_db)
+
+    output_dir = tmp_path / "output"
+    result = runner.invoke(
+        app,
+        [
+            "extract",
+            "cursor",
+            "--sessions-dir",
+            str(state_db),
+            "--output",
+            str(output_dir),
+            "--model",
+            "claude",
+            "--no-anon",
+        ],
+        input="n\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    rows = [
+        json.loads(line)
+        for line in (output_dir / "cursor-sessions.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["model"] == "claude-opus-4.5"
+    assert row["prompt"] == "actual cursor prompt"
+    assert row["messages"][0] == {"role": "user", "content": "actual cursor prompt"}
+    assert row["messages"][1] == {"role": "assistant", "content": "actual cursor answer"}
+    assert '"root"' not in json.dumps(row["messages"])
+
+
+def test_extract_cursor_detects_rich_text_only_messages_and_selected_model_id(tmp_path: Path):
+    state_db = tmp_path / "workspaceStorage" / "workspace-rich-text-only" / "state.vscdb"
+    _write_cursor_rich_text_only_selected_model_db(state_db)
+
+    output_dir = tmp_path / "output"
+    result = runner.invoke(
+        app,
+        [
+            "extract",
+            "cursor",
+            "--sessions-dir",
+            str(state_db),
+            "--output",
+            str(output_dir),
+            "--model",
+            "claude",
+            "--no-anon",
+        ],
+        input="n\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    rows = [
+        json.loads(line)
+        for line in (output_dir / "cursor-sessions.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["model"] == "anthropic/claude-opus-4.5"
+    assert row["prompt"] == "rich text only prompt"
+    assert row["messages"][0] == {"role": "user", "content": "rich text only prompt"}
+    assert row["messages"][1] == {"role": "assistant", "content": "rich text only answer"}
 
 
 def test_extract_cursor_sanitizes_training_unsafe_archived_rows(tmp_path: Path):
@@ -1140,6 +1278,14 @@ def test_extract_can_upload_staged_anonymized_output_to_huggingface(tmp_path: Pa
         folder_path=str(output_dir),
         repo_type="dataset",
         private=False,
+        ignore_patterns=["partials/**", "failures/**", "README.md", "tools.json"],
+    )
+    mock_api.upload_folder.assert_called_once_with(
+        folder_path=str(output_dir),
+        repo_id="armand0e/fable-traces",
+        repo_type="dataset",
+        commit_message="Upload teich dataset metadata",
+        allow_patterns=["README.md"],
         ignore_patterns=["partials/**", "failures/**"],
     )
     readme = (output_dir / "README.md").read_text(encoding="utf-8")

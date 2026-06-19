@@ -179,6 +179,7 @@ pool_app = typer.Typer(
 app.add_typer(pool_app, name="pool")
 NON_DATA_TRACE_DIR_NAMES = {"partials", "failures"}
 UPLOAD_IGNORE_PATTERNS = ["partials/**", "failures/**"]
+UPLOAD_METADATA_PATTERNS = ["README.md", "tools.json"]
 
 
 def _upload_ignore_patterns(cfg: Config) -> list[str]:
@@ -269,12 +270,22 @@ def _upload_dataset_folder(
             pass
     upload_large_folder = getattr(api, "upload_large_folder", None)
     if callable(upload_large_folder):
+        metadata_patterns = [pattern for pattern in UPLOAD_METADATA_PATTERNS if (folder_path / pattern).is_file()]
+        if metadata_patterns:
+            api.upload_folder(
+                folder_path=str(folder_path),
+                repo_id=repo_id,
+                repo_type="dataset",
+                commit_message="Upload teich dataset metadata",
+                allow_patterns=metadata_patterns,
+                ignore_patterns=ignore_patterns,
+            )
         upload_large_folder(
             repo_id=repo_id,
             folder_path=str(folder_path),
             repo_type="dataset",
             private=private,
-            ignore_patterns=ignore_patterns,
+            ignore_patterns=list(dict.fromkeys([*ignore_patterns, *UPLOAD_METADATA_PATTERNS])),
         )
     else:
         api.upload_folder(

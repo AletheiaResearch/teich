@@ -117,6 +117,7 @@ TERMINAL_READY_STATUSES = {"ready", "live", "exited", "error"}
 TERMINAL_STARTUP_NOTICE_SECONDS = 15.0
 EXTRACT_PROVIDERS = {"claude", "codex", "cursor", "hermes", "pi"}
 UPLOAD_IGNORE_PATTERNS = ["partials/**", "failures/**"]
+UPLOAD_METADATA_PATTERNS = ["README.md", "tools.json"]
 
 
 def _normalize_extract_provider(provider: str) -> ExtractProvider:
@@ -315,12 +316,22 @@ def _upload_dataset_folder(
             pass
     upload_large_folder = getattr(api, "upload_large_folder", None)
     if callable(upload_large_folder):
+        metadata_patterns = [pattern for pattern in UPLOAD_METADATA_PATTERNS if (folder_path / pattern).is_file()]
+        if metadata_patterns:
+            api.upload_folder(
+                folder_path=str(folder_path),
+                repo_id=repo_id,
+                repo_type="dataset",
+                commit_message="Upload teich dataset metadata",
+                allow_patterns=metadata_patterns,
+                ignore_patterns=ignore_patterns,
+            )
         upload_large_folder(
             repo_id=repo_id,
             folder_path=str(folder_path),
             repo_type="dataset",
             private=private,
-            ignore_patterns=ignore_patterns,
+            ignore_patterns=list(dict.fromkeys([*ignore_patterns, *UPLOAD_METADATA_PATTERNS])),
         )
     else:
         api.upload_folder(

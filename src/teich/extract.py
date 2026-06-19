@@ -530,7 +530,7 @@ def _cursor_table_rows(
         messages = _cursor_extract_messages(value)
         explicit_prompt = _cursor_explicit_prompt(value)
         response = _cursor_response(messages) or _cursor_explicit_response(value)
-        model = _cursor_find_model(value)
+        model = _cursor_find_model(value) or _cursor_find_model(row_data)
         tools = _cursor_extract_tools(value)
         if not messages and not response and not tools:
             continue
@@ -882,7 +882,7 @@ def _cursor_composer_data_rows(
         response = _cursor_response(messages)
         if not response and not any(message.get("tool_calls") for message in messages):
             continue
-        model = _cursor_find_model(composer_data) or _cursor_find_model(used_bubbles)
+        model = _cursor_find_model(composer_data) or _cursor_find_model(headers) or _cursor_find_model(used_bubbles)
         prompt = _cursor_prompt(messages, key, explicit_prompt=_cursor_explicit_prompt(composer_data))
         metadata = {
             "trace_type": "cursor",
@@ -1025,13 +1025,15 @@ def _cursor_messages_from_bubble(header: dict[str, Any], bubble: dict[str, Any])
 
 
 def _cursor_bubble_content(bubble: dict[str, Any], bubble_type: Any) -> str:
-    text = _cursor_string_content(bubble.get("text")).strip()
-    if text:
-        return text
+    for key in ("text", "content", "message", "plainText", "rawText", "markdown"):
+        text = _cursor_string_content(bubble.get(key)).strip()
+        if text:
+            return text
     if bubble_type == 1:
-        rich_text = _cursor_string_content(bubble.get("richText")).strip()
-        if rich_text:
-            return rich_text
+        for key in ("richText", "prompt", "query", "input", "userMessage"):
+            text = _cursor_string_content(bubble.get(key)).strip()
+            if text:
+                return text
     return ""
 
 
@@ -1395,13 +1397,30 @@ def _cursor_find_message_list(value: Any) -> list[Any] | None:
 def _cursor_messages_from_list(value: Any) -> list[Any] | None:
     if not isinstance(value, list) or not value:
         return None
+    content_keys = {
+        "content",
+        "input",
+        "markdown",
+        "message",
+        "parts",
+        "plainText",
+        "prompt",
+        "query",
+        "rawText",
+        "richText",
+        "text",
+        "toolCalls",
+        "tool_calls",
+        "userMessage",
+        "value",
+    }
     message_like = [
         item
         for item in value
         if isinstance(item, dict)
         and (
             any(key in item for key in ("role", "from", "speaker", "type", "author"))
-            and any(key in item for key in ("content", "text", "message", "value", "parts"))
+            and any(key in item for key in content_keys)
         )
     ]
     return value if message_like else None
@@ -1441,7 +1460,20 @@ def _cursor_normalize_role(value: Any) -> str:
 
 
 def _cursor_message_content(item: dict[str, Any]) -> str:
-    for key in ("content", "text", "message", "value", "markdown", "rawText"):
+    for key in (
+        "content",
+        "text",
+        "message",
+        "value",
+        "markdown",
+        "rawText",
+        "richText",
+        "plainText",
+        "prompt",
+        "query",
+        "input",
+        "userMessage",
+    ):
         text = _cursor_string_content(item.get(key))
         if text:
             return text
@@ -1474,11 +1506,21 @@ def _cursor_string_content(value: Any) -> str:
 def _cursor_rich_text_content(value: Any) -> str | None:
     if isinstance(value, str):
         stripped = value.strip()
-        if not stripped.startswith(("{", "[")) or not any(term in stripped for term in ('"root"', '"children"', '"type"')):
-            return None
-        try:
-            value = json.loads(stripped)
-        except json.JSONDecodeError:
+        candidates = [stripped]
+        if '\\"' in stripped and stripped.startswith(("{\\", "[\\")):
+            candidates.append(stripped.replace('\\"', '"'))
+        value = None
+        for candidate in candidates:
+            if not candidate.startswith(("{", "[")) or not any(
+                term in candidate for term in ('"root"', '"children"', '"type"')
+            ):
+                continue
+            try:
+                value = json.loads(candidate)
+                break
+            except json.JSONDecodeError:
+                continue
+        if value is None:
             return None
     if isinstance(value, dict):
         root = value.get("root")
@@ -1552,11 +1594,46 @@ def _cursor_explicit_response(value: Any) -> str:
 
 
 def _cursor_find_model(value: Any) -> str | None:
-    for key in ("model", "modelName", "modelId", "selectedModel"):
-        model = _cursor_find_string_key(value, key)
-        if model:
-            return model
-    return None
+    candidates = _cursor_model_candidates(value)
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][1]
+
+
+def _cursor_model_candidates(
+    value: Any,
+    *,
+    key: str | None = None,
+    in_model_context: bool = False,
+) -> list[tuple[int, str]]:
+    key_is_model = key is not None and _is_model_key(key)
+    model_context = in_model_context or key_is_model or (key is not None and _is_model_context_key(key))
+    if isinstance(value, dict):
+        candidates: list[tuple[int, str]] = []
+        for item_key, item in value.items():
+            candidates.extend(
+                _cursor_model_candidates(item, key=str(item_key), in_model_context=model_context)
+            )
+        return candidates
+    if isinstance(value, list):
+        candidates = []
+        for item in value:
+            candidates.extend(_cursor_model_candidates(item, key=key, in_model_context=model_context))
+        return candidates
+    if not isinstance(value, str):
+        return []
+    text = _cursor_string_content(value).strip()
+    if not text:
+        return []
+    if key_is_model:
+        return [(0, text)]
+    if not model_context or not _string_looks_like_model_value(text):
+        return []
+    normalized_key = re.sub(r"[^a-z0-9]+", "", (key or "").casefold())
+    if normalized_key in {"id", "name", "slug", "displayname", "display", "title"}:
+        return [(1, text)]
+    return [(2, text)]
 
 
 def _cursor_find_string_key(value: Any, target_key: str) -> str | None:
@@ -1776,14 +1853,59 @@ def trace_matches_model(events: Iterable[dict[str, Any]], model_filter: str) -> 
     return any(_value_has_matching_model(event, needle) for event in events)
 
 
-def _value_has_matching_model(value: Any, needle: str, *, key: str | None = None) -> bool:
+def _value_has_matching_model(
+    value: Any,
+    needle: str,
+    *,
+    key: str | None = None,
+    in_model_context: bool = False,
+) -> bool:
+    key_is_model = key is not None and _is_model_key(key)
+    model_context = in_model_context or key_is_model or (key is not None and _is_model_context_key(key))
     if isinstance(value, dict):
-        return any(_value_has_matching_model(item, needle, key=str(item_key)) for item_key, item in value.items())
+        return any(
+            _value_has_matching_model(item, needle, key=str(item_key), in_model_context=model_context)
+            for item_key, item in value.items()
+        )
     if isinstance(value, list):
-        return any(_value_has_matching_model(item, needle, key=key) for item in value)
-    if isinstance(value, str) and key and _is_model_key(key):
-        return needle in _normalize_model_text(value)
+        return any(_value_has_matching_model(item, needle, key=key, in_model_context=model_context) for item in value)
+    if isinstance(value, str):
+        normalized = _normalize_model_text(value)
+        if key_is_model:
+            return needle in normalized
+        if model_context and _string_looks_like_model_value(value):
+            return needle in normalized
     return False
+
+
+def _is_model_context_key(key: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "", key.lower())
+    return normalized in {
+        "activemodel",
+        "activemodelinfo",
+        "activemodelmetadata",
+        "availablemodels",
+        "currentmodel",
+        "currentmodelinfo",
+        "currentmodelmetadata",
+        "defaultmodel",
+        "modelconfig",
+        "modelconfiguration",
+        "modeldata",
+        "modeldetails",
+        "modelinfo",
+        "modellist",
+        "modelmap",
+        "modelmetadata",
+        "modelsettings",
+        "models",
+        "requestedmodel",
+        "selectedmodel",
+        "selectedmodelinfo",
+        "selectedmodelmetadata",
+        "selectedmodels",
+        "subagentmodel",
+    }
 
 
 def _is_model_key(key: str) -> bool:
@@ -1800,7 +1922,35 @@ def _is_model_key(key: str) -> bool:
         "subagentmodel",
     }:
         return True
-    return normalized.endswith("model") and normalized not in {"modelconfig"}
+    if normalized.endswith("model") and normalized not in {"modelconfig"}:
+        return True
+    return "model" in normalized and normalized.endswith(("id", "name", "slug", "version"))
+
+
+def _string_looks_like_model_value(value: str) -> bool:
+    normalized = _normalize_model_text(value)
+    if not normalized or len(normalized) > 200:
+        return False
+    model_terms = (
+        "anthropic",
+        "claude",
+        "cursor",
+        "deepseek",
+        "fable",
+        "gemini",
+        "gpt",
+        "grok",
+        "haiku",
+        "llama",
+        "mistral",
+        "o1",
+        "o3",
+        "o4",
+        "opus",
+        "qwen",
+        "sonnet",
+    )
+    return "/" in normalized or "-" in normalized or any(term in normalized for term in model_terms)
 
 
 def _normalize_model_text(value: str) -> str:

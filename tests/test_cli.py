@@ -394,9 +394,16 @@ api:
             folder_path=str(output_dir),
             repo_type="dataset",
             private=True,
+            ignore_patterns=["partials/**", "failures/**", "README.md", "tools.json"],
+        )
+        mock_api.upload_folder.assert_called_once_with(
+            folder_path=str(output_dir),
+            repo_id="armand0e/test-dataset",
+            repo_type="dataset",
+            commit_message="Upload teich dataset metadata",
+            allow_patterns=["README.md"],
             ignore_patterns=["partials/**", "failures/**"],
         )
-        mock_api.upload_folder.assert_not_called()
 
 
 def test_generate_command_prompts_before_publishing_completed_outputs_and_defaults_no(tmp_path: Path):
@@ -543,9 +550,16 @@ api:
             folder_path=str(output_dir),
             repo_type="dataset",
             private=False,
+            ignore_patterns=["partials/**", "failures/**", "README.md", "tools.json"],
+        )
+        mock_api.upload_folder.assert_called_once_with(
+            folder_path=str(output_dir),
+            repo_id="armand0e/test-dataset",
+            repo_type="dataset",
+            commit_message="Upload teich dataset metadata",
+            allow_patterns=["README.md"],
             ignore_patterns=["partials/**", "failures/**"],
         )
-        mock_api.upload_folder.assert_not_called()
 
 
 def test_generate_command_deduplicates_configured_prompts_before_running(tmp_path: Path):
