@@ -553,6 +553,48 @@ def test_dataset_upload_endpoint_generates_readme_and_uploads_with_env_token(cli
     assert preview["hf_embed_url"] == "https://huggingface.co/datasets/armand0e/studio-dataset/embed/viewer"
 
 
+def test_dataset_upload_preserves_extracted_cursor_readme_metadata(client, monkeypatch):
+    config_response = client.put(
+        "/api/config",
+        json={"config": {"agent": {"provider": "pi"}, "model": {"model": "wrong-default-model"}}},
+    )
+    assert config_response.status_code == 200
+    output_dir = client.project_dir / "output"
+    output_dir.mkdir()
+    row = {
+        "messages": [
+            {"role": "user", "content": "inspect cursor session"},
+            {"role": "assistant", "content": "done"},
+        ],
+        "prompt": "inspect cursor session",
+        "metadata": {
+            "trace_type": "cursor",
+            "source": "cursor",
+            "cursor_table": "composerData:test",
+        },
+    }
+    (output_dir / "cursor-sessions.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    monkeypatch.setenv("HF_TOKEN", "hf-env-token")
+
+    with patch("teich.studio.server.HfApi") as mock_api_cls:
+        mock_api = MagicMock()
+        mock_api.create_repo.return_value = "https://huggingface.co/datasets/armand0e/cursor-dataset"
+        mock_api_cls.return_value = mock_api
+
+        response = client.post(
+            "/api/dataset-preview/upload",
+            json={"repo_id": "armand0e/cursor-dataset"},
+        )
+
+    assert response.status_code == 200
+    readme = (output_dir / "README.md").read_text(encoding="utf-8")
+    assert '- "cursor"' in readme
+    assert '- "pi"' not in readme
+    assert '- "wrong-default-model"' not in readme
+    assert "Model metadata:" not in readme
+    assert "teich extract cursor --out data" in readme
+
+
 def test_dataset_row_delete_removes_single_backing_trace(client):
     output_dir = client.project_dir / "output"
     output_dir.mkdir()
@@ -724,7 +766,12 @@ def test_extract_endpoint_accepts_provider_home_and_anonymizes(client):
     assert output_trace.exists()
     text = output_trace.read_text(encoding="utf-8")
     assert "arin@company.ai" not in text
-    assert (client.project_dir / "staged" / "README.md").exists()
+    readme = (client.project_dir / "staged" / "README.md").read_text(encoding="utf-8")
+    assert '- "codex"' in readme
+    assert '- "pi"' not in readme
+    assert '- "fable-5"' not in readme
+    assert "Model metadata:" not in readme
+    assert "teich extract codex --out data" in readme
     listing = client.get("/api/traces").json()["traces"]
     assert [trace["name"] for trace in listing] == ["trace.jsonl"]
 

@@ -33,7 +33,7 @@ from .runner import (
     prompt_inputs_for_run,
     unique_prompt_inputs_by_completion_key,
 )
-from .trace_readme import write_traces_readme
+from .trace_readme import extraction_readme_tags, write_traces_readme
 from .tool_schema import snapshot_configured_tools
 
 console = Console()
@@ -378,8 +378,8 @@ def _write_extract_readme(
     return write_traces_readme(
         cfg.output.traces_dir,
         pretty_name=cfg.output.pretty_name,
-        tags=cfg.get_dataset_tags(),
-        model_id=cfg.model.model,
+        tags=extraction_readme_tags(provider),
+        model_id=None,
         repo_id=cfg.get_publish_repo_id(),
         extraction_provider=provider,
     )

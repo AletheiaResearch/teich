@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -13,6 +14,80 @@ README_SAMPLE_MAX_DEPTH = 5
 README_INLINE_TOOLS_MAX_CHARS = 80_000
 TEICH_TRAINING_DOCS_URL = "https://github.com/TeichAI/teich/blob/main/docs/training.md"
 TEICH_PREPARE_DOCS_URL = "https://github.com/TeichAI/teich/blob/main/docs/prepare-data.md"
+EXTRACTION_PROVIDERS = {"claude", "codex", "cursor", "hermes", "pi"}
+NON_DATA_README_SCAN_DIR_NAMES = {"failures", "partials", "sandbox", "__pycache__"}
+
+
+def normalize_extraction_provider(provider: str | None) -> str | None:
+    if not isinstance(provider, str):
+        return None
+    normalized = provider.strip().lower().replace("_", "-")
+    if normalized == "claude-code":
+        normalized = "claude"
+    return normalized if normalized in EXTRACTION_PROVIDERS else None
+
+
+def extraction_readme_tags(provider: str) -> list[str]:
+    normalized = normalize_extraction_provider(provider) or provider.strip().lower().replace("_", "-")
+    ordered_tags = ["agent-traces", "format:agent-traces", normalized, "distillation", "teich"]
+    tags: list[str] = []
+    seen: set[str] = set()
+    for tag in ordered_tags:
+        if not tag or tag in seen:
+            continue
+        tags.append(tag)
+        seen.add(tag)
+    return tags
+
+
+def extraction_provider_from_existing_readme(readme_path: Path) -> str | None:
+    try:
+        text = readme_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = re.search(r"\bteich\s+extract\s+([A-Za-z0-9_-]+)\b", text)
+    if match:
+        return normalize_extraction_provider(match.group(1))
+    return None
+
+
+def extraction_provider_from_dataset_rows(traces_dir: Path) -> str | None:
+    if not traces_dir.exists():
+        return None
+    for trace_file in sorted(traces_dir.rglob("*.jsonl")):
+        if not trace_file.is_file():
+            continue
+        try:
+            relative_parts = trace_file.relative_to(traces_dir).parts
+        except ValueError:
+            relative_parts = trace_file.parts
+        if any(part in NON_DATA_README_SCAN_DIR_NAMES for part in relative_parts):
+            continue
+        try:
+            with trace_file.open("r", encoding="utf-8") as handle:
+                for line_index, line in enumerate(handle):
+                    if line_index >= 100:
+                        break
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    metadata = row.get("metadata") if isinstance(row, dict) else None
+                    if not isinstance(metadata, dict):
+                        metadata = {}
+                    if metadata.get("source") == "cursor" or any(
+                        key in metadata for key in ("cursor_scope", "cursor_table", "cursor_workspace_id")
+                    ):
+                        return "cursor"
+        except OSError:
+            continue
+    return None
+
+
+def extraction_provider_for_existing_dataset(traces_dir: Path) -> str | None:
+    return extraction_provider_from_existing_readme(traces_dir / "README.md") or extraction_provider_from_dataset_rows(
+        traces_dir
+    )
 
 
 def _path_is_relative_to(path: Path, directory: Path) -> bool:
@@ -305,7 +380,7 @@ def _tools_details_block(tools: list[dict[str, Any]]) -> list[str]:
 
 
 def _extraction_snippet(provider: str) -> list[str]:
-    provider = provider.strip().lower().replace("_", "-") or "claude"
+    provider = normalize_extraction_provider(provider) or provider.strip().lower().replace("_", "-") or "claude"
     return [
         "## Create A Similar Dataset",
         "",

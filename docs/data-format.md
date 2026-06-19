@@ -169,7 +169,7 @@ Generated datasets include a compact `README.md` with:
 
 - Teich attribution
 - row or file counts
-- provider/model metadata when available
+- provider metadata when available; generated-run cards may also include model metadata
 - a bounded example row
 - links to the maintained training and data-preparation docs
 - extraction guidance when the dataset came from `teich extract`

@@ -1292,6 +1292,12 @@ def test_extract_can_upload_staged_anonymized_output_to_huggingface(tmp_path: Pa
     readme = (output_dir / "README.md").read_text(encoding="utf-8")
     assert "armand0e/fable-traces" in readme
     assert 'path: "*.jsonl"' in readme
+    assert '- "codex"' in readme
+    assert '- "pi"' not in readme
+    assert '- "fable-5"' not in readme
+    assert '- "codex-fable-5"' not in readme
+    assert "Model metadata:" not in readme
+    assert "teich extract codex --out data" in readme
 
 
 def test_extract_prompts_for_hf_token_when_env_token_is_missing(tmp_path: Path):

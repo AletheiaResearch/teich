@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 
 from ..config import PublishConfig
 from ..extract import ExtractProvider, default_session_sources
-from ..trace_readme import write_traces_readme
+from ..trace_readme import extraction_provider_for_existing_dataset, extraction_readme_tags, write_traces_readme
 from .dataset_preview import build_dataset_preview, dataset_row_context, delete_dataset_row, update_dataset_row
 from .events import summarize_chat_row, summarize_trace_events
 from .extraction import ExtractionManager
@@ -832,13 +832,17 @@ def create_app(project_dir: Path) -> FastAPI:
         if not publish.repo_id:
             raise HTTPException(status_code=400, detail="Hugging Face dataset repo id is required.")
 
+        extraction_provider = extraction_provider_for_existing_dataset(cfg.output.traces_dir)
+        readme_tags = extraction_readme_tags(extraction_provider) if extraction_provider else cfg.get_dataset_tags()
+        readme_model_id = None if extraction_provider else cfg.model.model
         try:
             readme_path = write_traces_readme(
                 cfg.output.traces_dir,
                 pretty_name=cfg.output.pretty_name,
-                tags=cfg.get_dataset_tags(),
-                model_id=cfg.model.model,
+                tags=readme_tags,
+                model_id=readme_model_id,
                 repo_id=publish.repo_id,
+                extraction_provider=extraction_provider,
                 excluded_dirs=[cfg.output.failures_dir],
             )
             repo_url = _upload_dataset_folder(

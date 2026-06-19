@@ -12,7 +12,7 @@ from typing import Any
 from ..anonymize import anonymize_path
 from ..config import Config
 from ..extract import CURSOR_EXTRACTION_NOTICE, ExtractProvider, extract_local_sessions
-from ..trace_readme import write_traces_readme
+from ..trace_readme import extraction_readme_tags, write_traces_readme
 from .interactive import EventLog
 
 
@@ -169,9 +169,10 @@ class ExtractionJob:
         readme_path = write_traces_readme(
             cfg.output.traces_dir,
             pretty_name=cfg.output.pretty_name,
-            tags=cfg.get_dataset_tags(),
-            model_id=cfg.model.model,
+            tags=extraction_readme_tags(self.provider),
+            model_id=None,
             repo_id=cfg.get_publish_repo_id(),
+            extraction_provider=self.provider,
         )
         self.events.append({"kind": "extract_readme", "text": f"Wrote {readme_path.name}.", "path": str(readme_path)})
 
