@@ -2,7 +2,7 @@
 
 Teich normalizes supported sources into structured training examples.
 
-To write this normalized format as standalone JSONL from raw or extracted traces, run:
+To write standalone OpenAI-style training JSONL from raw or extracted traces, run:
 
 ```bash
 teich convert data --out teich-training.jsonl
@@ -165,6 +165,24 @@ Rows ending on a tool result are incomplete without a follow-up assistant turn.
 
 ## Generated Dataset Cards
 
-Generated datasets include a `README.md` with summary metadata and, when available, embedded tool-schema snapshots.
+Generated datasets include a compact `README.md` with:
+
+- Teich attribution
+- row or file counts
+- provider/model metadata when available
+- a bounded example row
+- links to the maintained training and data-preparation docs
+- extraction guidance when the dataset came from `teich extract`
+- a tool-schema summary when tools are available
+
+Small tool snapshots are embedded in the dataset card. Large snapshots are written to `tools.json` so Hugging Face dataset-card validation does not have to process a massive YAML/Markdown payload.
+
+The generated card intentionally avoids trainer-specific code blocks. Training APIs, model defaults, and library setup change over time; the maintained guidance lives in [Training](training.md) and [Preparing Data](prepare-data.md).
+
+When you want a trainer-ready JSONL file without relying on Teich formatting or masking at training time, run:
+
+```bash
+teich convert data --out teich-training.jsonl
+```
 
 Generated dataset guidance is produced by `src/teich/trace_readme.py`, so behavior changes should update both top-level docs and that template.

@@ -514,7 +514,10 @@ def test_dataset_upload_endpoint_generates_readme_and_uploads_with_env_token(cli
     payload = response.json()
     assert payload["repo_id"] == "armand0e/studio-dataset"
     readme = (output_dir / "README.md").read_text(encoding="utf-8")
-    assert "dataset = load_traces('armand0e/studio-dataset')" in readme
+    assert "Use this dataset as `armand0e/studio-dataset`" in readme
+    assert "dataset = load_traces('armand0e/studio-dataset')" not in readme
+    assert "run `teich convert`" in readme
+    assert "https://github.com/TeichAI/teich/blob/main/docs/training.md" in readme
     assert '"name": "dataset_tool"' in readme
     assert '"description": "Tool recovered from the dataset row"' in readme
     mock_api_cls.assert_called_once_with(token="hf-env-token")

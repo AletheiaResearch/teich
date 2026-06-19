@@ -77,7 +77,7 @@ Default stores:
 
 After extraction:
   teich convert data --out teich-training.jsonl
-  This writes normalized Teich JSONL rows with prompt, messages, tools, and metadata for trainers that do not import Teich.
+  This writes standalone OpenAI-style JSONL rows with prompt, messages, tools, and metadata for trainers that do not import Teich.
 """
 GENERATE_EXTRA_HELP = """\
 Typical generated project flow:
@@ -88,7 +88,7 @@ Typical generated project flow:
   teich generate -c config.yaml --resume
 
 Outputs:
-  output/    raw traces, converted JSONL rows, and README.md
+  output/    raw traces, converted JSONL rows, README.md, and sometimes tools.json
   sandbox/   workspace snapshots for agent providers
   failures/  failed or interrupted traces excluded from resume/upload
 
@@ -101,7 +101,7 @@ Examples:
 
 Output format:
   Newline-delimited JSON rows with prompt, messages, tools, and metadata.
-  This is useful when your trainer can consume OpenAI-style message rows without importing Teich.
+  This is useful when your trainer can consume standalone OpenAI-style message rows without importing Teich.
 
 Use prepare_data() and mask_data() when you want tokenizer-specific rendering and exact response-only labels.
 """
@@ -381,6 +381,7 @@ def _write_extract_readme(
         tags=cfg.get_dataset_tags(),
         model_id=cfg.model.model,
         repo_id=cfg.get_publish_repo_id(),
+        extraction_provider=provider,
     )
 
 
@@ -573,8 +574,8 @@ def anonymize(
 
 
 @app.command(
-    help="Convert raw or extracted traces into normalized Teich JSONL rows.",
-    short_help="Convert traces to Teich JSONL.",
+    help="Convert raw or extracted traces into standalone OpenAI-style training JSONL rows.",
+    short_help="Convert traces to training JSONL.",
     cls=_help_command("ConvertHelpCommand", CONVERT_EXTRA_HELP),
 )
 def convert(
@@ -584,10 +585,10 @@ def convert(
         "--output",
         "--out",
         "-o",
-        help="Output JSONL file containing normalized Teich training rows",
+        help="Output JSONL file containing standalone OpenAI-style training rows",
     ),
 ) -> None:
-    """Convert raw or extracted traces into normalized Teich JSONL rows."""
+    """Convert raw or extracted traces into standalone OpenAI-style training JSONL rows."""
     if not input_path.exists():
         console.print(f"[red]Input path not found: {input_path}[/red]")
         raise typer.Exit(1)

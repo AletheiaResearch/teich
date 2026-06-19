@@ -463,6 +463,7 @@ def test_extract_help_covers_providers_options_defaults_and_examples():
     assert "CURSOR_WORKSPACE_STORAGE" in group_output
     assert "fable-5" in group_output
     assert "teich convert data --out teich-training.jsonl" in group_output
+    assert "standalone OpenAI-style JSONL rows" in group_output
 
     for provider in ("claude", "codex", "cursor", "hermes", "pi"):
         result = runner.invoke(app, ["extract", provider, "--help"])

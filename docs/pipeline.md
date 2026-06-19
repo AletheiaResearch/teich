@@ -13,17 +13,17 @@ flowchart TD
     B -->|"no"| D["prepare_data"]
     C --> C1["Run provider<br/>codex, pi, claude-code, hermes, or chat"]
     C1 --> C2["Write raw/native traces or structured chat rows"]
-    C2 --> C3["Write dataset README + tool snapshots"]
+    C2 --> C3["Write compact README + optional tools.json"]
     C3 --> D
     X --> X1["Copy local sessions<br/>claude, codex, cursor, pi, or hermes"]
     X1 --> X2["Filter by --model metadata when requested"]
-    X2 --> X3["Anonymize staged data + write README"]
+    X2 --> X3["Anonymize staged data + write compact README"]
     X3 --> X4{"upload to Hugging Face?"}
-    X4 -->|"yes"| X5["Upload JSONL + README"]
+    X4 -->|"yes"| X5["Upload JSONL + README/tools metadata"]
     X4 -->|"no"| D
     X5 --> D
     X3 --> Y
-    Y --> Y1["Write normalized Teich JSONL<br/>prompt, messages, tools, metadata"]
+    Y --> Y1["Write standalone OpenAI-style JSONL<br/>prompt, messages, tools, metadata"]
     D --> E["Resolve and load sources"]
     E --> F["Convert traces to messages + tools"]
     F --> G["Render tokenizer chat template"]
@@ -72,11 +72,11 @@ flowchart TD
     J1 --> N
     K1 --> N
     L1 --> N
-    M1 --> O["Write dataset README"]
+    M1 --> O["Write compact dataset README"]
     N --> O
-    O --> P["Embed tool schemas when available"]
+    O --> P["Embed small tool schemas or write tools.json"]
     P --> Q{"publish.repo_id set?"}
-    Q -->|"yes"| R["Upload JSONL + README to HF dataset repo"]
+    Q -->|"yes"| R["Upload JSONL + README/tools metadata to HF dataset repo"]
     Q -->|"no"| S["Leave local output ready for prepare_data"]
     R --> S
 ```
@@ -166,7 +166,7 @@ flowchart TD
 ```text
 prepare_data keeps human-readable text plus typed span metadata.
 mask_data converts the selected spans into exact token-level labels after trainer tokenization.
-teich convert writes normalized message JSONL without tokenizer rendering or token labels.
+teich convert writes standalone OpenAI-style message JSONL without tokenizer rendering or token labels.
 ```
 
 This lets Teich stay compatible with TRL / Unsloth trainer flows while still controlling exactly what the model learns.

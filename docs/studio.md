@@ -51,7 +51,7 @@ Studio gives you browser controls for the same files and runners used by the CLI
 
 It writes to the same project layout as `teich generate`:
 
-- `output/`: completed traces and dataset card
+- `output/`: completed traces, compact dataset card, and optional `tools.json`
 - `sandbox/`: workspace snapshots
 - `failures/`: failed or interrupted traces for debugging
 - `config.yaml`: generation config
@@ -98,7 +98,7 @@ Use it to stage existing local sessions from `claude`, `codex`, `cursor`, `pi`, 
 - Hermes: `.hermes` or `.hermes/state.db`
 - Cursor: `Cursor/User/workspaceStorage` or `Cursor/User/globalStorage/state.vscdb`
 
-Studio can fill in detected default paths for the selected provider. Extraction writes into the configured output folder, generates a dataset `README.md`, and anonymizes staged traces by default. Check **Skip anonymization** only when you are intentionally keeping raw local values.
+Studio can fill in detected default paths for the selected provider. Extraction writes into the configured output folder, generates a compact dataset `README.md`, and anonymizes staged traces by default. Check **Skip anonymization** only when you are intentionally keeping raw local values.
 
 ## Dataset Preview
 
@@ -108,7 +108,7 @@ The Dataset Preview tab lets you inspect the configured output folder before upl
 - Hugging Face-style features for the converted training rows
 - searchable row previews
 - row JSON details
-- local session/trace previews with messages, reasoning, tool calls, and tool results
+- selected-row conversation previews with messages, reasoning, tool calls, and tool results
 - the generated dataset card preview when `README.md` is present
 
 If `publish.repo_id` is set in `config.yaml`, Studio also exposes the official Hugging Face embedded Dataset Viewer URL:
@@ -118,6 +118,8 @@ https://huggingface.co/datasets/<owner>/<dataset>/embed/viewer
 ```
 
 That official embed works for datasets already available on the Hub. For unpublished local output, Studio uses Teich's local converter to approximate the parts of the viewer that matter before upload. The full Hugging Face viewer backend is hosted by Hugging Face and adds Parquet-backed row serving, search, filtering, SQL, and statistics after the dataset is uploaded and processed.
+
+The Studio upload button regenerates the dataset card before publishing. The card stays intentionally short and points readers to the maintained training docs; large dataset-level tool snapshots are written to `tools.json` and uploaded alongside the JSONL files.
 
 ## Requirements
 

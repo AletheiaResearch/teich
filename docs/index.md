@@ -33,7 +33,7 @@ Already have local agent sessions:
 teich extract claude --model fable-5 -> optional HF upload -> prepare_data()
 ```
 
-Want normalized JSONL for another trainer:
+Want OpenAI-style JSONL for another trainer:
 
 ```text
 teich extract claude --out data -> teich convert data --out teich-training.jsonl

@@ -137,7 +137,7 @@ train_dataset = prepare_data(
 
 Rows contain rendered `text` only, plus tokens if `tokenize=True`.
 
-## Export Normalized Teich JSONL
+## Export OpenAI-Style Training JSONL
 
 If you want a training-friendly JSONL file without requiring Teich in the training environment, convert raw or extracted traces first:
 
@@ -152,7 +152,7 @@ Each output line has:
 - `tools`
 - `metadata`
 
-This preserves tool schemas, tool calls, reasoning fields, and provenance in Teich's normalized message format. It does not render a tokenizer-specific chat template and does not create token-level labels; use `prepare_data()` and `mask_data()` for that path.
+This preserves tool schemas, tool calls, reasoning fields, and provenance in standalone OpenAI-style message rows. It does not render a tokenizer-specific chat template and does not create token-level labels; use `prepare_data()` and `mask_data()` for that path.
 
 ## Export ShareGPT-Style JSONL
 

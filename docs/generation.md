@@ -33,7 +33,7 @@ Teich scans completed output rows and skips prompts that already converted into 
 
 ## Extract Local Sessions
 
-Extract local sessions, anonymize them, generate a dataset README, and optionally upload the staged folder to Hugging Face:
+Extract local sessions, anonymize them, generate a compact dataset README, and optionally upload the staged folder to Hugging Face:
 
 ```bash
 teich extract claude --model fable-5
@@ -91,13 +91,13 @@ If you choose upload, Teich asks for a dataset repo id and uses `HF_TOKEN`, `HUG
 
 Important: anonymization is a best-effort safety pass, not a guarantee. Review the staged data yourself before uploading or publishing it, and remove anything you would not want released.
 
-To turn raw or extracted traces into normalized Teich JSONL rows that do not require Teich at training time, run:
+To turn raw or extracted traces into standalone OpenAI-style JSONL rows that do not require Teich at training time, run:
 
 ```bash
 teich convert data --out teich-training.jsonl
 ```
 
-The output file is newline-delimited JSON with `prompt`, `messages`, `tools`, and `metadata` fields. Use this when another trainer already knows how to consume OpenAI-style message rows. Use `prepare_data()` and `mask_data()` when you want Teich to render a specific tokenizer chat template and create exact response-only labels.
+The output file is newline-delimited JSON with `prompt`, `messages`, `tools`, and `metadata` fields. Use this when another trainer already knows how to consume standalone OpenAI-style message rows. Use `prepare_data()` and `mask_data()` when you want Teich to render a specific tokenizer chat template and create exact response-only labels.
 
 ## Browser UI
 
@@ -181,7 +181,15 @@ Uploaded Hugging Face dataset artifacts include:
 
 - generated JSONL
 - dataset `README.md`
-- configured tool-schema snapshots when tools are present
+- `tools.json` when a dataset-level tool snapshot is too large to embed safely in the dataset card
+
+Generated dataset cards are intentionally short. They include Teich attribution, counts, a bounded sample, format notes, tool-schema information, and links to the maintained training docs instead of embedding trainer-specific code that may go stale.
+
+To produce standalone OpenAI-style training rows without relying on Teich formatting and masking in your trainer, convert the staged dataset:
+
+```bash
+teich convert data --out teich-training.jsonl
+```
 
 Generation progress reports provider/model usage when Teich can retrieve it. For OpenRouter, Teich first queries the provider's generation stats API for native token and cost accounting, then falls back to harness-reported usage. If neither source is available, Teich prints `N/A`.
 

@@ -28,7 +28,7 @@ Useful options:
 - `--concurrency`, `-j`: number of prompts to run in parallel
 - `--resume`: skip prompts that already have completed outputs
 
-Generated runs write raw traces, converted JSONL rows, and a dataset `README.md` under `output/` by default. Agent providers also write workspace snapshots under `sandbox/`; failed or interrupted traces go under `failures/`.
+Generated runs write raw traces, converted JSONL rows, and a compact dataset `README.md` under `output/` by default. Agent providers also write workspace snapshots under `sandbox/`; failed or interrupted traces go under `failures/`. Very large dataset-level tool snapshots are written to `tools.json` instead of being embedded in the dataset card.
 
 ## Extract
 
@@ -77,15 +77,17 @@ teich extract cursor --sessions-dir /path/to/Cursor/User/globalStorage/state.vsc
 
 Extraction anonymizes staged traces by default. Review the staged files before upload; `--no-anon` keeps raw values unchanged.
 
+Generated extraction readmes include a short `teich extract` snippet so dataset users can stage their own local sessions with the same provider family.
+
 ## Convert
 
-Convert raw or extracted traces into normalized Teich JSONL:
+Convert raw or extracted traces into standalone OpenAI-style training JSONL:
 
 ```bash
 teich convert data --out teich-training.jsonl
 ```
 
-Each output line contains `prompt`, `messages`, `tools`, and `metadata`. Use this when your training stack can consume OpenAI-style message rows without importing Teich. Use `prepare_data()` and `mask_data()` when you want tokenizer-specific rendering and exact response-only labels.
+Each output line contains `prompt`, `messages`, `tools`, and `metadata`. Use this when your training stack can consume standalone OpenAI-style message rows without importing Teich. Use `prepare_data()` and `mask_data()` when you want tokenizer-specific rendering and exact response-only labels.
 
 ## Anonymize
 

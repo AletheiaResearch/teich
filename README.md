@@ -100,7 +100,7 @@ export OPENAI_API_KEY=sk-...
 teich generate -c config.yaml
 ```
 
-Teich writes raw traces, converted training rows, sandbox snapshots, and a dataset card under `output/`. Use `--resume` to skip prompts that already completed.
+Teich writes raw traces, converted training rows, sandbox snapshots, a compact dataset card, and sometimes `tools.json` under `output/`. Use `--resume` to skip prompts that already completed.
 
 More detail: [Generation](docs/generation.md).
 
@@ -132,11 +132,13 @@ teich extract cursor --sessions-dir /path/to/Cursor/User/globalStorage/state.vsc
 
 Extraction anonymizes staged traces by default. To keep the raw extracted data unchanged, pass `--no-anon` or `--no-anonymize` and review the output carefully before sharing or uploading it.
 
-To convert raw or extracted traces into normalized Teich JSONL rows that can be consumed without Teich at training time:
+To convert raw or extracted traces into standalone OpenAI-style JSONL rows that can be consumed without Teich at training time:
 
 ```bash
 teich convert data --out teich-training.jsonl
 ```
+
+This writes standalone OpenAI-style rows with `prompt`, `messages`, `tools`, and `metadata`. Use `prepare_data()` and `mask_data()` when you want Teich to handle tokenizer-specific formatting and response-only labels.
 
 ## What Teich Supports
 
@@ -185,7 +187,7 @@ teich generate -c config.yaml --resume
 # Extract, anonymize, and stage local Claude Code traces
 teich extract claude --model fable-5 --out data
 
-# Convert staged raw traces to normalized Teich JSONL
+# Convert staged raw traces to standalone OpenAI-style training JSONL
 teich convert data --out teich-training.jsonl
 
 # Launch the local browser UI
