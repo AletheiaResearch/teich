@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import re
 import sys
-from typing import Any
+from typing import Any, NamedTuple
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -166,6 +166,22 @@ class PublishConfig(BaseModel):
         return normalized
 
 
+class TasksConfig(BaseModel):
+    """Verifiable-task settings for seed-workspace bug-fix runs."""
+    seed_dataset: str | None = None
+    verifier_timeout_seconds: int = Field(default=300, ge=1)
+    restore_verifier_files: bool = True
+    route_by_result: bool = True
+
+
+class SeedReference(NamedTuple):
+    """Resolved location of a seed repo bundle."""
+    kind: str  # "local" | "hf"
+    local_path: Path | None = None
+    repo_id: str | None = None
+    filename: str | None = None
+
+
 class PromptInput(BaseModel):
     """Structured prompt input row."""
     image: str | None = None
@@ -173,6 +189,9 @@ class PromptInput(BaseModel):
     system: str | None = None
     prompt: str
     follow_up_prompts: list[str] = Field(default_factory=list)
+    seed_repo: str | None = None
+    verifier: str | None = None
+    verifier_files: list[str] = Field(default_factory=list)
 
     @staticmethod
     def _normalize_optional_text(value: object) -> str | None:
@@ -184,10 +203,23 @@ class PromptInput(BaseModel):
             return None
         return normalized
 
-    @field_validator("image", "github_repo", "system", mode="before")
+    @field_validator("image", "github_repo", "system", "seed_repo", "verifier", mode="before")
     @classmethod
     def normalize_optional_fields(cls, value: object) -> str | None:
         return cls._normalize_optional_text(value)
+
+    @field_validator("verifier_files", mode="before")
+    @classmethod
+    def normalize_verifier_files(cls, value: object) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            items = re.split(r"[,\n]", value)
+        elif isinstance(value, list):
+            items = [item if isinstance(item, str) else str(item) for item in value]
+        else:
+            raise ValueError("verifier_files must be a list of paths or a comma-separated string")
+        return [text for text in (item.strip() for item in items) if text]
 
     @field_validator("prompt", mode="before")
     @classmethod
@@ -231,6 +263,12 @@ class PromptInput(BaseModel):
             )
         return value
 
+    @model_validator(mode="after")
+    def validate_seed_source(self) -> PromptInput:
+        if self.seed_repo and self.github_repo:
+            raise ValueError("Set only one of seed_repo or github_repo, not both")
+        return self
+
     def turn_prompts(self) -> list[str]:
         """Return the initial prompt plus any configured follow-up prompts."""
         return [self.prompt, *self.follow_up_prompts]
@@ -246,6 +284,7 @@ class Config(BaseModel):
     prompts_file: Path | None = None
     output: OutputConfig = Field(default_factory=OutputConfig)
     publish: PublishConfig = Field(default_factory=PublishConfig)
+    tasks: TasksConfig = Field(default_factory=TasksConfig)
     max_concurrency: int = Field(default=1, ge=1)
     timeout_seconds: int = 600
     openai_api_key: str | None = None
@@ -359,6 +398,42 @@ class Config(BaseModel):
         codex_home = os.environ.get("CODEX_HOME")
         base = Path(codex_home).expanduser() if codex_home else Path.home() / ".codex"
         return base / "auth.json"
+
+    def resolve_seed_reference(self, seed_repo: str) -> SeedReference:
+        """Resolve a ``seed_repo`` value to a local bundle path or an HF dataset file.
+
+        - ``hf://datasets/<owner>/<name>/<path>`` -> explicit HF dataset file.
+        - a path-like value (contains ``/``, starts with ``.``/``~``, is absolute,
+          or ends with ``.bundle``) -> local bundle path.
+        - a bare key (e.g. ``widgets-bug-01``) -> ``<tasks.seed_dataset>/<key>.bundle``.
+        """
+        ref = seed_repo.strip()
+        if not ref:
+            raise ValueError("seed_repo cannot be empty")
+        if ref.startswith("hf://"):
+            rest = ref[len("hf://"):]
+            if rest.startswith("datasets/"):
+                rest = rest[len("datasets/"):]
+            parts = [part for part in rest.split("/") if part]
+            if len(parts) < 3:
+                raise ValueError(
+                    f"Invalid hf:// seed_repo '{seed_repo}'; expected "
+                    "hf://datasets/<owner>/<name>/<path-to>.bundle"
+                )
+            return SeedReference("hf", repo_id="/".join(parts[:2]), filename="/".join(parts[2:]))
+        path_like = (
+            "/" in ref
+            or ref.startswith(("~", "."))
+            or ref.endswith(".bundle")
+            or Path(ref).is_absolute()
+        )
+        if path_like:
+            return SeedReference("local", local_path=Path(ref).expanduser())
+        if not self.tasks.seed_dataset:
+            raise ValueError(
+                f"seed_repo '{seed_repo}' is a bare key but tasks.seed_dataset is not set"
+            )
+        return SeedReference("hf", repo_id=self.tasks.seed_dataset, filename=f"{ref}.bundle")
 
     def get_dataset_tags(self) -> list[str]:
         """Get auto-generated dataset tags for README frontmatter and uploads."""
@@ -474,6 +549,9 @@ class Config(BaseModel):
                                 github_repo=normalized_row.get("github_repo"),
                                 system=normalized_row.get("system"),
                                 prompt=prompt,
+                                seed_repo=normalized_row.get("seed_repo"),
+                                verifier=normalized_row.get("verifier"),
+                                verifier_files=normalized_row.get("verifier_files"),
                             )
                         )
                     except ValueError as exc:
@@ -507,6 +585,9 @@ class Config(BaseModel):
                 system=normalized_row.get("system"),
                 prompt=prompt,
                 follow_up_prompts=normalized_row.get("follow_up_prompts"),
+                seed_repo=normalized_row.get("seed_repo"),
+                verifier=normalized_row.get("verifier"),
+                verifier_files=normalized_row.get("verifier_files"),
             )
         except ValueError as exc:
             raise ValueError(f"Invalid {source}: {exc}") from exc

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from teich.config import Config, MCPConfig, ModelConfig
+from teich.config import Config, MCPConfig, ModelConfig, PromptInput
 
 
 def test_default_config():
@@ -474,6 +474,71 @@ def test_codex_host_auth_source_defaults_to_home(monkeypatch):
     monkeypatch.delenv("CODEX_HOME", raising=False)
     config = Config(agent={"provider": "codex"})
     assert config.get_codex_host_auth_source() == Path.home() / ".codex" / "auth.json"
+
+
+def test_tasks_config_defaults():
+    tasks = Config().tasks
+    assert tasks.seed_dataset is None
+    assert tasks.verifier_timeout_seconds == 300
+    assert tasks.restore_verifier_files is True
+    assert tasks.route_by_result is True
+
+
+def test_prompt_input_seed_and_verifier_fields():
+    pi = PromptInput(
+        prompt="fix the bug",
+        seed_repo="widgets-bug-01",
+        verifier="pytest -q",
+        verifier_files=["tests/test_widgets.py"],
+    )
+    assert pi.seed_repo == "widgets-bug-01"
+    assert pi.verifier == "pytest -q"
+    assert pi.verifier_files == ["tests/test_widgets.py"]
+
+
+def test_prompt_input_normalizes_blank_seed_and_verifier():
+    pi = PromptInput(prompt="x", seed_repo="none", verifier="  ", verifier_files=None)
+    assert pi.seed_repo is None
+    assert pi.verifier is None
+    assert pi.verifier_files == []
+
+
+def test_prompt_input_verifier_files_from_comma_string():
+    pi = PromptInput(prompt="x", verifier_files="a.py, b.py ,\nc.py")
+    assert pi.verifier_files == ["a.py", "b.py", "c.py"]
+
+
+def test_prompt_input_rejects_seed_repo_and_github_repo():
+    with pytest.raises(ValueError, match="only one of seed_repo or github_repo"):
+        PromptInput(prompt="x", seed_repo="widgets-bug-01", github_repo="owner/repo")
+
+
+def test_resolve_seed_reference_hf_uri():
+    ref = Config().resolve_seed_reference("hf://datasets/me/seeds/path/widgets.bundle")
+    assert ref.kind == "hf"
+    assert ref.repo_id == "me/seeds"
+    assert ref.filename == "path/widgets.bundle"
+
+
+def test_resolve_seed_reference_bare_key_uses_dataset():
+    config = Config(tasks={"seed_dataset": "me/seeds"})
+    ref = config.resolve_seed_reference("widgets-bug-01")
+    assert ref.kind == "hf"
+    assert ref.repo_id == "me/seeds"
+    assert ref.filename == "widgets-bug-01.bundle"
+
+
+def test_resolve_seed_reference_bare_key_without_dataset_errors():
+    with pytest.raises(ValueError, match="seed_dataset is not set"):
+        Config().resolve_seed_reference("widgets-bug-01")
+
+
+def test_resolve_seed_reference_local_paths():
+    config = Config()
+    for value in ("./x.bundle", "sub/x.bundle", "/abs/x.bundle", "x.bundle"):
+        ref = config.resolve_seed_reference(value)
+        assert ref.kind == "local", value
+        assert ref.local_path == Path(value).expanduser()
 
 
 def test_mcp_config():
