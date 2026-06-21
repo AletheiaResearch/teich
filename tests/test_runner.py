@@ -32,6 +32,7 @@ from teich.runner import (
     PiRunner,
     RUNTIME_CONTAINER_USER,
     SessionProgressUpdate,
+    VerificationResult,
     pending_prompt_inputs_for_resume,
 )
 
@@ -1873,6 +1874,77 @@ def test_run_verifier_restores_verifier_files(tmp_path: Path):
     with patch.object(runner_module.subprocess, "run", side_effect=fake_run):
         runner._run_verifier(tmp_path, pi)
     assert any("checkout" in c for c in calls), calls
+
+
+def _verifier_runner(tmp_path: Path, route: bool = True):
+    config = Config(
+        agent={"provider": "codex"},
+        output={"traces_dir": tmp_path / "output", "sandbox_dir": tmp_path / "sandbox"},
+        tasks={"route_by_result": route},
+    )
+    with patch.object(CodexRunner, "_ensure_image"):
+        runner = CodexRunner(config)
+    return runner, config
+
+
+def _seed_trace_and_snapshot(config) -> Path:
+    trace = config.output.traces_dir / "codex-x.jsonl"
+    trace.parent.mkdir(parents=True, exist_ok=True)
+    trace.write_text("{}\n", encoding="utf-8")
+    snapshot = config.output.sandbox_dir / "codex-x.jsonl"  # _sandbox_destination keys on .name
+    snapshot.mkdir(parents=True, exist_ok=True)
+    return trace
+
+
+def test_verify_and_record_no_verifier_is_noop(tmp_path: Path):
+    runner, config = _verifier_runner(tmp_path)
+    trace = _seed_trace_and_snapshot(config)
+    new_path, result = runner._verify_and_record(trace, PromptInput(prompt="x"))
+    assert result is None
+    assert new_path == trace
+    assert not (config.output.traces_dir / "verification").exists()
+
+
+def test_verify_and_record_routes_passed(tmp_path: Path):
+    runner, config = _verifier_runner(tmp_path)
+    trace = _seed_trace_and_snapshot(config)
+    vr = VerificationResult(verifier="pytest", passed=True, exit_code=0, duration_s=1.0)
+    with patch.object(runner, "_run_verifier", return_value=vr):
+        new_path, result = runner._verify_and_record(trace, PromptInput(prompt="x", verifier="pytest"))
+    assert result.passed is True
+    assert new_path == config.output.traces_dir / "passed" / "codex-x.jsonl"
+    assert new_path.exists() and not trace.exists()
+    sidecar = config.output.traces_dir / "verification" / "codex-x.json"
+    assert json.loads(sidecar.read_text(encoding="utf-8"))["passed"] is True
+
+
+def test_verify_and_record_routes_failed(tmp_path: Path):
+    runner, config = _verifier_runner(tmp_path)
+    trace = _seed_trace_and_snapshot(config)
+    vr = VerificationResult(verifier="pytest", passed=False, exit_code=1, duration_s=1.0)
+    with patch.object(runner, "_run_verifier", return_value=vr):
+        new_path, _ = runner._verify_and_record(trace, PromptInput(prompt="x", verifier="pytest"))
+    assert new_path == config.output.traces_dir / "failed" / "codex-x.jsonl"
+    assert new_path.exists()
+
+
+def test_verify_and_record_no_routing_keeps_path(tmp_path: Path):
+    runner, config = _verifier_runner(tmp_path, route=False)
+    trace = _seed_trace_and_snapshot(config)
+    vr = VerificationResult(verifier="pytest", passed=True, exit_code=0, duration_s=1.0)
+    with patch.object(runner, "_run_verifier", return_value=vr):
+        new_path, result = runner._verify_and_record(trace, PromptInput(prompt="x", verifier="pytest"))
+    assert new_path == trace and trace.exists()
+    assert (config.output.traces_dir / "verification" / "codex-x.json").exists()
+
+
+def test_verify_and_record_missing_snapshot_is_noop(tmp_path: Path):
+    runner, config = _verifier_runner(tmp_path)
+    trace = config.output.traces_dir / "codex-x.jsonl"
+    trace.parent.mkdir(parents=True, exist_ok=True)
+    trace.write_text("{}\n", encoding="utf-8")  # no snapshot created
+    new_path, result = runner._verify_and_record(trace, PromptInput(prompt="x", verifier="pytest"))
+    assert result is None and new_path == trace
 
 
 def test_external_runner_decodes_subprocess_output_as_utf8(tmp_path: Path):

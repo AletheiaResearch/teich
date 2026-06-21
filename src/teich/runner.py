@@ -52,7 +52,7 @@ HERMES_DEFAULT_TOOLSETS = "safe,terminal,file,skills,memory,session_search,deleg
 HERMES_TRACE_WRITE_LOCK = threading.Lock()
 CHAT_REQUEST_MAX_ATTEMPTS = 3
 AGENT_TURN_RETRY_LIMIT = 3
-NON_DATA_TRACE_DIR_NAMES = {"partials", "failures"}
+NON_DATA_TRACE_DIR_NAMES = {"partials", "failures", "verification"}
 
 
 def _make_tree_world_writable(path: Path) -> None:
@@ -2001,6 +2001,55 @@ class DockerRuntimeRunner:
             metrics.finalize()
         return metrics
 
+    def _verification_sidecar_path(self, trace_path: Path) -> Path:
+        return self.config.output.traces_dir / "verification" / f"{trace_path.stem}.json"
+
+    def _route_destination(self, trace_path: Path, passed: bool) -> Path:
+        subdir = "passed" if passed else "failed"
+        return self.config.output.traces_dir / subdir / trace_path.name
+
+    @staticmethod
+    def _verification_detail(result: VerificationResult | None) -> str | None:
+        if result is None:
+            return None
+        if result.timed_out:
+            return "verifier: timed out"
+        if result.error:
+            return f"verifier: error ({result.error})"
+        return f"verifier: {'passed' if result.passed else 'failed'} (exit {result.exit_code})"
+
+    def _verify_and_record(
+        self,
+        trace_path: Path,
+        prompt_input: PromptInput | None,
+    ) -> tuple[Path, VerificationResult | None]:
+        """Run the verifier over the sandbox snapshot, write the sidecar, and route the trace."""
+        if prompt_input is None or not prompt_input.verifier:
+            return trace_path, None
+        snapshot = self._sandbox_destination(trace_path)
+        if not snapshot.exists():
+            return trace_path, None
+        result = self._run_verifier(snapshot, prompt_input)
+        if result is None:
+            return trace_path, None
+        sidecar = self._verification_sidecar_path(trace_path)
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        sidecar.write_text(
+            json.dumps(result.to_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        if not self.config.tasks.route_by_result:
+            return trace_path, result
+        destination = self._route_destination(trace_path, result.passed)
+        if destination.resolve() == trace_path.resolve():
+            return trace_path, result
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(trace_path), str(destination))
+        metadata_src = self._hermes_metadata_path(trace_path)
+        if metadata_src.exists():
+            shutil.move(str(metadata_src), str(self._hermes_metadata_path(destination)))
+        return destination, result
+
     def _run_prompt_task(
         self,
         prompt_id: str,
@@ -2032,6 +2081,7 @@ class DockerRuntimeRunner:
                 progress_base=progress_base,
                 prompt_input=prompt_input,
             )
+            result, verification = self._verify_and_record(result, prompt_input)
             metrics = self._summarize_trace_file(result)
             sandbox_path = self._sandbox_destination(result)
             if progress_callback:
@@ -2049,6 +2099,7 @@ class DockerRuntimeRunner:
                         trace_path=result,
                         sandbox_path=sandbox_path,
                         metrics=metrics,
+                        details=self._verification_detail(verification),
                     )
                 )
             return result
