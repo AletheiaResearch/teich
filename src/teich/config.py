@@ -99,14 +99,21 @@ class APIConfig(BaseModel):
 class CodexAuthConfig(BaseModel):
     """Codex ChatGPT-subscription auth handling.
 
-    When ``use_host_auth`` is enabled, Teich seeds a single shared ``auth.json``
-    snapshot under ``auth_dir`` from the host's Codex login and bind-mounts that
-    one file into every Codex container so all instances share (and refresh) the
-    same rotating OAuth token instead of fighting over independent copies.
+    When ``use_host_auth`` is enabled, Teich seeds an ``auth.json`` snapshot
+    under ``auth_dir`` from the host's Codex login and runs a single in-process
+    token broker that owns the rotating OAuth refresh token. Each Codex
+    container gets its own seeded copy (with the refresh token replaced by a
+    per-run secret) and is pointed at the broker via
+    ``CODEX_REFRESH_TOKEN_URL_OVERRIDE``, so the broker is the sole caller of the
+    real refresh endpoint and concurrent containers cannot invalidate one
+    another. The broker reads and writes only the ``auth_dir`` copy; it never
+    touches the host ``~/.codex/auth.json``.
     """
     use_host_auth: bool = False
     host_auth_file: Path | None = None
     auth_dir: Path = Field(default=Path("./.teich/codex-auth"))
+    # Port for the host-side token broker. 0 = pick an ephemeral free port.
+    broker_port: int = 0
 
 
 class AgentConfig(BaseModel):
