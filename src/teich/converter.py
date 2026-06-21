@@ -3922,8 +3922,29 @@ def _jsonl_files(source: Path) -> list[Path]:
     return sorted(
         path
         for path in source.rglob("*.jsonl")
-        if path.is_file() and not {"partials", "failures"}.intersection(path.relative_to(source).parts)
+        if path.is_file()
+        and not {"partials", "failures", "verification"}.intersection(path.relative_to(source).parts)
     )
+
+
+def _verification_reward_for_trace(trace_path: Path) -> dict[str, Any] | None:
+    """Load a verifier reward for a trace from a sibling ``verification/<stem>.json`` sidecar.
+
+    Handles both flat traces (``output/<name>.jsonl``) and routed traces
+    (``output/passed|failed/<name>.jsonl``) by checking the trace's directory and
+    its parent for the ``verification`` folder.
+    """
+    for base in (trace_path.parent, trace_path.parent.parent):
+        candidate = base / "verification" / f"{trace_path.stem}.json"
+        if candidate.is_file():
+            try:
+                data = json.loads(candidate.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return None
+            if isinstance(data, dict) and "passed" in data:
+                return data
+            return None
+    return None
 
 
 def _convert_jsonl_file_to_training_rows(jsonl_file: Path, *, skip_invalid_lines: bool = False) -> list[dict[str, Any]]:
@@ -3968,5 +3989,12 @@ def convert_traces_to_training_data(traces_dir: Path | str, *, skip_invalid_line
     trace_files = _jsonl_files(source)
     rows: list[dict[str, Any]] = []
     for path in trace_files:
-        rows.extend(_convert_jsonl_file_to_training_rows(path, skip_invalid_lines=skip_invalid_lines))
+        file_rows = _convert_jsonl_file_to_training_rows(path, skip_invalid_lines=skip_invalid_lines)
+        reward_data = _verification_reward_for_trace(path)
+        if reward_data is not None:
+            passed = bool(reward_data.get("passed"))
+            for row in file_rows:
+                row["passed"] = passed
+                row["reward"] = 1.0 if passed else 0.0
+        rows.extend(file_rows)
     return rows

@@ -126,6 +126,9 @@ Each row can include:
 - `system`: optional prompt-specific system prompt
 - `github_repo`: optional `owner/repo` checkout for Docker-backed agent runs
 - `follow_up_prompts`: optional list of additional user turns
+- `seed_repo`: optional git-bundle seed workspace with history (see [Verifiable bug-fix tasks](#verifiable-bug-fix-tasks)); mutually exclusive with `github_repo`
+- `verifier`: optional shell command run after the agent; reward = its exit code
+- `verifier_files`: optional paths restored from the seed's `HEAD` before verifying (anti-tamper)
 
 `follow_up_prompts` works across providers. The `chat` provider sends each follow-up as a real additional user turn in one generated training row. Agent providers keep one Docker container alive for the full prompt sequence and resume or continue the same saved agent session for each follow-up so workspace edits, tool caches, and in-container installs remain available.
 
@@ -330,6 +333,42 @@ api:
 ```
 
 A generated line contains `messages`, `prompt`, optional `thinking`, final `response`, and `model`. With follow-ups, the same row includes alternating `user` and `assistant` messages, `follow_up_prompts`, per-turn `responses`, and final `response`.
+
+## Verifiable bug-fix tasks
+
+Seed an agent in a repository that already contains a planted bug (with real git history), let it fix the bug, then run a verifier and record a pass/fail reward. The trace is SFT data; the reward is the RL signal. Works for codex, pi, claude-code, and hermes (not `chat`, which has no workspace).
+
+A task is a prompt row with a `seed_repo` and a `verifier`:
+
+```jsonl
+{"prompt":"The tests are failing. Find and fix the bug.","seed_repo":"widgets-bug-01","verifier":"pytest -q","verifier_files":["tests/test_widgets.py"]}
+```
+
+- **`seed_repo`** is a **git bundle** (`git bundle create REPO.bundle --all`). It can be a bare key resolved against `tasks.seed_dataset` (`widgets-bug-01` → `<dataset>/widgets-bug-01.bundle`), an `hf://datasets/<owner>/<name>/<path>.bundle` URI, or a local `.bundle` path. Teich fetches it (via `huggingface_hub`, cached) and `git clone`s it into the workspace, so the agent gets the repo with full history (`git log`/`blame`/`bisect` work).
+- **`verifier`** runs in the runtime container over the post-edit workspace. **Reward = its exit code** (`0` = pass) — model your test like "a script that exits 0 only when the bug is fixed."
+- **`verifier_files`** are restored from the seed's `HEAD` before the verifier runs, so the agent can't tamper with the oracle.
+
+Configure defaults under `tasks`:
+
+```yaml
+tasks:
+  seed_dataset: owner/my-seed-repos   # resolve bare seed_repo keys
+  verifier_timeout_seconds: 300
+  restore_verifier_files: true
+  route_by_result: true
+```
+
+Outputs (per task):
+
+- the trace is routed into `output/passed/` or `output/failed/` (when `route_by_result`),
+- a granular `output/verification/<name>.json` sidecar records `passed`, `exit_code`, `duration_s`, `timed_out`, a best-effort per-test map, and stdout/stderr tails,
+- `teich convert` adds `reward` (1.0/0.0) and `passed` to each training row.
+
+Failed-verifier traces are kept (and uploaded) — they're valid RL data; filter by `passed` if you only want successful fixes for SFT.
+
+**Auth:** HF downloads use `publish.hf_token` or `HF_TOKEN`/`HUGGINGFACE_HUB_TOKEN`/`TEICH_HF_TOKEN`; public datasets need no token.
+
+**Roadmap (v2):** real `FAIL_TO_PASS`/`PASS_TO_PASS` (running tests on the buggy seed *before* the agent for a regression-aware reward) and fresh-clean-container verifier isolation. v1 keeps the reward as the verifier's exit code to stay correct and framework-agnostic.
 
 ## Local Providers
 

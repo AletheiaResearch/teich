@@ -1137,6 +1137,11 @@ prompts_file: prompts.jsonl
 #     follow_up_prompts:
 #       - "Revise it for a solo developer"
 #       - "Add a risk checklist"
+#   # Verifiable bug-fix task (see the tasks: section below):
+#   - prompt: "The tests are failing. Find and fix the bug."
+#     seed_repo: "widgets-bug-01"        # git bundle key / hf:// URI / local .bundle
+#     verifier: "pytest -q"              # reward = exit code 0
+#     verifier_files: ["tests/test_widgets.py"]  # restored from HEAD before verifying
 prompts: []
 
 output:
@@ -1163,6 +1168,20 @@ publish:
   repo_id: null
   hf_token: null
   private: false
+
+# Optional verifiable bug-fix tasks (codex/pi/claude-code/hermes).
+# A prompt row may set `seed_repo` (a git bundle: a bare key resolved against
+# tasks.seed_dataset, an hf://datasets/<owner>/<name>/<path>.bundle URI, or a
+# local .bundle path) to start the agent in a repo with full history, and a
+# `verifier` shell command. After the agent finishes, the verifier runs over the
+# workspace; reward = its exit code (0 = pass). Results land in output/passed/ |
+# output/failed/ with a granular output/verification/<name>.json sidecar, and
+# `teich convert` adds `reward`/`passed` to each training row.
+tasks:
+  seed_dataset: null            # HF dataset id for resolving bare seed_repo keys
+  verifier_timeout_seconds: 300 # wall-clock cap for the verifier
+  restore_verifier_files: true  # restore a row's verifier_files from HEAD before verifying
+  route_by_result: true         # write traces into output/passed | output/failed
 
 # Number of prompts to run in parallel.
 max_concurrency: 1
