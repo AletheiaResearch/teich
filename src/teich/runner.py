@@ -25,7 +25,7 @@ from urllib.request import Request, urlopen
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from .config import Config
+    from .config import Config, SeedReference
 
 from .config import PromptInput
 
@@ -1253,6 +1253,67 @@ class DockerRuntimeRunner:
             details = stderr.strip() or stdout.strip() or str(exc)
             raise RuntimeError(f"Failed to clone github repo {github_repo}: {details}") from exc
 
+    @staticmethod
+    def _seed_checkout_name(reference: SeedReference, seed_repo: str) -> str:
+        if reference.kind == "local" and reference.local_path is not None:
+            name = reference.local_path.name
+        elif reference.filename:
+            name = reference.filename.rsplit("/", maxsplit=1)[-1]
+        else:
+            name = seed_repo
+        if name.endswith(".bundle"):
+            name = name[: -len(".bundle")]
+        name = re.sub(r"[^A-Za-z0-9_.-]+", "-", name).strip("-")
+        return name or "seed-repo"
+
+    def _fetch_seed_bundle(self, reference: SeedReference, seed_repo: str) -> Path:
+        """Return a local path to the seed bundle, downloading from HF if needed."""
+        if reference.kind == "local":
+            bundle = reference.local_path
+            if bundle is None or not bundle.is_file():
+                raise RuntimeError(f"Seed bundle not found: {bundle}")
+            return bundle
+        from huggingface_hub import hf_hub_download
+
+        try:
+            local = hf_hub_download(
+                repo_id=reference.repo_id,
+                filename=reference.filename,
+                repo_type="dataset",
+                token=self.config.get_hf_token(),
+            )
+        except Exception as exc:  # noqa: BLE001 - surface any hub/network error uniformly
+            raise RuntimeError(
+                f"Failed to fetch seed bundle '{seed_repo}' from Hugging Face dataset "
+                f"{reference.repo_id} ({reference.filename}): {exc}"
+            ) from exc
+        return Path(local)
+
+    @staticmethod
+    def _clone_seed_bundle(bundle: Path, destination: Path) -> None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        verify = subprocess.run(
+            ["git", "bundle", "verify", str(bundle)],
+            capture_output=True,
+            check=False,
+            **TEXT_SUBPROCESS_KWARGS,
+        )
+        if verify.returncode != 0:
+            details = (verify.stderr or verify.stdout or "").strip()
+            raise RuntimeError(f"Invalid seed bundle {bundle}: {details}")
+        try:
+            subprocess.run(
+                ["git", "clone", str(bundle), str(destination)],
+                capture_output=True,
+                check=True,
+                **TEXT_SUBPROCESS_KWARGS,
+            )
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or "")
+            stdout = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or "")
+            details = stderr.strip() or stdout.strip() or str(exc)
+            raise RuntimeError(f"Failed to clone seed bundle {bundle}: {details}") from exc
+
     def _prepare_workspace(
         self,
         session_id: str,
@@ -1268,7 +1329,12 @@ class DockerRuntimeRunner:
             raise RuntimeError(
                 "Prompt image inputs are not supported yet. Leave the image column blank or set it to None."
             )
-        if prompt_input.github_repo:
+        if prompt_input.seed_repo:
+            reference = self.config.resolve_seed_reference(prompt_input.seed_repo)
+            bundle = self._fetch_seed_bundle(reference, prompt_input.seed_repo)
+            workspace = workspace_root / self._seed_checkout_name(reference, prompt_input.seed_repo)
+            self._clone_seed_bundle(bundle, workspace)
+        elif prompt_input.github_repo:
             workspace = workspace_root / self._github_repo_checkout_name(prompt_input.github_repo)
             self._clone_github_repo(prompt_input.github_repo, workspace)
         return workspace_root, workspace

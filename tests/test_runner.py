@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import teich.runner as runner_module
-from teich.config import APIConfig, Config, MCPConfig, ModelConfig, PromptInput
+from teich.config import APIConfig, Config, MCPConfig, ModelConfig, PromptInput, SeedReference
 from teich.runner import (
     ChatRunner,
     ClaudeCodeRunner,
@@ -1726,6 +1726,79 @@ def test_codex_writes_developer_instructions_to_config(tmp_path: Path):
     runner._write_codex_config(codex_home)
     content = (codex_home / "config.toml").read_text(encoding="utf-8")
     assert f'developer_instructions = "{_DEV_INSTRUCTIONS}"' in content
+
+
+def _make_seed_bundle(tmp_path: Path) -> Path:
+    """Build a tiny real git repo and bundle it (with history) for seed tests."""
+    repo = tmp_path / "src"
+    repo.mkdir()
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e.st",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e.st"}
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "bug.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, env=env)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "init"], check=True, env=env)
+    bundle = tmp_path / "seed.bundle"
+    subprocess.run(["git", "-C", str(repo), "bundle", "create", str(bundle), "--all"], check=True, env=env)
+    return bundle
+
+
+def test_seed_checkout_name_from_hf_and_local():
+    hf_ref = SeedReference("hf", repo_id="me/seeds", filename="path/widgets-bug-01.bundle")
+    assert DockerRuntimeRunner._seed_checkout_name(hf_ref, "widgets-bug-01") == "widgets-bug-01"
+    local_ref = SeedReference("local", local_path=Path("/x/seed.bundle"))
+    assert DockerRuntimeRunner._seed_checkout_name(local_ref, "/x/seed.bundle") == "seed"
+
+
+def test_fetch_seed_bundle_local_missing_errors(tmp_path: Path):
+    config = Config()
+    with patch.object(CodexRunner, "_ensure_image"):
+        runner = CodexRunner(config)
+    missing = str(tmp_path / "nope.bundle")
+    ref = config.resolve_seed_reference(missing)
+    with pytest.raises(RuntimeError, match="Seed bundle not found"):
+        runner._fetch_seed_bundle(ref, missing)
+
+
+def test_fetch_seed_bundle_downloads_from_hf(tmp_path: Path, monkeypatch):
+    config = Config(tasks={"seed_dataset": "me/seeds"})
+    with patch.object(CodexRunner, "_ensure_image"):
+        runner = CodexRunner(config)
+    ref = config.resolve_seed_reference("widgets-bug-01")
+    fake = tmp_path / "widgets-bug-01.bundle"
+    fake.write_text("x", encoding="utf-8")
+    captured: dict = {}
+
+    def fake_download(**kwargs):
+        captured.update(kwargs)
+        return str(fake)
+
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_download)
+    result = runner._fetch_seed_bundle(ref, "widgets-bug-01")
+    assert result == fake
+    assert captured["repo_id"] == "me/seeds"
+    assert captured["filename"] == "widgets-bug-01.bundle"
+    assert captured["repo_type"] == "dataset"
+
+
+def test_prepare_workspace_clones_seed_bundle_with_history(tmp_path: Path):
+    bundle = _make_seed_bundle(tmp_path)
+    config = Config(agent={"provider": "codex"})
+    with patch.object(CodexRunner, "_ensure_image"):
+        runner = CodexRunner(config)
+    prompt_input = PromptInput(prompt="fix the bug", seed_repo=str(bundle))
+    workspace_root, workspace = runner._prepare_workspace("seed-sess", prompt_input, "codex")
+    try:
+        assert (workspace / "bug.py").exists()
+        assert (workspace / ".git").is_dir()  # full history materialized
+        log = subprocess.run(
+            ["git", "-C", str(workspace), "log", "--oneline"],
+            capture_output=True, text=True, check=True,
+        )
+        assert "init" in log.stdout
+    finally:
+        shutil.rmtree(workspace_root, ignore_errors=True)
 
 
 def test_external_runner_decodes_subprocess_output_as_utf8(tmp_path: Path):
