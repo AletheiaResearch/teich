@@ -1801,6 +1801,80 @@ def test_prepare_workspace_clones_seed_bundle_with_history(tmp_path: Path):
         shutil.rmtree(workspace_root, ignore_errors=True)
 
 
+def test_parse_pytest_results_both_orders():
+    out = "tests/t.py::test_a PASSED\nFAILED tests/t.py::test_b\nSKIPPED tests/t.py::test_c\n"
+    parsed = DockerRuntimeRunner._parse_pytest_results(out)
+    assert parsed["tests/t.py::test_a"] == "passed"
+    assert parsed["tests/t.py::test_b"] == "failed"
+    assert parsed["tests/t.py::test_c"] == "skipped"
+
+
+def test_build_verifier_command_mounts_workspace(tmp_path: Path):
+    with patch.object(CodexRunner, "_ensure_image"):
+        runner = CodexRunner(Config(agent={"provider": "codex"}))
+    cmd = runner._build_verifier_command(tmp_path / "ws", "pytest -q")
+    assert cmd[:3] == ["docker", "run", "--rm"]
+    assert f"{tmp_path / 'ws'}:/workspace" in cmd
+    assert cmd[-3:] == ["bash", "-lc", "pytest -q"]
+
+
+def test_run_verifier_returns_none_without_verifier(tmp_path: Path):
+    with patch.object(CodexRunner, "_ensure_image"):
+        runner = CodexRunner(Config(agent={"provider": "codex"}))
+    assert runner._run_verifier(tmp_path, PromptInput(prompt="x")) is None
+
+
+def test_run_verifier_passed_on_exit_zero(tmp_path: Path):
+    with patch.object(CodexRunner, "_ensure_image"):
+        runner = CodexRunner(Config(agent={"provider": "codex"}))
+    pi = PromptInput(prompt="x", verifier="pytest -q", seed_repo="widgets-bug-01")
+    fake = subprocess.CompletedProcess(["docker"], 0, "PASSED tests/t.py::test_a\n", "")
+    with patch.object(runner_module.subprocess, "run", return_value=fake):
+        result = runner._run_verifier(tmp_path, pi)
+    assert result.passed is True
+    assert result.exit_code == 0
+    assert result.tests == {"tests/t.py::test_a": "passed"}
+    assert result.seed_repo == "widgets-bug-01"
+
+
+def test_run_verifier_failed_on_nonzero(tmp_path: Path):
+    with patch.object(CodexRunner, "_ensure_image"):
+        runner = CodexRunner(Config(agent={"provider": "codex"}))
+    pi = PromptInput(prompt="x", verifier="pytest -q")
+    fake = subprocess.CompletedProcess(["docker"], 1, "FAILED tests/t.py::test_a\n", "boom")
+    with patch.object(runner_module.subprocess, "run", return_value=fake):
+        result = runner._run_verifier(tmp_path, pi)
+    assert result.passed is False
+    assert result.exit_code == 1
+    assert result.tests == {"tests/t.py::test_a": "failed"}
+
+
+def test_run_verifier_timeout(tmp_path: Path):
+    with patch.object(CodexRunner, "_ensure_image"):
+        runner = CodexRunner(Config(agent={"provider": "codex"}, tasks={"verifier_timeout_seconds": 5}))
+    pi = PromptInput(prompt="x", verifier="sleep 999")
+    with patch.object(runner_module.subprocess, "run", side_effect=subprocess.TimeoutExpired(cmd="docker", timeout=5)):
+        result = runner._run_verifier(tmp_path, pi)
+    assert result.timed_out is True
+    assert result.passed is False
+    assert result.exit_code is None
+
+
+def test_run_verifier_restores_verifier_files(tmp_path: Path):
+    with patch.object(CodexRunner, "_ensure_image"):
+        runner = CodexRunner(Config(agent={"provider": "codex"}))
+    pi = PromptInput(prompt="x", verifier="pytest", verifier_files=["tests/t.py"])
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    with patch.object(runner_module.subprocess, "run", side_effect=fake_run):
+        runner._run_verifier(tmp_path, pi)
+    assert any("checkout" in c for c in calls), calls
+
+
 def test_external_runner_decodes_subprocess_output_as_utf8(tmp_path: Path):
     config = Config(
         agent={"provider": "hermes"},

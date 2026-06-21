@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import os
 import queue
@@ -537,6 +537,35 @@ class SessionProgressUpdate:
 
 
 SessionProgressCallback = Callable[[SessionProgressUpdate], None]
+
+
+@dataclass(slots=True)
+class VerificationResult:
+    """Outcome of running a task's verifier over the post-edit workspace."""
+    verifier: str
+    passed: bool
+    exit_code: int | None
+    duration_s: float
+    timed_out: bool = False
+    error: str | None = None
+    tests: dict[str, str] = field(default_factory=dict)
+    stdout_tail: str = ""
+    stderr_tail: str = ""
+    seed_repo: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "verifier": self.verifier,
+            "passed": self.passed,
+            "exit_code": self.exit_code,
+            "duration_s": round(self.duration_s, 3),
+            "timed_out": self.timed_out,
+            "error": self.error,
+            "seed_repo": self.seed_repo,
+            "tests": self.tests,
+            "stdout_tail": self.stdout_tail,
+            "stderr_tail": self.stderr_tail,
+        }
 
 
 def _prompt_text_completion_key(prompt: str) -> str:
@@ -1313,6 +1342,119 @@ class DockerRuntimeRunner:
             stdout = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or "")
             details = stderr.strip() or stdout.strip() or str(exc)
             raise RuntimeError(f"Failed to clone seed bundle {bundle}: {details}") from exc
+
+    @staticmethod
+    def _tail(text: str | None, limit: int = 4000) -> str:
+        text = text or ""
+        return text if len(text) <= limit else text[-limit:]
+
+    @staticmethod
+    def _parse_pytest_results(output: str) -> dict[str, str]:
+        """Best-effort per-test pass/fail map from pytest output (metadata only)."""
+        results: dict[str, str] = {}
+        outcomes = "PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS"
+        leading = re.compile(rf"^({outcomes})\s+(\S+)")
+        trailing = re.compile(rf"^(\S+::\S+)\s+({outcomes})\b")
+        for raw_line in (output or "").splitlines():
+            line = raw_line.strip()
+            match = leading.match(line)
+            if match:
+                results[match.group(2)] = match.group(1).lower()
+                continue
+            match = trailing.match(line)
+            if match:
+                results[match.group(1)] = match.group(2).lower()
+        return results
+
+    @staticmethod
+    def _restore_verifier_files(workspace: Path, files: list[str]) -> None:
+        """Restore task-owned verifier files from HEAD so the agent can't tamper the oracle."""
+        for rel in files:
+            subprocess.run(
+                ["git", "-C", str(workspace), "checkout", "HEAD", "--", rel],
+                capture_output=True,
+                check=False,
+                **TEXT_SUBPROCESS_KWARGS,
+            )
+
+    def _build_verifier_command(self, workspace: Path, verifier: str) -> list[str]:
+        return [
+            "docker",
+            "run",
+            "--rm",
+            "--user",
+            RUNTIME_CONTAINER_USER,
+            "-e",
+            "HOME=/home/codex",
+            "-v",
+            f"{workspace}:{WORKSPACE_IN_CONTAINER}",
+            "-w",
+            WORKSPACE_IN_CONTAINER,
+            self.image_name,
+            "bash",
+            "-lc",
+            verifier,
+        ]
+
+    def _run_verifier(
+        self,
+        workspace: Path,
+        prompt_input: PromptInput | None,
+    ) -> VerificationResult | None:
+        """Run the task verifier over the post-edit workspace; reward = exit code 0."""
+        if prompt_input is None or not prompt_input.verifier:
+            return None
+        verifier = prompt_input.verifier
+        if self.config.tasks.restore_verifier_files and prompt_input.verifier_files:
+            self._restore_verifier_files(workspace, prompt_input.verifier_files)
+        command = self._build_verifier_command(workspace, verifier)
+        timeout = self.config.tasks.verifier_timeout_seconds
+        started = time.monotonic()
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+                **TEXT_SUBPROCESS_KWARGS,
+            )
+        except subprocess.TimeoutExpired as exc:
+            # text=True so stdout/stderr are str | None.
+            stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+            stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+            return VerificationResult(
+                verifier=verifier,
+                passed=False,
+                exit_code=None,
+                duration_s=time.monotonic() - started,
+                timed_out=True,
+                error=f"verifier timed out after {timeout}s",
+                tests=self._parse_pytest_results(stdout),
+                stdout_tail=self._tail(stdout),
+                stderr_tail=self._tail(stderr),
+                seed_repo=prompt_input.seed_repo,
+            )
+        except (FileNotFoundError, OSError) as exc:
+            return VerificationResult(
+                verifier=verifier,
+                passed=False,
+                exit_code=None,
+                duration_s=time.monotonic() - started,
+                error=f"failed to launch verifier: {exc}",
+                seed_repo=prompt_input.seed_repo,
+            )
+        stdout = completed.stdout or ""
+        stderr = completed.stderr or ""
+        return VerificationResult(
+            verifier=verifier,
+            passed=completed.returncode == 0,
+            exit_code=completed.returncode,
+            duration_s=time.monotonic() - started,
+            tests=self._parse_pytest_results(stdout),
+            stdout_tail=self._tail(stdout),
+            stderr_tail=self._tail(stderr),
+            seed_repo=prompt_input.seed_repo,
+        )
 
     def _prepare_workspace(
         self,
