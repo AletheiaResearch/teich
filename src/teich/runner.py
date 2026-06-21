@@ -1405,6 +1405,10 @@ class DockerRuntimeRunner:
         if prompt_input is None or not prompt_input.verifier:
             return None
         verifier = prompt_input.verifier
+        # The snapshot is host-owned; the container runs as the unprivileged
+        # `codex` user, so make the tree writable or git checkout / pytest caches
+        # fail with permission errors.
+        _make_tree_world_writable(workspace)
         if self.config.tasks.restore_verifier_files and prompt_input.verifier_files:
             self._restore_verifier_files(workspace, prompt_input.verifier_files)
         command = self._build_verifier_command(workspace, verifier)

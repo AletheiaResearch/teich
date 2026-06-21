@@ -1140,7 +1140,8 @@ prompts_file: prompts.jsonl
 #   # Verifiable bug-fix task (see the tasks: section below):
 #   - prompt: "The tests are failing. Find and fix the bug."
 #     seed_repo: "widgets-bug-01"        # git bundle key / hf:// URI / local .bundle
-#     verifier: "pytest -q"              # reward = exit code 0
+#     # verifier runs in the bare runtime image, so install the repo's deps first:
+#     verifier: "pip install -e . >/dev/null 2>&1 && pytest -q"  # reward = exit code 0
 #     verifier_files: ["tests/test_widgets.py"]  # restored from HEAD before verifying
 prompts: []
 

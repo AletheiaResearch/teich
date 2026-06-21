@@ -341,11 +341,11 @@ Seed an agent in a repository that already contains a planted bug (with real git
 A task is a prompt row with a `seed_repo` and a `verifier`:
 
 ```jsonl
-{"prompt":"The tests are failing. Find and fix the bug.","seed_repo":"widgets-bug-01","verifier":"pytest -q","verifier_files":["tests/test_widgets.py"]}
+{"prompt":"The tests are failing. Find and fix the bug.","seed_repo":"widgets-bug-01","verifier":"pip install -e . >/dev/null 2>&1 && pytest -q","verifier_files":["tests/test_widgets.py"]}
 ```
 
 - **`seed_repo`** is a **git bundle** (`git bundle create REPO.bundle --all`). It can be a bare key resolved against `tasks.seed_dataset` (`widgets-bug-01` → `<dataset>/widgets-bug-01.bundle`), an `hf://datasets/<owner>/<name>/<path>.bundle` URI, or a local `.bundle` path. Teich fetches it (via `huggingface_hub`, cached) and `git clone`s it into the workspace, so the agent gets the repo with full history (`git log`/`blame`/`bisect` work).
-- **`verifier`** runs in the runtime container over the post-edit workspace. **Reward = its exit code** (`0` = pass) — model your test like "a script that exits 0 only when the bug is fixed."
+- **`verifier`** runs in the runtime container over the post-edit workspace. **Reward = its exit code** (`0` = pass) — model your test like "a script that exits 0 only when the bug is fixed." The runtime image ships Python/Node/uv but **not your repo's dependencies**, so install them as part of the command (e.g. `pip install -e . >/dev/null 2>&1 && pytest -q`); a bare `pytest` will exit non-zero and score every task as failed.
 - **`verifier_files`** are restored from the seed's `HEAD` before the verifier runs, so the agent can't tamper with the oracle.
 
 Configure defaults under `tasks`:

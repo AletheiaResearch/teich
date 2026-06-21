@@ -24,7 +24,7 @@ This implements steps 3 + 5 of the target pipeline (an LLM plants a subtle bug +
 - Seed materialization: fetch a `git bundle` (HF dataset key / `hf://` URI / local path) and `git clone` it into the workspace with full history.
 - Verifier: restore `verifier_files` from `HEAD`, run the command over the workspace in the runtime container, capture exit code + stdout/stderr + duration + best-effort pytest per-test breakdown (metadata only), with a timeout.
 - Reward: `passed = (exit_code == 0)`. Timeout / crash / patch-apply failure → `passed = false` (+ reason). The per-test parse is recorded but never gates the reward.
-- Output: route the trace into `output/passed/` or `output/failed/`; write `output/verification/<trace>.json` (full record); append an inline `teich-verification` `custom` event; surface `reward`/`passed` in `teich convert`.
+- Output: route the trace into `output/passed/` or `output/failed/`; write `output/verification/<trace>.json` (full record); surface `reward`/`passed` in `teich convert` (read from the sidecar). (An inline trace event is deferred — see Reward recording.)
 - All Docker agent runners (codex, pi, claude-code, hermes) via shared `DockerRuntimeRunner` helpers. `chat` excluded (no workspace). Behavior is unchanged for rows with no `verifier` (flat output as today).
 
 **Future / v2 (noted, not built):** real `FAIL_TO_PASS`/`PASS_TO_PASS` with a before-run on the buggy seed + a tested per-framework parser (so the transition, not just the after-state, drives a regression-aware reward); fresh-clean-container verifier isolation (apply agent diff onto a clean clone); bug/test generation (pipeline step 2); partial-credit reward.
@@ -65,7 +65,7 @@ New logic on `DockerRuntimeRunner` (shared by all Docker agents).
    - run `docker run --rm -v <workspace>:/workspace -w /workspace <image> bash -lc '<verifier>'`; capture exit/stdout/stderr/duration under `verifier_timeout_seconds`.
    - best-effort parse pytest-style per-test results → `{test_id: passed}` (metadata only; never gates reward).
    - `passed = (exit_code == 0)`. Timeout/crash → `passed=false` with a reason.
-5. **Record** — `VerificationResult` → routing + sidecar + inline event + convert field.
+5. **Record** — `VerificationResult` → sidecar + routing into `passed/`|`failed/`; `convert` reads the sidecar for the reward.
 
 Notes (from review): `output/verification/` joins the `{"partials","failures"}` exclusion set so it's never scanned as trace data. Failed-verifier traces **are** included in uploads (wanted for RL; SFT-only users filter by `passed`). `git clone <bundle> <dest>` requires `dest` to be empty/nonexistent — clone into a fresh subdir of the mkdtemp workspace root, consistent with the existing `github_repo` checkout handling.
 
@@ -89,8 +89,8 @@ seed_repo ─fetch→ bundle ─git clone→ workspace ─agent edits→ workspa
    "tests": {"tests/test_x.py::test_bug": "passed"}, "stdout_tail": "…", "stderr_tail": "…"}
   ```
   (`tests` is best-effort pytest parsing — informational only; `passed` comes solely from `exit_code`.)
-- **Inline:** append a `custom` event `type: "teich-verification"` into the trace.
-- **Convert:** `teich convert` surfaces `reward` (1.0/0.0) and `passed` on each training row.
+- **Convert:** `teich convert` reads the sidecar (handling flat and `passed/`|`failed/` layouts) and adds `reward` (1.0/0.0) and `passed` to each training row.
+- **Inline trace event:** deferred — to avoid mutating native provider traces (codex/claude/hermes JSONL) in a way that's untested against the conversion pipeline, the sidecar is the authoritative reward record in v1. Revisit once the conversion round-trip is exercised.
 
 ## Error handling
 
