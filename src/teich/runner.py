@@ -2006,6 +2006,10 @@ class DockerRuntimeRunner:
 class CodexRunner(DockerRuntimeRunner):
     """Manages Docker-based Codex sessions."""
 
+    def __init__(self, config: Config):
+        self._shared_host_auth_cache: Path | None = None
+        super().__init__(config)
+
     @staticmethod
     def _toml_string(value: str) -> str:
         return json.dumps(value)
@@ -2082,6 +2086,41 @@ class CodexRunner(DockerRuntimeRunner):
         normalized = provider.strip().lower()
         return normalized in {"llama.cpp", "llama_cpp", "llamacpp"}
 
+    def _prepare_shared_host_auth(self) -> Path:
+        """Seed (once) and return the shared project ``auth.json`` snapshot.
+
+        Copies the host Codex login into ``agent.codex.auth_dir`` the first time,
+        and re-seeds only when the host file is newer than the snapshot, so a
+        token that Codex has already rotated in place is never clobbered by a
+        now-stale host file.
+        """
+        source = self.config.get_codex_host_auth_source()
+        if not source.exists():
+            raise RuntimeError(
+                f"Codex host auth file not found: {source}. Run `codex login` on the host "
+                "first, or disable agent.codex.use_host_auth."
+            )
+        shared_dir = self.config.agent.codex.auth_dir
+        shared_dir.mkdir(parents=True, exist_ok=True)
+        # The snapshot holds live credentials; keep it out of version control by
+        # default rather than relying on the user's project .gitignore.
+        gitignore = shared_dir / ".gitignore"
+        if not gitignore.exists():
+            gitignore.write_text("*\n", encoding="utf-8")
+        shared_auth = shared_dir / "auth.json"
+        if not shared_auth.exists() or source.stat().st_mtime > shared_auth.stat().st_mtime:
+            shutil.copyfile(source, shared_auth)
+            shared_auth.chmod(0o666)
+        return shared_auth
+
+    def _ensure_shared_host_auth(self) -> Path | None:
+        """Return the shared ``auth.json`` mount path, preparing it once per run."""
+        if not self.config.agent.codex.use_host_auth:
+            return None
+        if self._shared_host_auth_cache is None:
+            self._shared_host_auth_cache = self._prepare_shared_host_auth()
+        return self._shared_host_auth_cache
+
     def _write_codex_config(self, codex_home: Path) -> None:
         codex_home.mkdir(parents=True, exist_ok=True)
         codex_home.chmod(0o777)
@@ -2093,6 +2132,10 @@ class CodexRunner(DockerRuntimeRunner):
         if self.config.model.reasoning_effort:
             lines.append(
                 f"model_reasoning_effort = {self._toml_string(self.config.model.reasoning_effort)}"
+            )
+        if self.config.model.service_tier:
+            lines.append(
+                f"service_tier = {self._toml_string(self.config.model.service_tier)}"
             )
 
         for mcp in self.config.mcp_servers:
@@ -2263,6 +2306,7 @@ class CodexRunner(DockerRuntimeRunner):
         base_url, proxy_target = self._codex_base_url_and_proxy_target()
         provider_name = self.config.api.provider
         provider_env_key = self._provider_env_key(provider_name)
+        host_auth = self._ensure_shared_host_auth()
         cmd = [
             "docker",
             "run",
@@ -2283,6 +2327,11 @@ class CodexRunner(DockerRuntimeRunner):
             "-w",
             WORKSPACE_IN_CONTAINER,
         ]
+        if host_auth is not None:
+            # Bind-mount the single shared auth.json on top of the per-session
+            # CODEX_HOME so every container shares (and refreshes in place) the
+            # same rotating ChatGPT-subscription token.
+            cmd.extend(["-v", f"{host_auth}:{CODEX_HOME_IN_CONTAINER}/auth.json"])
         if proxy_target or (configured_base_url and base_url != configured_base_url):
             cmd.extend([
                 "--add-host",
@@ -2297,7 +2346,7 @@ class CodexRunner(DockerRuntimeRunner):
                     f"TEICH_LOCAL_PROVIDER_PORT={self._local_provider_default_port(provider_name)}",
                 ]
             )
-        if api_key:
+        if api_key and host_auth is None:
             cmd.extend(["-e", f"{provider_env_key}={api_key}"])
         return cmd, proxy_target
 

@@ -716,6 +716,21 @@ def generate(
     try:
         if agent_provider == "codex":
             runner = CodexRunner(cfg)
+            if cfg.agent.codex.use_host_auth:
+                console.print(
+                    "[yellow]Codex host-auth enabled: using your ChatGPT subscription via "
+                    f"{cfg.get_codex_host_auth_source()}.[/yellow]"
+                )
+                console.print(
+                    "[yellow]Heads up: once Codex refreshes the rotating token, your host Codex login "
+                    "will be invalidated — run `codex login` on the host afterward to restore it.[/yellow]"
+                )
+                if cfg.max_concurrency > 1:
+                    console.print(
+                        f"[yellow]Warning: max_concurrency={cfg.max_concurrency} with host-auth can hit "
+                        "concurrent token-refresh races on long batches (refresh_token_reused). "
+                        "Prefer max_concurrency: 1 for long runs.[/yellow]"
+                    )
         elif agent_provider == "pi":
             runner = PiRunner(cfg)
         elif agent_provider in {"claude", "claude-code", "claude_code"}:
@@ -1021,6 +1036,22 @@ agent:
   # chat = direct text-only dataset generation via an OpenAI-compatible API
   provider: pi
 
+  # Codex-only: use your ChatGPT subscription instead of an API key.
+  # When enabled, Teich copies the host Codex login (defaults to
+  # $CODEX_HOME/auth.json or ~/.codex/auth.json) once into auth_dir and
+  # bind-mounts that single shared file into every Codex container, so all
+  # instances share and refresh the same rotating token instead of fighting
+  # over separate copies.
+  # NOTE: once Codex refreshes the token, your interactive host `codex` login
+  # is invalidated server-side; run `codex login` again afterward to restore it.
+  # auth_dir holds your credentials: Teich keeps it out of output/sandbox/failures
+  # and gitignores it for you. Prefer max_concurrency: 1 for long batches to
+  # avoid concurrent token-refresh races.
+  # codex:
+  #   use_host_auth: true
+  #   host_auth_file: null            # default: $CODEX_HOME/auth.json or ~/.codex/auth.json
+  #   auth_dir: ./.teich/codex-auth
+
 model:
   # Model id passed to the selected agent/provider.
   model: deepseek/deepseek-v4-flash
@@ -1038,6 +1069,12 @@ model:
   # Hermes also enables built-in toolsets:
   # safe,terminal,file,skills,memory,session_search,delegation
   reasoning_effort: medium
+
+  # Optional Codex service tier. Set to "fast" to enable Codex fast mode: it
+  # runs ~1.5x faster at a higher credit rate and requires ChatGPT subscription
+  # auth (agent.codex.use_host_auth) plus a supported model such as gpt-5.5 or
+  # gpt-5.4. Leave null for the standard tier.
+  service_tier: null
 
   # Optional context length override for providers that support it.
   # Useful for Hermes custom endpoints when /v1/models reports a served

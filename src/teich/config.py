@@ -96,9 +96,23 @@ class APIConfig(BaseModel):
     wire_api: str = "responses"
 
 
+class CodexAuthConfig(BaseModel):
+    """Codex ChatGPT-subscription auth handling.
+
+    When ``use_host_auth`` is enabled, Teich seeds a single shared ``auth.json``
+    snapshot under ``auth_dir`` from the host's Codex login and bind-mounts that
+    one file into every Codex container so all instances share (and refresh) the
+    same rotating OAuth token instead of fighting over independent copies.
+    """
+    use_host_auth: bool = False
+    host_auth_file: Path | None = None
+    auth_dir: Path = Field(default=Path("./.teich/codex-auth"))
+
+
 class AgentConfig(BaseModel):
     """Agent runtime selection."""
     provider: str = "codex"
+    codex: CodexAuthConfig = Field(default_factory=CodexAuthConfig)
 
 
 class ModelConfig(BaseModel):
@@ -107,6 +121,7 @@ class ModelConfig(BaseModel):
     approval_policy: str = "never"
     sandbox: str = "danger-full-access"
     reasoning_effort: str | None = None
+    service_tier: str | None = None
     context_length: int | None = None
     approval_mode: str | None = "none"
     pi_model_overrides: dict[str, object] = Field(default_factory=lambda: {"maxTokens": 131072})
@@ -242,6 +257,26 @@ class Config(BaseModel):
             raise ValueError(f"Prompts file not found: {v}")
         return v
 
+    @model_validator(mode="after")
+    def validate_codex_auth_dir(self) -> Config:
+        """Keep the Codex auth snapshot out of uploaded output directories."""
+        codex = self.agent.codex
+        if not codex.use_host_auth:
+            return self
+        auth_dir = codex.auth_dir.resolve()
+        for label, output_dir in (
+            ("traces_dir", self.output.traces_dir),
+            ("sandbox_dir", self.output.sandbox_dir),
+            ("failures_dir", self.output.failures_dir),
+        ):
+            if auth_dir.is_relative_to(output_dir.resolve()):
+                raise ValueError(
+                    f"agent.codex.auth_dir ({codex.auth_dir}) must not be inside "
+                    f"output.{label} ({output_dir}); it holds your Codex credentials "
+                    "and output directories are uploaded to Hugging Face."
+                )
+        return self
+
     @classmethod
     def from_yaml(cls, path: Path) -> Config:
         """Load config from YAML file.
@@ -310,6 +345,19 @@ class Config(BaseModel):
     def get_agent_provider(self) -> str:
         """Get active agent provider."""
         return self.agent.provider.strip().lower() or "codex"
+
+    def get_codex_host_auth_source(self) -> Path:
+        """Resolve the host Codex auth file to seed the shared snapshot from.
+
+        Honors an explicit ``host_auth_file`` override, then ``$CODEX_HOME``,
+        and finally the default ``~/.codex/auth.json``.
+        """
+        override = self.agent.codex.host_auth_file
+        if override is not None:
+            return Path(override).expanduser()
+        codex_home = os.environ.get("CODEX_HOME")
+        base = Path(codex_home).expanduser() if codex_home else Path.home() / ".codex"
+        return base / "auth.json"
 
     def get_dataset_tags(self) -> list[str]:
         """Get auto-generated dataset tags for README frontmatter and uploads."""
