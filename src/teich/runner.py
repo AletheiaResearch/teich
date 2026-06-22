@@ -63,9 +63,6 @@ CLAUDE_LANGFUSE_PLUGIN_DIR = "/opt/claude-langfuse-plugin"
 CLAUDE_LANGFUSE_HOOK_COMMAND = (
     f"/opt/venv/bin/python3 {CLAUDE_LANGFUSE_PLUGIN_DIR}/hooks/langfuse_hook.py"
 )
-
-# Bundled in Hermes but disabled by default; Teich enables it via config.yaml.
-HERMES_LANGFUSE_PLUGIN_ID = "observability/langfuse"
 PI_AGENT_DIR_IN_CONTAINER = "/home/codex/.pi/agent"
 PI_SESSIONS_DIR_IN_CONTAINER = "/home/codex/pi-sessions"
 WORKSPACE_IN_CONTAINER = "/workspace"
@@ -3763,28 +3760,6 @@ class HermesRunner(ExternalCliRunner):
     source_name = "hermes-agent"
     default_model_provider = "hermes"
 
-    def _langfuse_env_items(self) -> list[tuple[str, str]]:
-        langfuse = self.config.agent.langfuse
-        if not langfuse.enabled:
-            return []
-        return [
-            ("HERMES_LANGFUSE_PUBLIC_KEY", langfuse.public_key or ""),
-            ("HERMES_LANGFUSE_SECRET_KEY", langfuse.secret_key or ""),
-            ("HERMES_LANGFUSE_BASE_URL", self._container_base_url(langfuse.base_url) or ""),
-        ]
-
-    def _prepare_agent_home(self, home_dir: Path) -> None:
-        """Enable the bundled langfuse plugin (read only because
-        _build_shell_command drops --ignore-user-config when tracing is on)."""
-        if not self.config.agent.langfuse.enabled:
-            return
-        config_path = home_dir / "config.yaml"
-        config_path.write_text(
-            f"plugins:\n  enabled:\n    - {HERMES_LANGFUSE_PLUGIN_ID}\n",
-            encoding="utf-8",
-        )
-        config_path.chmod(0o666)
-
     def _hermes_cli_provider(self) -> str:
         provider = self.config.api.provider.strip().lower()
         if self.config.get_base_url() and provider in {"openai", "custom"}:
@@ -3809,14 +3784,10 @@ class HermesRunner(ExternalCliRunner):
             HERMES_DEFAULT_TOOLSETS,
             "--quiet",
             "--yolo",
+            "--ignore-user-config",
             "--source",
             "teich",
         ]
-        # --ignore-user-config would hide the config.yaml that enables the
-        # langfuse plugin, so drop it when tracing is on (model/provider still
-        # come from the flags above).
-        if not self.config.agent.langfuse.enabled:
-            hermes_command.insert(-2, "--ignore-user-config")
         if continue_session:
             hermes_command.append("--continue")
         return f"{shlex.join(hermes_command)} -q \"$(cat {prompt_path})\""
@@ -3889,14 +3860,10 @@ class HermesRunner(ExternalCliRunner):
         if api_key:
             custom_provider["api_key"] = api_key
             model_config["api_key"] = api_key
-        hermes_config: dict[str, object] = {
+        hermes_config = {
             "model": model_config,
             "custom_providers": [custom_provider],
         }
-        # This file replaces the one _prepare_agent_home writes, so re-add the
-        # langfuse plugin here or custom-provider runs would lose tracing.
-        if self.config.agent.langfuse.enabled:
-            hermes_config["plugins"] = {"enabled": [HERMES_LANGFUSE_PLUGIN_ID]}
         (home_dir / "config.yaml").write_text(json.dumps(hermes_config, indent=2), encoding="utf-8")
 
     def _write_agents_md(self, workspace: Path) -> None:

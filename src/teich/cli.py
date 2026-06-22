@@ -741,11 +741,6 @@ def generate(
                 )
         elif agent_provider in {"hermes", "hermes-agent", "hermes_agent"}:
             runner = HermesRunner(cfg)
-            if cfg.agent.langfuse.enabled:
-                console.print(
-                    "[cyan]Hermes Langfuse tracing enabled: uploading each session to "
-                    f"{cfg.agent.langfuse.base_url}.[/cyan]"
-                )
         elif agent_provider == "chat":
             runner = ChatRunner(cfg)
         else:
@@ -1062,13 +1057,13 @@ agent:
   #   host_auth_file: null            # default: $CODEX_HOME/auth.json or ~/.codex/auth.json
   #   auth_dir: ./.teich/codex-auth
 
-  # Trace each agent session to Langfuse (https://langfuse.com). Works for Codex,
-  # Claude Code, and Hermes -- each uses its own native integration (Codex plugin,
-  # Claude Code Stop hook, Hermes observability/langfuse plugin) and Teich passes
-  # the credentials into the container. Side-channel only: it reads transcripts,
-  # fails open, and doesn't change agent behavior or Teich's output files. All
-  # four fields are required when enabled. base_url may be Langfuse Cloud or a
-  # self-hosted URL; for a host-local instance use http://host.docker.internal:<port>.
+  # Trace each agent session to Langfuse (https://langfuse.com). Works for Codex
+  # and Claude Code -- each uses its own native integration (Codex plugin, Claude
+  # Code Stop hook) and Teich passes the credentials into the container. Side-
+  # channel only: it reads transcripts, fails open, and doesn't change agent
+  # behavior or Teich's output files. All three credentials are required when
+  # enabled. base_url may be Langfuse Cloud or a self-hosted URL; for a host-local
+  # instance use http://host.docker.internal:<port>.
   # (Codex can override this with its own agent.codex.langfuse block.)
   # langfuse:
   #   enabled: true

@@ -1,17 +1,18 @@
-"""Tests for shared Langfuse config + Claude Code and Hermes tracing wiring.
+"""Tests for the shared Langfuse config + Claude Code tracing wiring.
 
 Hermetic: no Docker, network, or real Langfuse.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from teich.config import Config, LangfuseConfig, ModelConfig
-from teich.runner import ClaudeCodeRunner, HermesRunner
+from teich.runner import ClaudeCodeRunner
 
 
 # -- shared config -----------------------------------------------------------
@@ -61,16 +62,16 @@ def test_effective_langfuse_falls_back_to_shared_when_codex_disabled():
 
 # -- Claude Code env items ---------------------------------------------------
 
-def _shared_langfuse_config(provider: str) -> Config:
+def _claude_langfuse_config(base_url: str = "https://langfuse.example.com") -> Config:
     return Config(
         model=ModelConfig(model="claude-sonnet-4-6"),
         agent={
-            "provider": provider,
+            "provider": "claude-code",
             "langfuse": {
                 "enabled": True,
                 "public_key": "pk-lf-1",
                 "secret_key": "sk-lf-2",
-                "base_url": "https://langfuse.example.com",
+                "base_url": base_url,
             },
         },
     )
@@ -78,7 +79,7 @@ def _shared_langfuse_config(provider: str) -> Config:
 
 def test_claude_langfuse_env_items_when_enabled():
     with patch.object(ClaudeCodeRunner, "_ensure_image"):
-        runner = ClaudeCodeRunner(_shared_langfuse_config("claude-code"))
+        runner = ClaudeCodeRunner(_claude_langfuse_config())
     items = dict(runner._langfuse_env_items())
     assert items["TRACE_TO_LANGFUSE"] == "true"
     assert items["LANGFUSE_PUBLIC_KEY"] == "pk-lf-1"
@@ -92,33 +93,15 @@ def test_claude_langfuse_env_items_empty_when_disabled():
     assert runner._langfuse_env_items() == []
 
 
-# -- Hermes env items --------------------------------------------------------
-
-def test_hermes_langfuse_env_items_when_enabled():
-    with patch.object(HermesRunner, "_ensure_image"):
-        runner = HermesRunner(_shared_langfuse_config("hermes"))
-    items = dict(runner._langfuse_env_items())
-    assert items["HERMES_LANGFUSE_PUBLIC_KEY"] == "pk-lf-1"
-    assert items["HERMES_LANGFUSE_SECRET_KEY"] == "sk-lf-2"
-    assert items["HERMES_LANGFUSE_BASE_URL"] == "https://langfuse.example.com"
-
-
-def test_hermes_langfuse_env_items_empty_when_disabled():
-    with patch.object(HermesRunner, "_ensure_image"):
-        runner = HermesRunner(Config(model=ModelConfig(model="hermes-4")))
-    assert runner._langfuse_env_items() == []
-
-
 # -- Claude settings.json hook -----------------------------------------------
 
 def test_claude_prepare_home_writes_stop_hook(tmp_path: Path):
     with patch.object(ClaudeCodeRunner, "_ensure_image"):
-        runner = ClaudeCodeRunner(_shared_langfuse_config("claude-code"))
+        runner = ClaudeCodeRunner(_claude_langfuse_config())
     home = tmp_path / "home"
     home.mkdir()
     runner._prepare_agent_home(home)
-    import json as _json
-    settings = _json.loads((home / "settings.json").read_text())
+    settings = json.loads((home / "settings.json").read_text())
     cmd = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
     # Must use the venv python by absolute path (claude sanitizes PATH for hooks).
     assert cmd.startswith("/opt/venv/bin/python3 ")
@@ -134,127 +117,19 @@ def test_claude_prepare_home_noop_when_disabled(tmp_path: Path):
     assert not (home / "settings.json").exists()
 
 
-# -- Hermes plugin config ----------------------------------------------------
-
-def test_hermes_prepare_home_writes_plugin_config(tmp_path: Path):
-    with patch.object(HermesRunner, "_ensure_image"):
-        runner = HermesRunner(_shared_langfuse_config("hermes"))
-    home = tmp_path / "home"
-    home.mkdir()
-    runner._prepare_agent_home(home)
-    text = (home / "config.yaml").read_text()
-    assert "observability/langfuse" in text
-    assert "plugins" in text
-
-
-def test_hermes_prepare_home_noop_when_disabled(tmp_path: Path):
-    with patch.object(HermesRunner, "_ensure_image"):
-        runner = HermesRunner(Config(model=ModelConfig(model="hermes-4")))
-    home = tmp_path / "home"
-    home.mkdir()
-    runner._prepare_agent_home(home)
-    assert not (home / "config.yaml").exists()
-
-
-def test_hermes_shell_drops_ignore_user_config_when_langfuse_enabled():
-    with patch.object(HermesRunner, "_ensure_image"):
-        runner = HermesRunner(_shared_langfuse_config("hermes"))
-    shell = runner._build_shell_command()
-    assert "--ignore-user-config" not in shell
-
-
-def test_hermes_shell_keeps_ignore_user_config_when_disabled():
-    with patch.object(HermesRunner, "_ensure_image"):
-        runner = HermesRunner(Config(model=ModelConfig(model="hermes-4")))
-    shell = runner._build_shell_command()
-    assert "--ignore-user-config" in shell
-
-
 # -- host-local base_url rewriting -------------------------------------------
-
-def _localhost_langfuse_config(provider: str) -> Config:
-    return Config(
-        model=ModelConfig(model="m"),
-        agent={
-            "provider": provider,
-            "langfuse": {
-                "enabled": True,
-                "public_key": "pk",
-                "secret_key": "sk",
-                "base_url": "http://localhost:3000",
-            },
-        },
-    )
-
 
 def test_claude_langfuse_base_url_rewrites_localhost():
     with patch.object(ClaudeCodeRunner, "_ensure_image"):
-        runner = ClaudeCodeRunner(_localhost_langfuse_config("claude-code"))
+        runner = ClaudeCodeRunner(_claude_langfuse_config(base_url="http://localhost:3000"))
     items = dict(runner._langfuse_env_items())
     assert items["LANGFUSE_BASE_URL"] == "http://host.docker.internal:3000"
     assert runner._langfuse_host_local() is True
 
 
-def test_hermes_langfuse_base_url_rewrites_localhost():
-    with patch.object(HermesRunner, "_ensure_image"):
-        runner = HermesRunner(_localhost_langfuse_config("hermes"))
-    items = dict(runner._langfuse_env_items())
-    assert items["HERMES_LANGFUSE_BASE_URL"] == "http://host.docker.internal:3000"
-    assert runner._langfuse_host_local() is True
-
-
 def test_cloud_base_url_is_not_rewritten():
     with patch.object(ClaudeCodeRunner, "_ensure_image"):
-        runner = ClaudeCodeRunner(_shared_langfuse_config("claude-code"))
+        runner = ClaudeCodeRunner(_claude_langfuse_config())
     items = dict(runner._langfuse_env_items())
     assert items["LANGFUSE_BASE_URL"] == "https://langfuse.example.com"
     assert runner._langfuse_host_local() is False
-
-
-# -- Hermes custom-provider config keeps the plugin --------------------------
-
-def test_hermes_runtime_config_keeps_plugin_in_custom_mode(tmp_path: Path):
-    import json
-
-    from teich.config import APIConfig
-
-    cfg = Config(
-        model=ModelConfig(model="m"),
-        api=APIConfig(provider="openai", base_url="http://localhost:1234/v1", api_key="sk-x"),
-        agent={
-            "provider": "hermes",
-            "langfuse": {
-                "enabled": True,
-                "public_key": "pk",
-                "secret_key": "sk",
-                "base_url": "https://langfuse.example.com",
-            },
-        },
-    )
-    with patch.object(HermesRunner, "_ensure_image"):
-        runner = HermesRunner(cfg)
-    assert runner._hermes_cli_provider() == "custom"  # the overwrite path
-    home = tmp_path / "h"
-    home.mkdir()
-    runner._write_hermes_runtime_config(home)
-    data = json.loads((home / "config.yaml").read_text())
-    assert data["plugins"]["enabled"] == ["observability/langfuse"]
-
-
-def test_hermes_runtime_config_omits_plugin_when_disabled(tmp_path: Path):
-    import json
-
-    from teich.config import APIConfig
-
-    cfg = Config(
-        model=ModelConfig(model="m"),
-        api=APIConfig(provider="openai", base_url="http://localhost:1234/v1", api_key="sk-x"),
-        agent={"provider": "hermes"},
-    )
-    with patch.object(HermesRunner, "_ensure_image"):
-        runner = HermesRunner(cfg)
-    home = tmp_path / "h"
-    home.mkdir()
-    runner._write_hermes_runtime_config(home)
-    data = json.loads((home / "config.yaml").read_text())
-    assert "plugins" not in data
