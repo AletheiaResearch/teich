@@ -2010,6 +2010,7 @@ class CodexRunner(DockerRuntimeRunner):
 
     def __init__(self, config: Config):
         self._broker: CodexTokenBroker | None = None
+        self._broker_lock = threading.Lock()
         super().__init__(config)
 
     @staticmethod
@@ -2125,14 +2126,18 @@ class CodexRunner(DockerRuntimeRunner):
         """
         if not self.config.agent.codex.use_host_auth:
             return None
+        # run_all drives sessions from a thread pool, so guard creation: only one
+        # thread may build+start the single shared broker (double-checked lock).
         if self._broker is None:
-            shared_auth = self._prepare_shared_host_auth()
-            broker = CodexTokenBroker(
-                shared_auth,
-                port=self.config.agent.codex.broker_port,
-            )
-            broker.start()
-            self._broker = broker
+            with self._broker_lock:
+                if self._broker is None:
+                    shared_auth = self._prepare_shared_host_auth()
+                    broker = CodexTokenBroker(
+                        shared_auth,
+                        port=self.config.agent.codex.broker_port,
+                    )
+                    broker.start()
+                    self._broker = broker
         return self._broker
 
     def _write_seeded_codex_auth(self, codex_home: Path, broker: CodexTokenBroker) -> None:
@@ -2142,6 +2147,10 @@ class CodexRunner(DockerRuntimeRunner):
             json.dumps(broker.seed_auth_json(), indent=2) + "\n",
             encoding="utf-8",
         )
+        # 0o666 (matching _write_codex_config's config.toml) so the in-container
+        # `codex` user can read/rewrite the bind-mounted file regardless of how
+        # its uid maps to the host. This copy holds only a short-lived access
+        # token and the per-run broker secret -- never the real refresh token.
         auth_path.chmod(0o666)
 
     def _write_codex_config(self, codex_home: Path) -> None:

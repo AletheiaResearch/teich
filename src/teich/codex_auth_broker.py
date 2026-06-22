@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import secrets
 import threading
 import time
@@ -41,6 +42,10 @@ ROTATE_WINDOW_SECONDS = 6 * 60
 
 REFRESH_PATH = "/oauth/token"
 
+# A refresh request body is tiny; cap reads so a bogus Content-Length can't
+# exhaust memory (the broker listens on 0.0.0.0).
+MAX_REQUEST_BYTES = 64 * 1024
+
 
 def _decode_jwt_exp(token: str) -> int | None:
     """Return the ``exp`` claim (unix seconds) from a JWT without verifying it."""
@@ -50,12 +55,18 @@ def _decode_jwt_exp(token: str) -> int | None:
     payload = parts[1]
     padding = "=" * (-len(payload) % 4)
     try:
+        # binascii.Error (malformed base64) is a subclass of ValueError.
         decoded = base64.urlsafe_b64decode(payload + padding)
         claims = json.loads(decoded)
     except (ValueError, json.JSONDecodeError):
         return None
     exp = claims.get("exp") if isinstance(claims, dict) else None
-    return int(exp) if isinstance(exp, (int, float)) and not isinstance(exp, bool) else None
+    if isinstance(exp, bool) or not isinstance(exp, (int, float)):
+        return None
+    try:
+        return int(exp)  # int(float("inf")) / NaN raise OverflowError/ValueError
+    except (OverflowError, ValueError):
+        return None
 
 
 def _utc_now_iso() -> str:
@@ -222,9 +233,16 @@ class CodexTokenBroker:
             raise _UpstreamRefreshError(
                 502, {"error": {"message": "refresh upstream returned a non-object body"}}
             )
+        new_access = payload.get("access_token")
+        if not isinstance(new_access, str) or not new_access:
+            raise _UpstreamRefreshError(
+                502, {"error": {"message": "refresh upstream returned no access_token"}}
+            )
+        # Only persist after the response validates, and only string fields, so a
+        # malformed 2xx body can never overwrite good token state with junk.
         for field in ("id_token", "access_token", "refresh_token"):
             value = payload.get(field)
-            if value:
+            if isinstance(value, str) and value:
                 tokens[field] = value
         self._auth["tokens"] = tokens
         self._auth["last_refresh"] = _utc_now_iso()
@@ -247,20 +265,29 @@ class CodexTokenBroker:
     def _persist(self) -> None:
         path = self._auth_json_path
         tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps(self._auth, indent=2) + "\n", encoding="utf-8")
-        tmp.replace(path)
+        data = json.dumps(self._auth, indent=2) + "\n"
+        # Create the temp file owner-only (0o600) at creation time so the
+        # secret-bearing file is never momentarily readable by other users.
+        # os.replace preserves the source's permissions onto the final path.
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
-            path.chmod(0o600)
-        except OSError:
-            pass
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(data)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+        tmp.replace(path)
 
     @staticmethod
     def _validate_chatgpt_auth(auth: dict[str, Any]) -> None:
         tokens = auth.get("tokens")
+        access_token = tokens.get("access_token") if isinstance(tokens, dict) else None
+        refresh_token = tokens.get("refresh_token") if isinstance(tokens, dict) else None
         if (
-            not isinstance(tokens, dict)
-            or not tokens.get("refresh_token")
-            or not tokens.get("access_token")
+            not isinstance(access_token, str)
+            or not access_token
+            or not isinstance(refresh_token, str)
+            or not refresh_token
         ):
             raise RuntimeError(
                 "Codex host auth is not a ChatGPT login (auth.json has no "
@@ -293,7 +320,17 @@ class _BrokerHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_POST(self) -> None:
-        length = int(self.headers.get("Content-Length") or 0)
+        if self.path.split("?", 1)[0].rstrip("/") != REFRESH_PATH:
+            self._write_json(404, {"error": {"message": "not found"}})
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self._write_json(400, {"error": {"message": "invalid Content-Length"}})
+            return
+        if length < 0 or length > MAX_REQUEST_BYTES:
+            self._write_json(413, {"error": {"message": "request body too large"}})
+            return
         raw = self.rfile.read(length) if length else b""
         try:
             body = json.loads(raw.decode("utf-8")) if raw else {}

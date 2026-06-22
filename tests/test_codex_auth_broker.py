@@ -166,6 +166,7 @@ def test_concurrent_refresh_is_single_flight(tmp_path, upstream):
     for t in threads:
         t.join()
 
+    assert len(results) == 6  # every worker completed and recorded a result
     assert len(server.calls) == 1  # only one real rotation
     assert all(status == 200 for status, _ in results)
     tokens_returned = {payload["access_token"] for _, payload in results}

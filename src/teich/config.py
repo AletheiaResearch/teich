@@ -113,7 +113,7 @@ class CodexAuthConfig(BaseModel):
     host_auth_file: Path | None = None
     auth_dir: Path = Field(default=Path("./.teich/codex-auth"))
     # Port for the host-side token broker. 0 = pick an ephemeral free port.
-    broker_port: int = 0
+    broker_port: int = Field(default=0, ge=0, le=65535)
 
 
 class AgentConfig(BaseModel):
