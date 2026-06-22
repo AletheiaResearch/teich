@@ -59,6 +59,16 @@ RUN HOME=/opt/codex-langfuse CODEX_HOME=/opt/codex-langfuse/.codex \
       && codex plugin add tracing@codex-observability-plugin \
       && chmod -R a+rX /opt/codex-langfuse'
 
+# Langfuse SDK for the Claude and Hermes integrations. Claude runs its hook with
+# /opt/venv's python (PATH is stripped, so it's called by full path); Hermes's
+# bundled observability/langfuse plugin imports the SDK from its own venv. The
+# Claude hook script is cloned in at HEAD.
+RUN /opt/venv/bin/pip install --no-cache-dir "langfuse>=4.0,<5" && \
+    uv pip install --python /usr/local/lib/hermes-agent/venv/bin/python "langfuse>=4.0,<5" && \
+    git clone --depth 1 https://github.com/langfuse/Claude-Observability-Plugin.git \
+        /opt/claude-langfuse-plugin && \
+    chmod -R a+rX /opt/claude-langfuse-plugin
+
 # Create working directory and user in one layer
 WORKDIR /workspace
 RUN useradd -m -s /bin/bash codex && \

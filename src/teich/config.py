@@ -96,15 +96,15 @@ class APIConfig(BaseModel):
     wire_api: str = "responses"
 
 
-class CodexLangfuseConfig(BaseModel):
-    """Langfuse tracing for Codex sessions via the codex-observability-plugin.
+class LangfuseConfig(BaseModel):
+    """Langfuse tracing credentials, shared across agents.
 
-    When enabled, Teich installs the (image-baked) Langfuse Codex plugin into
-    each container's ``CODEX_HOME``, enables it in ``config.toml``, and passes the
-    Langfuse credentials as environment variables. The plugin's ``Stop`` hook
-    uploads each completed session transcript to Langfuse. It is side-channel
-    only -- it reads transcripts, fails open, and does not change Codex tool
-    behavior or Teich's output files.
+    When enabled, Teich wires the agent's Langfuse integration (Codex plugin,
+    Claude Code Stop hook, or the Hermes ``observability/langfuse`` plugin) and
+    passes these credentials into the container. Tracing is side-channel only --
+    it reads transcripts, fails open, and does not change agent tool behavior or
+    Teich's output files. Set under ``agent.langfuse`` (all agents) or, for
+    Codex only, ``agent.codex.langfuse`` (which overrides the shared block).
     """
     enabled: bool = False
     public_key: str | None = None
@@ -112,7 +112,7 @@ class CodexLangfuseConfig(BaseModel):
     base_url: str | None = None
 
     @model_validator(mode="after")
-    def require_credentials_when_enabled(self) -> CodexLangfuseConfig:
+    def require_credentials_when_enabled(self) -> LangfuseConfig:
         if self.enabled:
             missing = [
                 name
@@ -125,11 +125,13 @@ class CodexLangfuseConfig(BaseModel):
             ]
             if missing:
                 raise ValueError(
-                    "agent.codex.langfuse requires "
-                    + ", ".join(missing)
-                    + " when enabled"
+                    "langfuse requires " + ", ".join(missing) + " when enabled"
                 )
         return self
+
+
+# Back-compat alias for the Codex-era name.
+CodexLangfuseConfig = LangfuseConfig
 
 
 class CodexAuthConfig(BaseModel):
@@ -150,13 +152,23 @@ class CodexAuthConfig(BaseModel):
     auth_dir: Path = Field(default=Path("./.teich/codex-auth"))
     # Port for the host-side token broker. 0 = pick an ephemeral free port.
     broker_port: int = Field(default=0, ge=0, le=65535)
-    langfuse: CodexLangfuseConfig = Field(default_factory=CodexLangfuseConfig)
+    # Codex-only Langfuse override; falls back to the shared agent.langfuse.
+    langfuse: LangfuseConfig = Field(default_factory=LangfuseConfig)
 
 
 class AgentConfig(BaseModel):
     """Agent runtime selection."""
     provider: str = "codex"
     codex: CodexAuthConfig = Field(default_factory=CodexAuthConfig)
+    # Shared Langfuse config applied to every agent that supports tracing.
+    langfuse: LangfuseConfig = Field(default_factory=LangfuseConfig)
+
+    @property
+    def effective_langfuse(self) -> LangfuseConfig:
+        """Codex honors its own block when enabled, else the shared one."""
+        if self.codex.langfuse.enabled:
+            return self.codex.langfuse
+        return self.langfuse
 
 
 class ModelConfig(BaseModel):
