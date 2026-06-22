@@ -533,6 +533,13 @@ def test_resolve_seed_reference_bare_key_without_dataset_errors():
         Config().resolve_seed_reference("widgets-bug-01")
 
 
+def test_seed_dataset_blank_treated_as_unset():
+    config = Config(tasks={"seed_dataset": "   "})
+    assert config.tasks.seed_dataset is None
+    with pytest.raises(ValueError, match="seed_dataset is not set"):
+        config.resolve_seed_reference("widgets-bug-01")
+
+
 def test_resolve_seed_reference_local_paths():
     config = Config()
     for value in ("./x.bundle", "sub/x.bundle", "/abs/x.bundle", "x.bundle"):

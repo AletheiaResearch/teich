@@ -1368,14 +1368,30 @@ class DockerRuntimeRunner:
 
     @staticmethod
     def _restore_verifier_files(workspace: Path, files: list[str]) -> None:
-        """Restore task-owned verifier files from HEAD so the agent can't tamper the oracle."""
+        """Make each verifier file match the seed ``HEAD`` so the agent can't tamper the oracle.
+
+        Tracked files are restored from ``HEAD`` (a failure there is a real error and is
+        raised); files absent from ``HEAD`` are agent-added and removed. The caller
+        treats a raised failure as a failed verification rather than a silent pass.
+        """
         for rel in files:
-            subprocess.run(
-                ["git", "-C", str(workspace), "checkout", "HEAD", "--", rel],
+            tracked = subprocess.run(
+                ["git", "-C", str(workspace), "cat-file", "-e", f"HEAD:{rel}"],
                 capture_output=True,
                 check=False,
                 **TEXT_SUBPROCESS_KWARGS,
-            )
+            ).returncode == 0
+            if tracked:
+                subprocess.run(
+                    ["git", "-C", str(workspace), "checkout", "HEAD", "--", rel],
+                    capture_output=True,
+                    check=True,
+                    **TEXT_SUBPROCESS_KWARGS,
+                )
+            else:
+                target = workspace / rel
+                if target.is_file():
+                    target.unlink()
 
     def _build_verifier_command(self, workspace: Path, verifier: str) -> list[str]:
         return [
@@ -1410,7 +1426,17 @@ class DockerRuntimeRunner:
         # fail with permission errors.
         _make_tree_world_writable(workspace)
         if self.config.tasks.restore_verifier_files and prompt_input.verifier_files:
-            self._restore_verifier_files(workspace, prompt_input.verifier_files)
+            try:
+                self._restore_verifier_files(workspace, prompt_input.verifier_files)
+            except (subprocess.CalledProcessError, OSError) as exc:
+                return VerificationResult(
+                    verifier=verifier,
+                    passed=False,
+                    exit_code=None,
+                    duration_s=0.0,
+                    error=f"failed to restore verifier files: {exc}",
+                    seed_repo=prompt_input.seed_repo,
+                )
         command = self._build_verifier_command(workspace, verifier)
         timeout = self.config.tasks.verifier_timeout_seconds
         started = time.monotonic()
@@ -1475,14 +1501,18 @@ class DockerRuntimeRunner:
             raise RuntimeError(
                 "Prompt image inputs are not supported yet. Leave the image column blank or set it to None."
             )
-        if prompt_input.seed_repo:
-            reference = self.config.resolve_seed_reference(prompt_input.seed_repo)
-            bundle = self._fetch_seed_bundle(reference, prompt_input.seed_repo)
-            workspace = workspace_root / self._seed_checkout_name(reference, prompt_input.seed_repo)
-            self._clone_seed_bundle(bundle, workspace)
-        elif prompt_input.github_repo:
-            workspace = workspace_root / self._github_repo_checkout_name(prompt_input.github_repo)
-            self._clone_github_repo(prompt_input.github_repo, workspace)
+        try:
+            if prompt_input.seed_repo:
+                reference = self.config.resolve_seed_reference(prompt_input.seed_repo)
+                bundle = self._fetch_seed_bundle(reference, prompt_input.seed_repo)
+                workspace = workspace_root / self._seed_checkout_name(reference, prompt_input.seed_repo)
+                self._clone_seed_bundle(bundle, workspace)
+            elif prompt_input.github_repo:
+                workspace = workspace_root / self._github_repo_checkout_name(prompt_input.github_repo)
+                self._clone_github_repo(prompt_input.github_repo, workspace)
+        except BaseException:
+            shutil.rmtree(workspace_root, ignore_errors=True)
+            raise
         return workspace_root, workspace
 
     def _sandbox_destination(self, trace_path: Path) -> Path:

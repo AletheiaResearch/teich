@@ -1861,19 +1861,49 @@ def test_run_verifier_timeout(tmp_path: Path):
     assert result.exit_code is None
 
 
-def test_run_verifier_restores_verifier_files(tmp_path: Path):
+def test_restore_verifier_files_restores_tracked_and_removes_added(tmp_path: Path):
+    ws = tmp_path / "ws"
+    (ws / "tests").mkdir(parents=True)
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e.st",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e.st"}
+    (ws / "tests" / "oracle.py").write_text("ORIGINAL\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(ws)], check=True)
+    subprocess.run(["git", "-C", str(ws), "add", "-A"], check=True, env=env)
+    subprocess.run(["git", "-C", str(ws), "commit", "-q", "-m", "init"], check=True, env=env)
+    # Agent tampers the oracle and adds a rogue oracle file.
+    (ws / "tests" / "oracle.py").write_text("TAMPERED\n", encoding="utf-8")
+    (ws / "agent_added.py").write_text("print('evil')\n", encoding="utf-8")
+    DockerRuntimeRunner._restore_verifier_files(ws, ["tests/oracle.py", "agent_added.py"])
+    assert (ws / "tests" / "oracle.py").read_text(encoding="utf-8") == "ORIGINAL\n"
+    assert not (ws / "agent_added.py").exists()
+
+
+def test_run_verifier_records_restore_failure(tmp_path: Path):
     with patch.object(CodexRunner, "_ensure_image"):
         runner = CodexRunner(Config(agent={"provider": "codex"}))
     pi = PromptInput(prompt="x", verifier="pytest", verifier_files=["tests/t.py"])
-    calls: list[list[str]] = []
+    with patch.object(runner, "_restore_verifier_files", side_effect=subprocess.CalledProcessError(1, "git")):
+        result = runner._run_verifier(tmp_path, pi)
+    assert result.passed is False
+    assert "restore" in (result.error or "")
 
-    def fake_run(cmd, *args, **kwargs):
-        calls.append(cmd)
-        return subprocess.CompletedProcess(cmd, 0, "", "")
 
-    with patch.object(runner_module.subprocess, "run", side_effect=fake_run):
-        runner._run_verifier(tmp_path, pi)
-    assert any("checkout" in c for c in calls), calls
+def test_prepare_workspace_cleans_up_on_seed_failure(tmp_path: Path, monkeypatch):
+    with patch.object(CodexRunner, "_ensure_image"):
+        runner = CodexRunner(Config(agent={"provider": "codex"}))
+    created: list[str] = []
+    real_mkdtemp = runner_module.tempfile.mkdtemp
+
+    def spy_mkdtemp(*args, **kwargs):
+        path = real_mkdtemp(*args, **kwargs)
+        created.append(path)
+        return path
+
+    monkeypatch.setattr(runner_module.tempfile, "mkdtemp", spy_mkdtemp)
+    pi = PromptInput(prompt="x", seed_repo=str(tmp_path / "missing.bundle"))
+    with pytest.raises(RuntimeError, match="Seed bundle not found"):
+        runner._prepare_workspace("seed-sess", pi, "codex")
+    assert created and not Path(created[0]).exists()
 
 
 def _verifier_runner(tmp_path: Path, route: bool = True):

@@ -173,6 +173,17 @@ class TasksConfig(BaseModel):
     restore_verifier_files: bool = True
     route_by_result: bool = True
 
+    @field_validator("seed_dataset", mode="before")
+    @classmethod
+    def normalize_seed_dataset(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        text = value if isinstance(value, str) else str(value)
+        normalized = text.strip()
+        if not normalized or normalized.lower() == "none":
+            return None
+        return normalized
+
 
 class SeedReference(NamedTuple):
     """Resolved location of a seed repo bundle."""

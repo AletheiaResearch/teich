@@ -69,25 +69,27 @@ New logic on `DockerRuntimeRunner` (shared by all Docker agents).
 
 Notes (from review): `output/verification/` joins the `{"partials","failures"}` exclusion set so it's never scanned as trace data. Failed-verifier traces **are** included in uploads (wanted for RL; SFT-only users filter by `passed`). `git clone <bundle> <dest>` requires `dest` to be empty/nonexistent — clone into a fresh subdir of the mkdtemp workspace root, consistent with the existing `github_repo` checkout handling.
 
-```
+```text
 seed_repo ─fetch→ bundle ─git clone→ workspace ─agent edits→ workspace'
                                                      │ restore verifier_files (HEAD)
                                                      ▼
                                           docker run <verifier>
-                                                     │ parse per-test + exit code
+                                                     │ exit code (+ best-effort per-test parse)
                                                      ▼
-                                  passed (F2P&P2P or exit==0) → reward
+                                          passed (exit==0) → reward
 ```
 
 ## Reward recording
 
 - **Routing:** trace written to `output/passed/<name>.jsonl` or `output/failed/<name>.jsonl` (only when a verifier ran and `route_by_result`; otherwise flat). Resume/convert/README rglob `output/`, so both are picked up; `verification` is excluded from trace scans like `partials`/`failures`.
 - **Sidecar:** `output/verification/<name>.json`:
+
   ```json
   {"verifier": "pytest -rA", "passed": true, "exit_code": 0, "duration_s": 12.4,
    "timed_out": false, "seed_repo": "widgets-bug-01",
    "tests": {"tests/test_x.py::test_bug": "passed"}, "stdout_tail": "…", "stderr_tail": "…"}
   ```
+
   (`tests` is best-effort pytest parsing — informational only; `passed` comes solely from `exit_code`.)
 - **Convert:** `teich convert` reads the sidecar (handling flat and `passed/`|`failed/` layouts) and adds `reward` (1.0/0.0) and `passed` to each training row.
 - **Inline trace event:** deferred — to avoid mutating native provider traces (codex/claude/hermes JSONL) in a way that's untested against the conversion pipeline, the sidecar is the authoritative reward record in v1. Revisit once the conversion round-trip is exercised.
