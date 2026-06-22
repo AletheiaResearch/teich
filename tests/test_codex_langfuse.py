@@ -11,6 +11,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from teich.config import Config, ModelConfig
 from teich.runner import CodexRunner
 
@@ -83,8 +85,9 @@ def test_codex_command_omits_langfuse_env_when_disabled(tmp_path: Path):
     assert not any(part.startswith("LANGFUSE_") for part in cmd)
 
 
-def test_codex_command_rewrites_localhost_langfuse_base_url(tmp_path: Path):
-    cfg = _langfuse_config(base_url="http://localhost:3000")
+@pytest.mark.parametrize("host", ["localhost", "127.0.0.1"])
+def test_codex_command_rewrites_host_local_langfuse_base_url(tmp_path: Path, host: str):
+    cfg = _langfuse_config(base_url=f"http://{host}:3000")
     with patch.object(CodexRunner, "_ensure_image"):
         runner = CodexRunner(cfg)
     cmd = runner._build_codex_command(
