@@ -1,9 +1,9 @@
 """Tests for Codex -> Langfuse tracing wiring.
 
 These tests are hermetic: they never touch Docker, the network, or a real
-Langfuse instance. They cover config validation, the config.toml blocks Teich
-writes to enable the plugin, the Langfuse env vars passed to the container, and
-the per-session install of the (image-baked) plugin tree into CODEX_HOME.
+Langfuse instance. They cover the config.toml blocks Teich writes to enable the
+plugin, the Langfuse env vars passed to the container, the exec hook-trust flag,
+and the per-session install of the (image-baked) plugin tree into CODEX_HOME.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
-from teich.config import CodexLangfuseConfig, Config, ModelConfig
+from teich.config import Config, ModelConfig
 from teich.runner import CodexRunner
 
 
@@ -27,44 +27,8 @@ def _langfuse_config(**overrides) -> Config:
     langfuse.update(overrides)
     return Config(
         model=ModelConfig(model="gpt-5.5"),
-        agent={"provider": "codex", "codex": {"langfuse": langfuse}},
+        agent={"provider": "codex", "langfuse": langfuse},
     )
-
-
-# -- config validation -------------------------------------------------------
-
-def test_langfuse_disabled_by_default():
-    cfg = Config()
-    assert cfg.agent.codex.langfuse.enabled is False
-
-
-def test_langfuse_enabled_requires_all_credentials():
-    with pytest.raises(ValueError, match="public_key"):
-        CodexLangfuseConfig(enabled=True, secret_key="sk", base_url="https://x")
-    with pytest.raises(ValueError, match="secret_key"):
-        CodexLangfuseConfig(enabled=True, public_key="pk", base_url="https://x")
-    with pytest.raises(ValueError, match="base_url"):
-        CodexLangfuseConfig(enabled=True, public_key="pk", secret_key="sk")
-
-
-def test_langfuse_enabled_with_all_credentials_ok():
-    cfg = CodexLangfuseConfig(
-        enabled=True, public_key="pk", secret_key="sk", base_url="https://x"
-    )
-    assert cfg.enabled and cfg.public_key == "pk"
-
-
-@pytest.mark.parametrize(
-    ("field", "kwargs"),
-    [
-        ("public_key", {"public_key": "   ", "secret_key": "sk", "base_url": "https://x"}),
-        ("secret_key", {"public_key": "pk", "secret_key": "   ", "base_url": "https://x"}),
-        ("base_url", {"public_key": "pk", "secret_key": "sk", "base_url": "   "}),
-    ],
-)
-def test_langfuse_blank_credential_is_rejected(field: str, kwargs: dict[str, str]):
-    with pytest.raises(ValueError, match=field):
-        CodexLangfuseConfig(enabled=True, **kwargs)
 
 
 # -- config.toml blocks ------------------------------------------------------
@@ -119,6 +83,21 @@ def test_codex_command_omits_langfuse_env_when_disabled(tmp_path: Path):
     )
     assert not any(part.startswith("TRACE_TO_LANGFUSE=") for part in cmd)
     assert not any(part.startswith("LANGFUSE_") for part in cmd)
+
+
+@pytest.mark.parametrize("host", ["localhost", "127.0.0.1"])
+def test_codex_command_rewrites_host_local_langfuse_base_url(tmp_path: Path, host: str):
+    cfg = _langfuse_config(base_url=f"http://{host}:3000")
+    with patch.object(CodexRunner, "_ensure_image"):
+        runner = CodexRunner(cfg)
+    cmd = runner._build_codex_command(
+        "Build app",
+        workspace=tmp_path / "ws",
+        codex_home=tmp_path / "ch",
+        container_name="teich-codex-x",
+    )
+    assert "LANGFUSE_BASE_URL=http://host.docker.internal:3000" in cmd
+    assert "host.docker.internal:host-gateway" in cmd
 
 
 def test_codex_command_adds_host_gateway_for_host_local_langfuse(tmp_path: Path):
