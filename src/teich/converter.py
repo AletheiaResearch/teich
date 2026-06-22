@@ -3449,7 +3449,9 @@ def _convert_codex_trace_to_training_example(
                 continue
             normalized_role = _normalize_role(role)
             content = _first_text_block(payload.get("content"))
-            if normalized_role == "user" and _is_codex_runtime_context(content):
+            # Only the leading wrappers (before the real prompt) are Codex
+            # runtime context; never drop user content mid-conversation.
+            if normalized_role == "user" and not prompt and _is_codex_runtime_context(content):
                 continue
             if normalized_role == "user" and content and not prompt:
                 prompt = content

@@ -83,10 +83,11 @@ def test_claude_prepare_home_writes_stop_hook(tmp_path: Path):
     home.mkdir()
     runner._prepare_agent_home(home)
     settings = json.loads((home / "settings.json").read_text())
-    cmd = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
-    # Must use the venv python by absolute path (claude sanitizes PATH for hooks).
-    assert cmd.startswith("/opt/venv/bin/python3 ")
-    assert cmd.endswith("langfuse_hook.py")
+    for event in ("Stop", "SessionEnd"):
+        cmd = settings["hooks"][event][0]["hooks"][0]["command"]
+        # Must use the venv python by absolute path (claude sanitizes PATH for hooks).
+        assert cmd.startswith("/opt/venv/bin/python3 ")
+        assert cmd.endswith("langfuse_hook.py")
 
 
 def test_claude_prepare_home_noop_when_disabled(tmp_path: Path):
@@ -100,9 +101,10 @@ def test_claude_prepare_home_noop_when_disabled(tmp_path: Path):
 
 # -- host-local base_url rewriting -------------------------------------------
 
-def test_claude_langfuse_base_url_rewrites_localhost():
+@pytest.mark.parametrize("host", ["localhost", "127.0.0.1"])
+def test_claude_langfuse_base_url_rewrites_host_local(host: str):
     with patch.object(ClaudeCodeRunner, "_ensure_image"):
-        runner = ClaudeCodeRunner(_claude_langfuse_config(base_url="http://localhost:3000"))
+        runner = ClaudeCodeRunner(_claude_langfuse_config(base_url=f"http://{host}:3000"))
     items = dict(runner._langfuse_env_items())
     assert items["LANGFUSE_BASE_URL"] == "http://host.docker.internal:3000"
     assert runner._langfuse_is_host_local() is True
