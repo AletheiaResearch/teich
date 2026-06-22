@@ -29,6 +29,8 @@ if TYPE_CHECKING:
 
 from .config import PromptInput
 
+from .codex_auth_broker import CodexTokenBroker
+
 from .converter import (
     TEICH_AVAILABLE_TOOLS_CUSTOM_TYPE,
     convert_trace_to_training_example,
@@ -2007,7 +2009,8 @@ class CodexRunner(DockerRuntimeRunner):
     """Manages Docker-based Codex sessions."""
 
     def __init__(self, config: Config):
-        self._shared_host_auth_cache: Path | None = None
+        self._broker: CodexTokenBroker | None = None
+        self._broker_lock = threading.Lock()
         super().__init__(config)
 
     @staticmethod
@@ -2113,13 +2116,42 @@ class CodexRunner(DockerRuntimeRunner):
             shared_auth.chmod(0o666)
         return shared_auth
 
-    def _ensure_shared_host_auth(self) -> Path | None:
-        """Return the shared ``auth.json`` mount path, preparing it once per run."""
+    def _ensure_broker(self) -> CodexTokenBroker | None:
+        """Start (once per run) and return the host-side token broker.
+
+        Returns ``None`` when host auth is disabled. The broker seeds itself
+        from the ``auth_dir`` snapshot and owns the rotating refresh token for
+        the whole run; every container is pointed at it via the refresh-URL
+        override and seeded with its own copy.
+        """
         if not self.config.agent.codex.use_host_auth:
             return None
-        if self._shared_host_auth_cache is None:
-            self._shared_host_auth_cache = self._prepare_shared_host_auth()
-        return self._shared_host_auth_cache
+        # run_all drives sessions from a thread pool, so guard creation: only one
+        # thread may build+start the single shared broker (double-checked lock).
+        if self._broker is None:
+            with self._broker_lock:
+                if self._broker is None:
+                    shared_auth = self._prepare_shared_host_auth()
+                    broker = CodexTokenBroker(
+                        shared_auth,
+                        port=self.config.agent.codex.broker_port,
+                    )
+                    broker.start()
+                    self._broker = broker
+        return self._broker
+
+    def _write_seeded_codex_auth(self, codex_home: Path, broker: CodexTokenBroker) -> None:
+        """Write a per-container ``auth.json`` (real tokens, secret refresh token)."""
+        auth_path = codex_home / "auth.json"
+        auth_path.write_text(
+            json.dumps(broker.seed_auth_json(), indent=2) + "\n",
+            encoding="utf-8",
+        )
+        # 0o666 (matching _write_codex_config's config.toml) so the in-container
+        # `codex` user can read/rewrite the bind-mounted file regardless of how
+        # its uid maps to the host. This copy holds only a short-lived access
+        # token and the per-run broker secret -- never the real refresh token.
+        auth_path.chmod(0o666)
 
     def _write_codex_config(self, codex_home: Path) -> None:
         codex_home.mkdir(parents=True, exist_ok=True)
@@ -2310,7 +2342,7 @@ class CodexRunner(DockerRuntimeRunner):
         base_url, proxy_target = self._codex_base_url_and_proxy_target()
         provider_name = self.config.api.provider
         provider_env_key = self._provider_env_key(provider_name)
-        host_auth = self._ensure_shared_host_auth()
+        broker = self._ensure_broker()
         cmd = [
             "docker",
             "run",
@@ -2331,16 +2363,18 @@ class CodexRunner(DockerRuntimeRunner):
             "-w",
             WORKSPACE_IN_CONTAINER,
         ]
-        if host_auth is not None:
-            # Bind-mount the single shared auth.json on top of the per-session
-            # CODEX_HOME so every container shares (and refreshes in place) the
-            # same rotating ChatGPT-subscription token.
-            cmd.extend(["-v", f"{host_auth}:{CODEX_HOME_IN_CONTAINER}/auth.json"])
-        if proxy_target or (configured_base_url and base_url != configured_base_url):
+        broker_active = broker is not None
+        if proxy_target or broker_active or (configured_base_url and base_url != configured_base_url):
             cmd.extend([
                 "--add-host",
                 "host.docker.internal:host-gateway",
             ])
+        if broker is not None:
+            # Codex stays native (talks to chatgpt.com directly) but every
+            # token refresh is redirected to the host-side broker, which is the
+            # sole owner of the rotating refresh token. Codex is seeded with its
+            # own auth.json copy in CODEX_HOME (see _write_seeded_codex_auth).
+            cmd.extend(["-e", f"CODEX_REFRESH_TOKEN_URL_OVERRIDE={broker.override_url}"])
         if proxy_target:
             cmd.extend(
                 [
@@ -2350,7 +2384,7 @@ class CodexRunner(DockerRuntimeRunner):
                     f"TEICH_LOCAL_PROVIDER_PORT={self._local_provider_default_port(provider_name)}",
                 ]
             )
-        if api_key and host_auth is None:
+        if api_key and not broker_active:
             cmd.extend(["-e", f"{provider_env_key}={api_key}"])
         return cmd, proxy_target
 
@@ -2529,6 +2563,9 @@ class CodexRunner(DockerRuntimeRunner):
 
         try:
             self._write_codex_config(codex_home)
+            broker = self._ensure_broker()
+            if broker is not None:
+                self._write_seeded_codex_auth(codex_home, broker)
             if self._local_provider_proxy_target(self.config.api.provider, self.config.get_base_url()):
                 self._write_local_provider_proxy(codex_home)
             existing_sessions = {path.resolve() for path in self._list_session_files(codex_home)}
@@ -2662,12 +2699,17 @@ class CodexRunner(DockerRuntimeRunner):
         prompt_inputs: list[PromptInput] | None = None,
         resume: bool = False,
     ) -> list[Path]:
-        return super().run_all(
-            max_concurrency=max_concurrency,
-            progress_callback=progress_callback,
-            prompt_inputs=prompt_inputs,
-            resume=resume,
-        )
+        try:
+            return super().run_all(
+                max_concurrency=max_concurrency,
+                progress_callback=progress_callback,
+                prompt_inputs=prompt_inputs,
+                resume=resume,
+            )
+        finally:
+            if self._broker is not None:
+                self._broker.stop()
+                self._broker = None
 
 
 class ExternalCliRunner(DockerRuntimeRunner):
