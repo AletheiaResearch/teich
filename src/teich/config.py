@@ -96,6 +96,42 @@ class APIConfig(BaseModel):
     wire_api: str = "responses"
 
 
+class CodexLangfuseConfig(BaseModel):
+    """Langfuse tracing for Codex sessions via the codex-observability-plugin.
+
+    When enabled, Teich installs the (image-baked) Langfuse Codex plugin into
+    each container's ``CODEX_HOME``, enables it in ``config.toml``, and passes the
+    Langfuse credentials as environment variables. The plugin's ``Stop`` hook
+    uploads each completed session transcript to Langfuse. It is side-channel
+    only -- it reads transcripts, fails open, and does not change Codex tool
+    behavior or Teich's output files.
+    """
+    enabled: bool = False
+    public_key: str | None = None
+    secret_key: str | None = None
+    base_url: str | None = None
+
+    @model_validator(mode="after")
+    def require_credentials_when_enabled(self) -> CodexLangfuseConfig:
+        if self.enabled:
+            missing = [
+                name
+                for name, value in (
+                    ("public_key", self.public_key),
+                    ("secret_key", self.secret_key),
+                    ("base_url", self.base_url),
+                )
+                if not (value and value.strip())
+            ]
+            if missing:
+                raise ValueError(
+                    "agent.codex.langfuse requires "
+                    + ", ".join(missing)
+                    + " when enabled"
+                )
+        return self
+
+
 class CodexAuthConfig(BaseModel):
     """Codex ChatGPT-subscription auth handling.
 
@@ -114,6 +150,7 @@ class CodexAuthConfig(BaseModel):
     auth_dir: Path = Field(default=Path("./.teich/codex-auth"))
     # Port for the host-side token broker. 0 = pick an ephemeral free port.
     broker_port: int = Field(default=0, ge=0, le=65535)
+    langfuse: CodexLangfuseConfig = Field(default_factory=CodexLangfuseConfig)
 
 
 class AgentConfig(BaseModel):

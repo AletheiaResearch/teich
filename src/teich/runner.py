@@ -47,6 +47,15 @@ RUNTIME_CONTAINER_USER = "codex"
 CODEX_HOME_IN_CONTAINER = "/home/codex/.codex"
 CLAUDE_HOME_IN_CONTAINER = "/home/codex/.claude"
 HERMES_HOME_IN_CONTAINER = "/home/codex/.hermes"
+
+# Langfuse Codex observability plugin: baked into the image at a staging
+# CODEX_HOME (see codex-runtime.Dockerfile) so Teich can install it into each
+# session's CODEX_HOME offline -- no per-run network. Only the ``plugins`` tree
+# and the config.toml ``[plugins."tracing@..."]`` enable entry are needed at run
+# time; the marketplace snapshot is only used for install/upgrade.
+LANGFUSE_PLUGIN_STAGE_CODEX_HOME = "/opt/codex-langfuse/.codex"
+LANGFUSE_PLUGIN_MARKETPLACE = "codex-observability-plugin"
+LANGFUSE_PLUGIN_ID = "tracing@codex-observability-plugin"
 PI_AGENT_DIR_IN_CONTAINER = "/home/codex/.pi/agent"
 PI_SESSIONS_DIR_IN_CONTAINER = "/home/codex/pi-sessions"
 WORKSPACE_IN_CONTAINER = "/workspace"
@@ -2011,6 +2020,8 @@ class CodexRunner(DockerRuntimeRunner):
     def __init__(self, config: Config):
         self._broker: CodexTokenBroker | None = None
         self._broker_lock = threading.Lock()
+        self._langfuse_plugin_cache: Path | None = None
+        self._langfuse_plugin_lock = threading.Lock()
         super().__init__(config)
 
     @staticmethod
@@ -2153,6 +2164,72 @@ class CodexRunner(DockerRuntimeRunner):
         # token and the per-run broker secret -- never the real refresh token.
         auth_path.chmod(0o666)
 
+    def _ensure_langfuse_plugin_cache(self) -> Path | None:
+        """Extract the image-baked Langfuse plugin once per run.
+
+        Returns the host cache dir (containing a ``plugins`` subtree), or ``None``
+        when Langfuse tracing is disabled. The plugin is baked into the runtime
+        image; we copy it out once via ``docker cp`` so each session can be seeded
+        offline. ``run_session`` runs from a thread pool, so guard creation with a
+        double-checked lock (mirrors ``_ensure_broker``).
+        """
+        if not self.config.agent.codex.langfuse.enabled:
+            return None
+        if self._langfuse_plugin_cache is None:
+            with self._langfuse_plugin_lock:
+                if self._langfuse_plugin_cache is None:
+                    self._ensure_image()
+                    cache_dir = Path(tempfile.mkdtemp(prefix="teich-langfuse-plugin-"))
+                    self._extract_langfuse_plugin(cache_dir)
+                    self._langfuse_plugin_cache = cache_dir
+        return self._langfuse_plugin_cache
+
+    def _extract_langfuse_plugin(self, cache_dir: Path) -> None:
+        """Copy the baked ``plugins`` tree out of the runtime image into ``cache_dir``."""
+        created = subprocess.run(
+            ["docker", "create", self.image_name],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        container_id = created.stdout.strip()
+        try:
+            subprocess.run(
+                [
+                    "docker",
+                    "cp",
+                    f"{container_id}:{LANGFUSE_PLUGIN_STAGE_CODEX_HOME}/plugins",
+                    str(cache_dir / "plugins"),
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        finally:
+            subprocess.run(
+                ["docker", "rm", "-f", container_id],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+    def _install_codex_langfuse_plugin(self, codex_home: Path) -> None:
+        """Seed a session's CODEX_HOME with the Langfuse plugin tree.
+
+        No-op when Langfuse is disabled. Files are made world-readable/traversable
+        so the in-container ``codex`` user can execute the hook regardless of how
+        its uid maps to the host.
+        """
+        cache = self._ensure_langfuse_plugin_cache()
+        if cache is None:
+            return
+        source = cache / "plugins"
+        dest = codex_home / "plugins"
+        shutil.copytree(source, dest, dirs_exist_ok=True)
+        for path in dest.rglob("*"):
+            path.chmod(0o777 if path.is_dir() else 0o644)
+        dest.chmod(0o777)
+
     def _write_codex_config(self, codex_home: Path) -> None:
         codex_home.mkdir(parents=True, exist_ok=True)
         codex_home.chmod(0o777)
@@ -2216,6 +2293,22 @@ class CodexRunner(DockerRuntimeRunner):
                 lines.append(f"[mcp_servers.{self._toml_string(mcp.name)}.env]")
                 for key, value in mcp.env.items():
                     lines.append(f"{self._toml_string(key)} = {self._toml_string(value)}")
+
+        if self.config.agent.codex.langfuse.enabled:
+            # Enable the plugin-hooks feature and the (image-baked, offline)
+            # Langfuse tracing plugin. The plugin tree itself is copied into
+            # CODEX_HOME by _install_codex_langfuse_plugin. Tables go after the
+            # top-level keys above, keeping the TOML valid.
+            lines.extend(
+                [
+                    "",
+                    "[features]",
+                    "plugin_hooks = true",
+                    "",
+                    f'[plugins."{LANGFUSE_PLUGIN_ID}"]',
+                    "enabled = true",
+                ]
+            )
 
         config_text = "\n".join(lines).strip()
         config_path = codex_home / "config.toml"
@@ -2364,11 +2457,36 @@ class CodexRunner(DockerRuntimeRunner):
             WORKSPACE_IN_CONTAINER,
         ]
         broker_active = broker is not None
-        if proxy_target or broker_active or (configured_base_url and base_url != configured_base_url):
+        langfuse = self.config.agent.codex.langfuse
+        langfuse_host_local = langfuse.enabled and "host.docker.internal" in (
+            langfuse.base_url or ""
+        )
+        if (
+            proxy_target
+            or broker_active
+            or langfuse_host_local
+            or (configured_base_url and base_url != configured_base_url)
+        ):
             cmd.extend([
                 "--add-host",
                 "host.docker.internal:host-gateway",
             ])
+        if langfuse.enabled:
+            # The codex-observability-plugin Stop hook uploads each session
+            # transcript to Langfuse. Side-channel only; the plugin tree is seeded
+            # into CODEX_HOME by _install_codex_langfuse_plugin.
+            cmd.extend(
+                [
+                    "-e",
+                    "TRACE_TO_LANGFUSE=true",
+                    "-e",
+                    f"LANGFUSE_PUBLIC_KEY={langfuse.public_key}",
+                    "-e",
+                    f"LANGFUSE_SECRET_KEY={langfuse.secret_key}",
+                    "-e",
+                    f"LANGFUSE_BASE_URL={langfuse.base_url}",
+                ]
+            )
         if broker is not None:
             # Codex stays native (talks to chatgpt.com directly) but every
             # token refresh is redirected to the host-side broker, which is the
@@ -2413,6 +2531,11 @@ class CodexRunner(DockerRuntimeRunner):
             codex_cmd.extend(["resume", "--last"])
         codex_cmd.extend(["--model", model])
         codex_cmd.append("--skip-git-repo-check")
+        if self.config.agent.codex.langfuse.enabled:
+            # Codex trust-gates plugin hooks in non-interactive `exec` and
+            # silently skips them otherwise. Teich vets and bakes the Langfuse
+            # plugin itself, so bypass the persisted-trust requirement.
+            codex_cmd.append("--dangerously-bypass-hook-trust")
         if base_url and not self._is_oss_local_provider(provider_name):
             provider_key = self._custom_provider_key(provider_name)
             provider_literal = (
@@ -2566,6 +2689,7 @@ class CodexRunner(DockerRuntimeRunner):
             broker = self._ensure_broker()
             if broker is not None:
                 self._write_seeded_codex_auth(codex_home, broker)
+            self._install_codex_langfuse_plugin(codex_home)
             if self._local_provider_proxy_target(self.config.api.provider, self.config.get_base_url()):
                 self._write_local_provider_proxy(codex_home)
             existing_sessions = {path.resolve() for path in self._list_session_files(codex_home)}
@@ -2710,6 +2834,9 @@ class CodexRunner(DockerRuntimeRunner):
             if self._broker is not None:
                 self._broker.stop()
                 self._broker = None
+            if self._langfuse_plugin_cache is not None:
+                shutil.rmtree(self._langfuse_plugin_cache, ignore_errors=True)
+                self._langfuse_plugin_cache = None
 
 
 class ExternalCliRunner(DockerRuntimeRunner):
