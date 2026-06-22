@@ -54,9 +54,17 @@ def test_langfuse_enabled_with_all_credentials_ok():
     assert cfg.enabled and cfg.public_key == "pk"
 
 
-def test_langfuse_blank_credential_is_rejected():
-    with pytest.raises(ValueError, match="base_url"):
-        CodexLangfuseConfig(enabled=True, public_key="pk", secret_key="sk", base_url="   ")
+@pytest.mark.parametrize(
+    ("field", "kwargs"),
+    [
+        ("public_key", {"public_key": "   ", "secret_key": "sk", "base_url": "https://x"}),
+        ("secret_key", {"public_key": "pk", "secret_key": "   ", "base_url": "https://x"}),
+        ("base_url", {"public_key": "pk", "secret_key": "sk", "base_url": "   "}),
+    ],
+)
+def test_langfuse_blank_credential_is_rejected(field: str, kwargs: dict[str, str]):
+    with pytest.raises(ValueError, match=field):
+        CodexLangfuseConfig(enabled=True, **kwargs)
 
 
 # -- config.toml blocks ------------------------------------------------------
