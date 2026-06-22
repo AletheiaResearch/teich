@@ -105,7 +105,7 @@ def test_claude_langfuse_base_url_rewrites_localhost():
         runner = ClaudeCodeRunner(_claude_langfuse_config(base_url="http://localhost:3000"))
     items = dict(runner._langfuse_env_items())
     assert items["LANGFUSE_BASE_URL"] == "http://host.docker.internal:3000"
-    assert runner._langfuse_host_local() is True
+    assert runner._langfuse_is_host_local() is True
 
 
 def test_cloud_base_url_is_not_rewritten():
@@ -113,4 +113,4 @@ def test_cloud_base_url_is_not_rewritten():
         runner = ClaudeCodeRunner(_claude_langfuse_config())
     items = dict(runner._langfuse_env_items())
     assert items["LANGFUSE_BASE_URL"] == "https://langfuse.example.com"
-    assert runner._langfuse_host_local() is False
+    assert runner._langfuse_is_host_local() is False

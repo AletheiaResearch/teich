@@ -1040,6 +1040,19 @@ class DockerRuntimeRunner:
         netloc = parsed.netloc.replace(hostname, "host.docker.internal", 1)
         return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
 
+    def _langfuse_container_base_url(self) -> str | None:
+        """The Langfuse base_url as seen from inside the container (localhost ->
+        host.docker.internal)."""
+        return self._container_base_url(self.config.agent.langfuse.base_url)
+
+    def _langfuse_is_host_local(self) -> bool:
+        """Whether tracing points at the host, so the container needs
+        --add-host host.docker.internal."""
+        langfuse = self.config.agent.langfuse
+        return langfuse.enabled and "host.docker.internal" in (
+            self._langfuse_container_base_url() or ""
+        )
+
     @staticmethod
     def _prompt_preview(prompt: str, limit: int = 60) -> str:
         normalized = " ".join(prompt.split())
@@ -2465,14 +2478,11 @@ class CodexRunner(DockerRuntimeRunner):
         ]
         broker_active = broker is not None
         langfuse = self.config.agent.langfuse
-        langfuse_base_url = self._container_base_url(langfuse.base_url)
-        langfuse_host_local = langfuse.enabled and "host.docker.internal" in (
-            langfuse_base_url or ""
-        )
+        langfuse_base_url = self._langfuse_container_base_url()
         if (
             proxy_target
             or broker_active
-            or langfuse_host_local
+            or self._langfuse_is_host_local()
             or (configured_base_url and base_url != configured_base_url)
         ):
             cmd.extend([
@@ -2939,7 +2949,7 @@ class ExternalCliRunner(DockerRuntimeRunner):
             configured_base_url
             and self._container_base_url(configured_base_url) != configured_base_url
         )
-        if base_url_is_host_local or self._langfuse_host_local():
+        if base_url_is_host_local or self._langfuse_is_host_local():
             command.extend(["--add-host", "host.docker.internal:host-gateway"])
         for key, value in [
             *self._api_env_items(),
@@ -2950,11 +2960,6 @@ class ExternalCliRunner(DockerRuntimeRunner):
         command.append(self.image_name)
         return command
 
-    def _langfuse_host_local(self) -> bool:
-        langfuse = self.config.agent.langfuse
-        if not langfuse.enabled:
-            return False
-        return "host.docker.internal" in (self._container_base_url(langfuse.base_url) or "")
 
     def _build_shell_command(
         self,
@@ -3235,7 +3240,7 @@ class ClaudeCodeRunner(ExternalCliRunner):
             ("TRACE_TO_LANGFUSE", "true"),
             ("LANGFUSE_PUBLIC_KEY", langfuse.public_key or ""),
             ("LANGFUSE_SECRET_KEY", langfuse.secret_key or ""),
-            ("LANGFUSE_BASE_URL", self._container_base_url(langfuse.base_url) or ""),
+            ("LANGFUSE_BASE_URL", self._langfuse_container_base_url() or ""),
         ]
 
     def _prepare_agent_home(self, home_dir: Path) -> None:
