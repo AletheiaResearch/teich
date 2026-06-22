@@ -121,6 +121,20 @@ def test_codex_command_omits_langfuse_env_when_disabled(tmp_path: Path):
     assert not any(part.startswith("LANGFUSE_") for part in cmd)
 
 
+def test_codex_command_rewrites_localhost_langfuse_base_url(tmp_path: Path):
+    cfg = _langfuse_config(base_url="http://localhost:3000")
+    with patch.object(CodexRunner, "_ensure_image"):
+        runner = CodexRunner(cfg)
+    cmd = runner._build_codex_command(
+        "Build app",
+        workspace=tmp_path / "ws",
+        codex_home=tmp_path / "ch",
+        container_name="teich-codex-x",
+    )
+    assert "LANGFUSE_BASE_URL=http://host.docker.internal:3000" in cmd
+    assert "host.docker.internal:host-gateway" in cmd
+
+
 def test_codex_command_adds_host_gateway_for_host_local_langfuse(tmp_path: Path):
     cfg = _langfuse_config(base_url="http://host.docker.internal:3000")
     with patch.object(CodexRunner, "_ensure_image"):

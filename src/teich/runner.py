@@ -2468,8 +2468,9 @@ class CodexRunner(DockerRuntimeRunner):
         ]
         broker_active = broker is not None
         langfuse = self.config.agent.effective_langfuse
+        langfuse_base_url = self._container_base_url(langfuse.base_url)
         langfuse_host_local = langfuse.enabled and "host.docker.internal" in (
-            langfuse.base_url or ""
+            langfuse_base_url or ""
         )
         if (
             proxy_target
@@ -2494,7 +2495,7 @@ class CodexRunner(DockerRuntimeRunner):
                     "-e",
                     f"LANGFUSE_SECRET_KEY={langfuse.secret_key}",
                     "-e",
-                    f"LANGFUSE_BASE_URL={langfuse.base_url}",
+                    f"LANGFUSE_BASE_URL={langfuse_base_url or ''}",
                 ]
             )
         if broker is not None:
@@ -2954,7 +2955,9 @@ class ExternalCliRunner(DockerRuntimeRunner):
 
     def _langfuse_host_local(self) -> bool:
         langfuse = self.config.agent.langfuse
-        return langfuse.enabled and "host.docker.internal" in (langfuse.base_url or "")
+        if not langfuse.enabled:
+            return False
+        return "host.docker.internal" in (self._container_base_url(langfuse.base_url) or "")
 
     def _build_shell_command(
         self,
@@ -3235,7 +3238,7 @@ class ClaudeCodeRunner(ExternalCliRunner):
             ("TRACE_TO_LANGFUSE", "true"),
             ("LANGFUSE_PUBLIC_KEY", langfuse.public_key or ""),
             ("LANGFUSE_SECRET_KEY", langfuse.secret_key or ""),
-            ("LANGFUSE_BASE_URL", langfuse.base_url or ""),
+            ("LANGFUSE_BASE_URL", self._container_base_url(langfuse.base_url) or ""),
         ]
 
     def _prepare_agent_home(self, home_dir: Path) -> None:
@@ -3767,7 +3770,7 @@ class HermesRunner(ExternalCliRunner):
         return [
             ("HERMES_LANGFUSE_PUBLIC_KEY", langfuse.public_key or ""),
             ("HERMES_LANGFUSE_SECRET_KEY", langfuse.secret_key or ""),
-            ("HERMES_LANGFUSE_BASE_URL", langfuse.base_url or ""),
+            ("HERMES_LANGFUSE_BASE_URL", self._container_base_url(langfuse.base_url) or ""),
         ]
 
     def _prepare_agent_home(self, home_dir: Path) -> None:
@@ -3886,10 +3889,14 @@ class HermesRunner(ExternalCliRunner):
         if api_key:
             custom_provider["api_key"] = api_key
             model_config["api_key"] = api_key
-        hermes_config = {
+        hermes_config: dict[str, object] = {
             "model": model_config,
             "custom_providers": [custom_provider],
         }
+        # This file replaces the one _prepare_agent_home writes, so re-add the
+        # langfuse plugin here or custom-provider runs would lose tracing.
+        if self.config.agent.langfuse.enabled:
+            hermes_config["plugins"] = {"enabled": [HERMES_LANGFUSE_PLUGIN_ID]}
         (home_dir / "config.yaml").write_text(json.dumps(hermes_config, indent=2), encoding="utf-8")
 
     def _write_agents_md(self, workspace: Path) -> None:

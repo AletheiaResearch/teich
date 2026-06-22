@@ -168,3 +168,93 @@ def test_hermes_shell_keeps_ignore_user_config_when_disabled():
         runner = HermesRunner(Config(model=ModelConfig(model="hermes-4")))
     shell = runner._build_shell_command()
     assert "--ignore-user-config" in shell
+
+
+# -- host-local base_url rewriting -------------------------------------------
+
+def _localhost_langfuse_config(provider: str) -> Config:
+    return Config(
+        model=ModelConfig(model="m"),
+        agent={
+            "provider": provider,
+            "langfuse": {
+                "enabled": True,
+                "public_key": "pk",
+                "secret_key": "sk",
+                "base_url": "http://localhost:3000",
+            },
+        },
+    )
+
+
+def test_claude_langfuse_base_url_rewrites_localhost():
+    with patch.object(ClaudeCodeRunner, "_ensure_image"):
+        runner = ClaudeCodeRunner(_localhost_langfuse_config("claude-code"))
+    items = dict(runner._langfuse_env_items())
+    assert items["LANGFUSE_BASE_URL"] == "http://host.docker.internal:3000"
+    assert runner._langfuse_host_local() is True
+
+
+def test_hermes_langfuse_base_url_rewrites_localhost():
+    with patch.object(HermesRunner, "_ensure_image"):
+        runner = HermesRunner(_localhost_langfuse_config("hermes"))
+    items = dict(runner._langfuse_env_items())
+    assert items["HERMES_LANGFUSE_BASE_URL"] == "http://host.docker.internal:3000"
+    assert runner._langfuse_host_local() is True
+
+
+def test_cloud_base_url_is_not_rewritten():
+    with patch.object(ClaudeCodeRunner, "_ensure_image"):
+        runner = ClaudeCodeRunner(_shared_langfuse_config("claude-code"))
+    items = dict(runner._langfuse_env_items())
+    assert items["LANGFUSE_BASE_URL"] == "https://langfuse.example.com"
+    assert runner._langfuse_host_local() is False
+
+
+# -- Hermes custom-provider config keeps the plugin --------------------------
+
+def test_hermes_runtime_config_keeps_plugin_in_custom_mode(tmp_path: Path):
+    import json
+
+    from teich.config import APIConfig
+
+    cfg = Config(
+        model=ModelConfig(model="m"),
+        api=APIConfig(provider="openai", base_url="http://localhost:1234/v1", api_key="sk-x"),
+        agent={
+            "provider": "hermes",
+            "langfuse": {
+                "enabled": True,
+                "public_key": "pk",
+                "secret_key": "sk",
+                "base_url": "https://langfuse.example.com",
+            },
+        },
+    )
+    with patch.object(HermesRunner, "_ensure_image"):
+        runner = HermesRunner(cfg)
+    assert runner._hermes_cli_provider() == "custom"  # the overwrite path
+    home = tmp_path / "h"
+    home.mkdir()
+    runner._write_hermes_runtime_config(home)
+    data = json.loads((home / "config.yaml").read_text())
+    assert data["plugins"]["enabled"] == ["observability/langfuse"]
+
+
+def test_hermes_runtime_config_omits_plugin_when_disabled(tmp_path: Path):
+    import json
+
+    from teich.config import APIConfig
+
+    cfg = Config(
+        model=ModelConfig(model="m"),
+        api=APIConfig(provider="openai", base_url="http://localhost:1234/v1", api_key="sk-x"),
+        agent={"provider": "hermes"},
+    )
+    with patch.object(HermesRunner, "_ensure_image"):
+        runner = HermesRunner(cfg)
+    home = tmp_path / "h"
+    home.mkdir()
+    runner._write_hermes_runtime_config(home)
+    data = json.loads((home / "config.yaml").read_text())
+    assert "plugins" not in data
