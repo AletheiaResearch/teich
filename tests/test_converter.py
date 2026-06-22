@@ -2884,6 +2884,8 @@ def test_codex_skips_injected_runtime_context(tmp_path: Path):
         {"type": "response_item", "payload": {"type": "message", "role": "user",
             "content": [{"type": "input_text", "text": "<environment_context>\n  <cwd>/workspace</cwd>\n</environment_context>"}]}},
         {"type": "response_item", "payload": {"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "<user_instructions>\n  Be concise.\n</user_instructions>"}]}},
+        {"type": "response_item", "payload": {"type": "message", "role": "user",
             "content": [{"type": "input_text", "text": "make me a delivery routing dashboard"}]}},
         {"type": "response_item", "payload": {"type": "message", "role": "assistant",
             "content": [{"type": "output_text", "text": "Done."}]}},
@@ -2895,4 +2897,8 @@ def test_codex_skips_injected_runtime_context(tmp_path: Path):
     assert example.prompt == "make me a delivery routing dashboard"
     user_contents = [m["content"] for m in example.messages if m["role"] == "user"]
     assert user_contents == ["make me a delivery routing dashboard"]
-    assert all("<environment_context>" not in (m.get("content") or "") for m in example.messages)
+    assert not any(
+        tag in (m.get("content") or "")
+        for m in example.messages
+        for tag in ("<environment_context>", "<user_instructions>")
+    )

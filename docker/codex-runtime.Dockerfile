@@ -49,7 +49,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # Bake the Langfuse Codex observability plugin into a staging CODEX_HOME so Teich
 # can seed it into each session offline (no per-run network on the sandboxes).
-# Only used when agent.codex.langfuse.enabled is set; side-channel/observability
+# Only used when agent.langfuse.enabled is set; side-channel/observability
 # only. NOTE: pulls the plugin at its current HEAD -- the version is pinned at
 # image-build time, not by a commit hash. chmod a+rX so the unprivileged in-
 # container `codex` user (and the host `docker cp`) can read it.
@@ -59,11 +59,14 @@ RUN HOME=/opt/codex-langfuse CODEX_HOME=/opt/codex-langfuse/.codex \
       && codex plugin add tracing@codex-observability-plugin \
       && chmod -R a+rX /opt/codex-langfuse'
 
-# Langfuse hook + SDK for Claude Code (cloned at HEAD). The SDK goes in the venv
-# because Claude strips it from a hook's PATH, so the hook calls it by full path.
+# Langfuse hook + SDK for Claude Code, pinned to a known-good commit so the
+# baked hook script is reproducible. The SDK goes in the venv because Claude
+# strips it from a hook's PATH, so the hook calls it by full path.
 RUN /opt/venv/bin/pip install --no-cache-dir "langfuse>=4.0,<5" && \
-    git clone --depth 1 https://github.com/langfuse/Claude-Observability-Plugin.git \
+    git clone https://github.com/langfuse/Claude-Observability-Plugin.git \
         /opt/claude-langfuse-plugin && \
+    git -C /opt/claude-langfuse-plugin checkout 597af67d6c6b369f3e55db6cfa2ebe444f1af46c && \
+    rm -rf /opt/claude-langfuse-plugin/.git && \
     chmod -R a+rX /opt/claude-langfuse-plugin
 
 # Create working directory and user in one layer
