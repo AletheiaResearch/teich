@@ -17,47 +17,28 @@ from teich.runner import ClaudeCodeRunner
 
 # -- shared config -----------------------------------------------------------
 
-def test_langfuse_config_alias_is_shared_type():
-    # The Codex-era name is kept as an alias of the shared type.
-    from teich.config import CodexLangfuseConfig
-
-    assert CodexLangfuseConfig is LangfuseConfig
+def test_langfuse_disabled_by_default():
+    assert Config().agent.langfuse.enabled is False
 
 
-def test_shared_langfuse_disabled_by_default():
-    cfg = Config()
-    assert cfg.agent.langfuse.enabled is False
-    assert cfg.agent.effective_langfuse.enabled is False
+def test_langfuse_ok_with_all_credentials():
+    cfg = LangfuseConfig(enabled=True, public_key="pk", secret_key="sk", base_url="https://x")
+    assert cfg.enabled and cfg.public_key == "pk"
 
 
-def test_shared_langfuse_requires_all_credentials():
-    for missing in ("public_key", "secret_key", "base_url"):
-        kwargs = {"public_key": "pk", "secret_key": "sk", "base_url": "https://x"}
-        del kwargs[missing]
-        with pytest.raises(ValueError, match=missing):
-            LangfuseConfig(enabled=True, **kwargs)
+@pytest.mark.parametrize("missing", ["public_key", "secret_key", "base_url"])
+def test_langfuse_requires_each_credential(missing: str):
+    kwargs = {"public_key": "pk", "secret_key": "sk", "base_url": "https://x"}
+    del kwargs[missing]
+    with pytest.raises(ValueError, match=missing):
+        LangfuseConfig(enabled=True, **kwargs)
 
 
-def test_effective_langfuse_prefers_codex_override():
-    cfg = Config(
-        agent={
-            "provider": "codex",
-            "langfuse": {"enabled": True, "public_key": "pkS", "secret_key": "skS", "base_url": "https://shared"},
-            "codex": {"langfuse": {"enabled": True, "public_key": "pkC", "secret_key": "skC", "base_url": "https://codex"}},
-        }
-    )
-    assert cfg.agent.effective_langfuse.base_url == "https://codex"
-
-
-def test_effective_langfuse_falls_back_to_shared_when_codex_disabled():
-    cfg = Config(
-        agent={
-            "provider": "codex",
-            "langfuse": {"enabled": True, "public_key": "pkS", "secret_key": "skS", "base_url": "https://shared"},
-        }
-    )
-    assert cfg.agent.effective_langfuse.enabled is True
-    assert cfg.agent.effective_langfuse.base_url == "https://shared"
+@pytest.mark.parametrize("blank", ["public_key", "secret_key", "base_url"])
+def test_langfuse_rejects_blank_credential(blank: str):
+    kwargs = {"public_key": "pk", "secret_key": "sk", "base_url": "https://x", blank: "   "}
+    with pytest.raises(ValueError, match=blank):
+        LangfuseConfig(enabled=True, **kwargs)
 
 
 # -- Claude Code env items ---------------------------------------------------

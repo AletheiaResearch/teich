@@ -2180,7 +2180,7 @@ class CodexRunner(DockerRuntimeRunner):
         offline. ``run_session`` runs from a thread pool, so guard creation with a
         double-checked lock (mirrors ``_ensure_broker``).
         """
-        if not self.config.agent.effective_langfuse.enabled:
+        if not self.config.agent.langfuse.enabled:
             return None
         if self._langfuse_plugin_cache is None:
             with self._langfuse_plugin_lock:
@@ -2301,7 +2301,7 @@ class CodexRunner(DockerRuntimeRunner):
                 for key, value in mcp.env.items():
                     lines.append(f"{self._toml_string(key)} = {self._toml_string(value)}")
 
-        if self.config.agent.effective_langfuse.enabled:
+        if self.config.agent.langfuse.enabled:
             # Enable the plugin-hooks feature and the (image-baked, offline)
             # Langfuse tracing plugin. The plugin tree itself is copied into
             # CODEX_HOME by _install_codex_langfuse_plugin. Tables go after the
@@ -2464,7 +2464,7 @@ class CodexRunner(DockerRuntimeRunner):
             WORKSPACE_IN_CONTAINER,
         ]
         broker_active = broker is not None
-        langfuse = self.config.agent.effective_langfuse
+        langfuse = self.config.agent.langfuse
         langfuse_base_url = self._container_base_url(langfuse.base_url)
         langfuse_host_local = langfuse.enabled and "host.docker.internal" in (
             langfuse_base_url or ""
@@ -2539,7 +2539,7 @@ class CodexRunner(DockerRuntimeRunner):
             codex_cmd.extend(["resume", "--last"])
         codex_cmd.extend(["--model", model])
         codex_cmd.append("--skip-git-repo-check")
-        if self.config.agent.effective_langfuse.enabled:
+        if self.config.agent.langfuse.enabled:
             # Codex trust-gates plugin hooks in non-interactive `exec` and
             # silently skips them otherwise. Teich vets and bakes the Langfuse
             # plugin itself, so bypass the persisted-trust requirement.

@@ -97,14 +97,12 @@ class APIConfig(BaseModel):
 
 
 class LangfuseConfig(BaseModel):
-    """Langfuse tracing credentials, shared across agents.
+    """Langfuse tracing credentials, set under ``agent.langfuse``.
 
-    When enabled, Teich wires the agent's Langfuse integration (Codex plugin,
-    Claude Code Stop hook, or the Hermes ``observability/langfuse`` plugin) and
-    passes these credentials into the container. Tracing is side-channel only --
-    it reads transcripts, fails open, and does not change agent tool behavior or
-    Teich's output files. Set under ``agent.langfuse`` (all agents) or, for
-    Codex only, ``agent.codex.langfuse`` (which overrides the shared block).
+    When enabled, Teich wires each agent's Langfuse integration (the Codex
+    plugin, the Claude Code Stop hook) and passes these credentials into the
+    container. Tracing is side-channel only: it reads transcripts, fails open,
+    and does not change agent behavior or Teich's output files.
     """
     enabled: bool = False
     public_key: str | None = None
@@ -130,10 +128,6 @@ class LangfuseConfig(BaseModel):
         return self
 
 
-# Back-compat alias for the Codex-era name.
-CodexLangfuseConfig = LangfuseConfig
-
-
 class CodexAuthConfig(BaseModel):
     """Codex ChatGPT-subscription auth handling.
 
@@ -152,23 +146,14 @@ class CodexAuthConfig(BaseModel):
     auth_dir: Path = Field(default=Path("./.teich/codex-auth"))
     # Port for the host-side token broker. 0 = pick an ephemeral free port.
     broker_port: int = Field(default=0, ge=0, le=65535)
-    # Codex-only Langfuse override; falls back to the shared agent.langfuse.
-    langfuse: LangfuseConfig = Field(default_factory=LangfuseConfig)
 
 
 class AgentConfig(BaseModel):
     """Agent runtime selection."""
     provider: str = "codex"
     codex: CodexAuthConfig = Field(default_factory=CodexAuthConfig)
-    # Shared Langfuse config applied to every agent that supports tracing.
+    # Langfuse tracing, applied to every agent that supports it (Codex, Claude).
     langfuse: LangfuseConfig = Field(default_factory=LangfuseConfig)
-
-    @property
-    def effective_langfuse(self) -> LangfuseConfig:
-        """Codex honors its own block when enabled, else the shared one."""
-        if self.codex.langfuse.enabled:
-            return self.codex.langfuse
-        return self.langfuse
 
 
 class ModelConfig(BaseModel):

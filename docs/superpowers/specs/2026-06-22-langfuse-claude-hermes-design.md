@@ -1,13 +1,14 @@
 # Langfuse tracing for Claude Code and Hermes
 
-> **Update (shipped scope): Hermes was dropped; this PR ships Claude Code only.**
-> The Hermes `observability/langfuse` plugin enables cleanly, but end-to-end
-> verification showed it does not emit traces with Teich's `custom_providers`
-> config schema (Hermes flags it as an outdated v0 config). Making it trace would
-> require modernizing `_write_hermes_runtime_config` to the current `providers:`
-> schema, which touches the separate "external provider traces" feature — out of
-> scope here. Partial coverage is acceptable (MCP isn't on every agent either).
-> The sections below are kept as the original design record.
+> **Update (shipped scope): Claude Code only; Hermes dropped; no codex back-compat.**
+> Two changes from the design below: (1) Hermes was dropped — its
+> `observability/langfuse` plugin enables cleanly but does not emit traces with
+> Teich's `custom_providers` config schema (Hermes flags it as outdated v0), and
+> fixing it would mean reworking the separate "external provider traces" feature;
+> partial coverage is fine (MCP isn't on every agent either). (2) The
+> `agent.codex.langfuse` override and `effective_langfuse` fallback were removed —
+> there's a single `agent.langfuse` block for all agents. The sections below are
+> kept as the original design record.
 
 Extend the Codex Langfuse tracing (PR #3) to the other agents that have a Langfuse
 integration: **Claude Code** and **Hermes**. Pi has no Langfuse integration and

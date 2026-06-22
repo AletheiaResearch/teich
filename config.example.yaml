@@ -39,7 +39,6 @@ agent:
   # behavior or Teich's output files. All three credentials are required when
   # enabled. base_url may be Langfuse Cloud or a self-hosted URL; for a host-local
   # instance use http://host.docker.internal:<port>.
-  # (Codex can override this with its own agent.codex.langfuse block.)
   # langfuse:
   #   enabled: true
   #   public_key: pk-lf-...

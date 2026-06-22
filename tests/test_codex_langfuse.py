@@ -1,9 +1,9 @@
 """Tests for Codex -> Langfuse tracing wiring.
 
 These tests are hermetic: they never touch Docker, the network, or a real
-Langfuse instance. They cover config validation, the config.toml blocks Teich
-writes to enable the plugin, the Langfuse env vars passed to the container, and
-the per-session install of the (image-baked) plugin tree into CODEX_HOME.
+Langfuse instance. They cover the config.toml blocks Teich writes to enable the
+plugin, the Langfuse env vars passed to the container, the exec hook-trust flag,
+and the per-session install of the (image-baked) plugin tree into CODEX_HOME.
 """
 
 from __future__ import annotations
@@ -11,9 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
-from teich.config import CodexLangfuseConfig, Config, ModelConfig
+from teich.config import Config, ModelConfig
 from teich.runner import CodexRunner
 
 
@@ -27,44 +25,8 @@ def _langfuse_config(**overrides) -> Config:
     langfuse.update(overrides)
     return Config(
         model=ModelConfig(model="gpt-5.5"),
-        agent={"provider": "codex", "codex": {"langfuse": langfuse}},
+        agent={"provider": "codex", "langfuse": langfuse},
     )
-
-
-# -- config validation -------------------------------------------------------
-
-def test_langfuse_disabled_by_default():
-    cfg = Config()
-    assert cfg.agent.codex.langfuse.enabled is False
-
-
-def test_langfuse_enabled_requires_all_credentials():
-    with pytest.raises(ValueError, match="public_key"):
-        CodexLangfuseConfig(enabled=True, secret_key="sk", base_url="https://x")
-    with pytest.raises(ValueError, match="secret_key"):
-        CodexLangfuseConfig(enabled=True, public_key="pk", base_url="https://x")
-    with pytest.raises(ValueError, match="base_url"):
-        CodexLangfuseConfig(enabled=True, public_key="pk", secret_key="sk")
-
-
-def test_langfuse_enabled_with_all_credentials_ok():
-    cfg = CodexLangfuseConfig(
-        enabled=True, public_key="pk", secret_key="sk", base_url="https://x"
-    )
-    assert cfg.enabled and cfg.public_key == "pk"
-
-
-@pytest.mark.parametrize(
-    ("field", "kwargs"),
-    [
-        ("public_key", {"public_key": "   ", "secret_key": "sk", "base_url": "https://x"}),
-        ("secret_key", {"public_key": "pk", "secret_key": "   ", "base_url": "https://x"}),
-        ("base_url", {"public_key": "pk", "secret_key": "sk", "base_url": "   "}),
-    ],
-)
-def test_langfuse_blank_credential_is_rejected(field: str, kwargs: dict[str, str]):
-    with pytest.raises(ValueError, match=field):
-        CodexLangfuseConfig(enabled=True, **kwargs)
 
 
 # -- config.toml blocks ------------------------------------------------------
