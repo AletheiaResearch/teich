@@ -30,6 +30,20 @@ agent:
   #   use_host_auth: true
   #   host_auth_file: null            # default: $CODEX_HOME/auth.json or ~/.codex/auth.json
   #   auth_dir: ./.teich/codex-auth
+  #
+  #   # Codex-only: trace each session to Langfuse via the codex-observability
+  #   # plugin (https://langfuse.com/integrations/developer-tools/codex). The
+  #   # plugin is baked into the runtime image and installed into each container
+  #   # offline; its Stop hook uploads the completed session transcript. It is
+  #   # side-channel only (reads transcripts, fails open) -- it does not change
+  #   # Codex tool behavior or Teich's output files. All four fields are required
+  #   # when enabled. base_url may be Langfuse Cloud or a self-hosted URL; for a
+  #   # host-local instance use http://host.docker.internal:<port>.
+  #   langfuse:
+  #     enabled: true
+  #     public_key: pk-lf-...
+  #     secret_key: sk-lf-...
+  #     base_url: https://cloud.langfuse.com
 
 model:
   # Model id passed to the selected agent/provider.

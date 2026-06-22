@@ -47,6 +47,18 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     chmod +x /usr/local/bin/hermes && \
     (hermes --version || hermes --help >/dev/null)
 
+# Bake the Langfuse Codex observability plugin into a staging CODEX_HOME so Teich
+# can seed it into each session offline (no per-run network on the sandboxes).
+# Only used when agent.codex.langfuse.enabled is set; side-channel/observability
+# only. NOTE: pulls the plugin at its current HEAD -- the version is pinned at
+# image-build time, not by a commit hash. chmod a+rX so the unprivileged in-
+# container `codex` user (and the host `docker cp`) can read it.
+RUN HOME=/opt/codex-langfuse CODEX_HOME=/opt/codex-langfuse/.codex \
+    sh -c 'mkdir -p "$CODEX_HOME" \
+      && codex plugin marketplace add langfuse/codex-observability-plugin \
+      && codex plugin add tracing@codex-observability-plugin \
+      && chmod -R a+rX /opt/codex-langfuse'
+
 # Create working directory and user in one layer
 WORKDIR /workspace
 RUN useradd -m -s /bin/bash codex && \
