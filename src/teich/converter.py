@@ -19,6 +19,12 @@ from .tool_schema import (
 from .verification import apply_reward_to_row, reward_from_sidecar_data, verification_sidecar_path
 
 _INLINE_THINKING_BLOCK_PATTERN = re.compile(r"<(think|thinking)>(.*?)</\1>", re.DOTALL)
+# Output subdirectories that hold non-dataset artifacts (partial/failed runs, verifier
+# sidecars, sandbox checkouts, harbor bench intermediates). Dataset scanners, the README
+# builder, and publish all skip these so a mixed prompts+bench output/ stays coherent.
+NON_DATA_TRACE_DIR_NAMES = frozenset(
+    {"partials", "failures", "verification", "sandbox", "__pycache__", ".bench"}
+)
 FIRST_MESSAGE_TIMESTAMP_METADATA_KEY = "first_message_timestamp"
 PI_SYSTEM_PROMPT_CUSTOM_TYPE = "teich-system-prompt"
 TEICH_AVAILABLE_TOOLS_CUSTOM_TYPE = "teich-available-tools"
@@ -3935,7 +3941,7 @@ def _jsonl_files(source: Path) -> list[Path]:
         path
         for path in source.rglob("*.jsonl")
         if path.is_file()
-        and not {"partials", "failures", "verification"}.intersection(path.relative_to(source).parts)
+        and not NON_DATA_TRACE_DIR_NAMES.intersection(path.relative_to(source).parts)
     )
 
 

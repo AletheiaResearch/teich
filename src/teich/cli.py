@@ -19,7 +19,7 @@ from typer.core import TyperCommand, TyperGroup
 
 from .anonymize import anonymize_path
 from .config import Config
-from .converter import convert_traces_to_training_data
+from .converter import NON_DATA_TRACE_DIR_NAMES, convert_traces_to_training_data
 from .extract import CURSOR_EXTRACTION_NOTICE, ExtractProvider, extract_local_sessions
 from .runner import (
     ChatRunner,
@@ -177,8 +177,7 @@ pool_app = typer.Typer(
     cls=_help_group("PoolHelpGroup", POOL_EXTRA_HELP),
 )
 app.add_typer(pool_app, name="pool")
-NON_DATA_TRACE_DIR_NAMES = {"partials", "failures"}
-UPLOAD_IGNORE_PATTERNS = ["partials/**", "failures/**"]
+UPLOAD_IGNORE_PATTERNS = ["partials/**", "failures/**", ".bench/**"]
 UPLOAD_METADATA_PATTERNS = ["README.md", "tools.json"]
 
 
@@ -678,10 +677,15 @@ def generate(
         from .bench import run_bench  # lazy: harbor is an optional extra
 
         try:
-            run_bench(cfg, console=console, resume=resume)
+            written = run_bench(cfg, console=console, resume=resume)
         except RuntimeError as exc:
             console.print(f"[red]{exc}[/red]")
             raise typer.Exit(1) from exc
+        if written:
+            readme_path = _write_output_metadata(cfg)
+            console.print(f"[green]Wrote README: {readme_path}[/green]")
+        else:
+            console.print("[yellow]bench: no rows written; skipping dataset card.[/yellow]")
         return
 
     prompt_inputs = unique_prompt_inputs_by_completion_key(cfg.get_prompt_inputs())
@@ -1230,6 +1234,17 @@ tasks:
   restore_verifier_files: true  # restore a row's verifier_files from HEAD before verifying
   route_by_result: true         # write traces into output/passed | output/failed
   check_seed_baseline: true     # run the verifier on the pristine seed for a true F2P/P2P transition
+
+# Optional Harbor benchmark mode (`teich generate --mode bench`). Instead of the
+# prompts above, teich drives the optional `harbor` package (pip install 'teich[bench]')
+# over Harbor-format tasks: harbor builds each task's image, runs its built-in agent for
+# `agent.provider`, runs the task verifier, and teich ingests the native trace + reward
+# into the same output/ as reward-labeled rows (output/bench-<task>.jsonl + a
+# output/verification/ sidecar). Harbor's raw trial dirs live under output/.bench/ and are
+# excluded from the dataset card and uploads. `--resume` skips tasks already harvested.
+bench:
+  source: null                  # local Harbor task dir, or a dir of task dirs (git/HF: TBD)
+  backend: docker               # harbor environment backend
 
 # Number of prompts to run in parallel.
 max_concurrency: 1

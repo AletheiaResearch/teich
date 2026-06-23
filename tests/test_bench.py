@@ -208,8 +208,9 @@ def test_harvest_trace_pi_stream_produces_rewarded_rows(tmp_path):
     assert rows and rows[0]["reward"] == 1.0 and rows[0]["passed"] is True
     roles = [m["role"] for m in rows[0]["messages"]]
     assert "user" in roles and "assistant" in roles and "tool" in roles
-    # The normalized session file is kept under output/bench-sessions for inspection.
-    assert (tmp_path / "output" / "bench-sessions" / "add-bug" / "pi.jsonl").is_file()
+    # The normalized session file is kept under the hidden output/.bench dir (excluded
+    # from the dataset card / publish) for inspection.
+    assert (tmp_path / "output" / ".bench" / "sessions" / "add-bug" / "pi.jsonl").is_file()
 
 
 def test_harvest_trace_prefers_native_session_dir(tmp_path):
@@ -228,3 +229,32 @@ def test_harvest_trace_no_trace_returns_empty(tmp_path):
     agent_dir = tmp_path / "trial" / "agent"
     agent_dir.mkdir(parents=True)
     assert bench_runner._harvest_trace(cfg, _FakeTrial(agent_dir), None, "empty") == []
+
+
+def test_bench_output_path_uses_stem(tmp_path):
+    cfg = Config(output={"traces_dir": tmp_path / "output"})
+    assert bench_runner._bench_output_path(cfg, "add-bug") == tmp_path / "output" / "bench-add-bug.jsonl"
+
+
+def test_run_bench_resume_skips_already_harvested(tmp_path):
+    pytest.importorskip("harbor")
+    # A task whose output already exists -> resume skips it without invoking harbor.
+    tasks_dir = tmp_path / "tasks"
+    task = tasks_dir / "add-bug"
+    task.mkdir(parents=True)
+    (task / "task.toml").write_text("", encoding="utf-8")
+    out = tmp_path / "output"
+    out.mkdir()
+    existing = out / "bench-add-bug.jsonl"
+    existing.write_text('{"messages": [], "reward": 1.0, "passed": true}\n', encoding="utf-8")
+
+    cfg = Config(
+        agent={"provider": "pi"},
+        model={"model": "openrouter/z-ai/glm-5.2"},
+        api={"provider": "openrouter", "api_key": "sk-test"},
+        bench={"source": str(tasks_dir)},
+        output={"traces_dir": out},
+    )
+    # No harbor Trial is created for a skipped task; if it were, this would fail (sk-test).
+    written = bench_runner.run_bench(cfg, resume=True)
+    assert written == [existing]

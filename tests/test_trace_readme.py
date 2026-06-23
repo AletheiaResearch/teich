@@ -322,3 +322,41 @@ def test_write_traces_readme_uses_configured_tools_and_repo_id(tmp_path: Path):
     assert not (tmp_path / "tools.json").exists()
     assert '"name": "unobserved"' in readme
     assert '"description": "Available but not called"' in readme
+
+
+def _write_structured_row(path: Path, **extra) -> None:
+    row = {"prompt": "hi", "messages": [{"role": "assistant", "content": "ok"}], **extra}
+    path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+
+def test_readme_is_reward_aware_from_verification_sidecars(tmp_path: Path):
+    # A mixed dataset: one prompts-style row + one bench row, each with a sidecar.
+    _write_structured_row(tmp_path / "app-fix.jsonl", passed=True, reward=1.0)
+    _write_structured_row(tmp_path / "bench-add-bug.jsonl", passed=False, reward=0.0)
+    verification = tmp_path / "verification"
+    verification.mkdir()
+    (verification / "app-fix.json").write_text(json.dumps({"passed": True}), encoding="utf-8")
+    (verification / "bench-add-bug.json").write_text(
+        json.dumps({"passed": False, "reward": 0.0}), encoding="utf-8"
+    )
+    # A harbor intermediate that must NOT be treated as data or pollute the card.
+    bench_sessions = tmp_path / ".bench" / "sessions" / "add-bug"
+    bench_sessions.mkdir(parents=True)
+    (bench_sessions / "pi.jsonl").write_text('{"type":"session","id":"x"}\n', encoding="utf-8")
+
+    readme_path = write_traces_readme(
+        tmp_path, pretty_name="Verifiable Traces", tags=["agent-traces"]
+    )
+    readme = readme_path.read_text(encoding="utf-8")
+    assert "## Reward labels" in readme
+    assert '- "reward-labeled"' in readme
+    assert "Verified tasks: 2 (1 passed / 1 failed)." in readme
+    assert "Rows: 2" in readme  # the .bench/ session file is excluded from the row count
+
+
+def test_readme_has_no_reward_section_without_verification(tmp_path: Path):
+    _write_structured_row(tmp_path / "plain.jsonl")
+    readme_path = write_traces_readme(tmp_path, pretty_name="Plain Traces", tags=["agent-traces"])
+    readme = readme_path.read_text(encoding="utf-8")
+    assert "## Reward labels" not in readme
+    assert "reward-labeled" not in readme

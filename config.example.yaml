@@ -188,6 +188,17 @@ tasks:
   route_by_result: true         # write traces into output/passed | output/failed
   check_seed_baseline: true     # run the verifier on the pristine seed for a true F2P/P2P transition
 
+# Optional Harbor benchmark mode (`teich generate --mode bench`). Instead of the
+# prompts above, teich drives the optional `harbor` package (pip install 'teich[bench]')
+# over Harbor-format tasks: harbor builds each task's image, runs its built-in agent for
+# `agent.provider`, runs the task verifier, and teich ingests the native trace + reward
+# into the same output/ as reward-labeled rows (output/bench-<task>.jsonl + a
+# output/verification/ sidecar). Harbor's raw trial dirs live under output/.bench/ and are
+# excluded from the dataset card and uploads. `--resume` skips tasks already harvested.
+bench:
+  source: null                  # local Harbor task dir, or a dir of task dirs (git/HF: TBD)
+  backend: docker               # harbor environment backend
+
 # Number of prompts to run in parallel.
 max_concurrency: 1
 

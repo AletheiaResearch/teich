@@ -34,6 +34,11 @@ HARBOR_INSTALL_HINT = (
     "`pip install 'teich[bench]'` (requires Python 3.12+)."
 )
 
+# Hidden subdir under the output dir for harbor's raw trial dirs + normalized sessions.
+# Must stay listed in converter.NON_DATA_TRACE_DIR_NAMES so these never leak into the
+# dataset card or a publish.
+BENCH_WORK_DIR = ".bench"
+
 # teich agent provider -> harbor AgentName value.
 _PROVIDER_TO_AGENT: dict[str, str] = {
     "codex": "codex",
@@ -243,7 +248,7 @@ def _harvest_trace(
     if pi_txt.is_file():
         events = _pi_stream_to_session_events(pi_txt)
         if events:
-            norm_dir = cfg.output.traces_dir / "bench-sessions" / task_name
+            norm_dir = cfg.output.traces_dir / BENCH_WORK_DIR / "sessions" / task_name
             norm_dir.mkdir(parents=True, exist_ok=True)
             (norm_dir / "pi.jsonl").write_text(
                 "\n".join(json.dumps(event, ensure_ascii=False) for event in events) + "\n",
@@ -254,6 +259,15 @@ def _harvest_trace(
     if any(agent_dir.rglob("*.jsonl")):
         return _ingest_session_dir(cfg, agent_dir, reward, task_name)
     return []
+
+
+def _bench_stem(task_name: str) -> str:
+    """Dataset filename stem for a bench task (``bench-<task>`` -> ``bench-<task>.jsonl``)."""
+    return f"bench-{task_name}"
+
+
+def _bench_output_path(cfg: Config, task_name: str) -> Path:
+    return cfg.output.traces_dir / f"{_bench_stem(task_name)}.jsonl"
 
 
 def _ingest_session_dir(
@@ -270,7 +284,7 @@ def _ingest_session_dir(
     reward_value = reward.get("reward") if isinstance(reward, dict) else None
     for row in rows:
         apply_reward_to_row(row, passed=passed, reward=reward_value)
-    stem = f"bench-{task_name}"
+    stem = _bench_stem(task_name)
     out_path = cfg.output.traces_dir / f"{stem}.jsonl"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as handle:
@@ -299,10 +313,16 @@ def run_bench(cfg: Config, *, console: Any = None, resume: bool = False) -> list
         )
     _require_harbor()
     task_dirs = _resolve_task_dirs(source)
-    trials_dir = cfg.output.traces_dir / "bench-trials"
+    trials_dir = cfg.output.traces_dir / BENCH_WORK_DIR / "trials"
     trials_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     for task_dir in task_dirs:
+        existing = _bench_output_path(cfg, task_dir.name)
+        if resume and existing.is_file() and existing.stat().st_size > 0:
+            if console is not None:
+                console.print(f"[yellow]bench: skipping {task_dir.name} (already harvested)[/yellow]")
+            written.append(existing)
+            continue
         if console is not None:
             console.print(f"[blue]bench: running {task_dir.name}[/blue]")
         config = _build_trial_config(cfg, task_dir, trials_dir)
