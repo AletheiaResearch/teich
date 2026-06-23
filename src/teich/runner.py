@@ -42,11 +42,26 @@ from .converter import (
 from .tool_schema import snapshot_configured_tools
 
 RUNTIME_IMAGE_NAME = "teich-runtime:v3"
+LANGFUSE_RUNTIME_IMAGE_NAME = "teich-runtime:v3-langfuse"
 RUNTIME_DOCKERFILE_NAME = "codex-runtime.Dockerfile"
 RUNTIME_CONTAINER_USER = "codex"
 CODEX_HOME_IN_CONTAINER = "/home/codex/.codex"
 CLAUDE_HOME_IN_CONTAINER = "/home/codex/.claude"
 HERMES_HOME_IN_CONTAINER = "/home/codex/.hermes"
+
+# Langfuse Codex observability plugin: baked into the tracing-enabled runtime
+# image at a staging CODEX_HOME (see codex-runtime.Dockerfile) so Teich can seed
+# it into each session offline. The default runtime image does not install these
+# optional dependencies.
+LANGFUSE_PLUGIN_STAGE_CODEX_HOME = "/opt/codex-langfuse/.codex"
+LANGFUSE_PLUGIN_ID = "tracing@codex-observability-plugin"
+
+# Claude strips /opt/venv from a hook's PATH, so call the venv python (which has
+# the langfuse SDK) by absolute path. Script is baked into the tracing image.
+CLAUDE_LANGFUSE_PLUGIN_DIR = "/opt/claude-langfuse-plugin"
+CLAUDE_LANGFUSE_HOOK_COMMAND = (
+    f"/opt/venv/bin/python3 {CLAUDE_LANGFUSE_PLUGIN_DIR}/hooks/langfuse_hook.py"
+)
 PI_AGENT_DIR_IN_CONTAINER = "/home/codex/.pi/agent"
 PI_SESSIONS_DIR_IN_CONTAINER = "/home/codex/pi-sessions"
 WORKSPACE_IN_CONTAINER = "/workspace"
@@ -928,13 +943,19 @@ class DockerRuntimeRunner:
 
     def __init__(self, config: Config):
         self.config = config
-        self.image_name = RUNTIME_IMAGE_NAME
+        self.image_name = self._runtime_image_name()
         self._configured_tools_snapshot: list[dict[str, Any]] | None = None
         self._active_processes: dict[subprocess.Popen[str], str | None] = {}
         self._active_processes_lock = threading.Lock()
         self._active_containers: set[str] = set()
         self._active_containers_lock = threading.Lock()
         self._ensure_image()
+
+    def _runtime_image_name(self) -> str:
+        return RUNTIME_IMAGE_NAME
+
+    def _runtime_build_args(self) -> list[str]:
+        return []
 
     def _configured_tools(self) -> list[dict[str, Any]]:
         if self._configured_tools_snapshot is None:
@@ -1009,7 +1030,16 @@ class DockerRuntimeRunner:
 
         context = dockerfile_path.parent
         subprocess.run(
-            ["docker", "build", "-t", self.image_name, "-f", str(dockerfile_path), str(context)],
+            [
+                "docker",
+                "build",
+                *self._runtime_build_args(),
+                "-t",
+                self.image_name,
+                "-f",
+                str(dockerfile_path),
+                str(context),
+            ],
             check=True,
         )
 
@@ -1023,6 +1053,15 @@ class DockerRuntimeRunner:
             return base_url
         netloc = parsed.netloc.replace(hostname, "host.docker.internal", 1)
         return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+
+    def _langfuse_container_base_url(self) -> str | None:
+        return self._container_base_url(self.config.agent.langfuse.base_url)
+
+    def _langfuse_is_host_local(self) -> bool:
+        langfuse = self.config.agent.langfuse
+        return langfuse.enabled and "host.docker.internal" in (
+            self._langfuse_container_base_url() or ""
+        )
 
     @staticmethod
     def _prompt_preview(prompt: str, limit: int = 60) -> str:
@@ -2011,7 +2050,19 @@ class CodexRunner(DockerRuntimeRunner):
     def __init__(self, config: Config):
         self._broker: CodexTokenBroker | None = None
         self._broker_lock = threading.Lock()
+        self._langfuse_plugin_cache: Path | None = None
+        self._langfuse_plugin_lock = threading.Lock()
         super().__init__(config)
+
+    def _runtime_image_name(self) -> str:
+        if self.config.agent.langfuse.enabled:
+            return LANGFUSE_RUNTIME_IMAGE_NAME
+        return RUNTIME_IMAGE_NAME
+
+    def _runtime_build_args(self) -> list[str]:
+        if self.config.agent.langfuse.enabled:
+            return ["--build-arg", "TEICH_INSTALL_LANGFUSE=1"]
+        return []
 
     @staticmethod
     def _toml_string(value: str) -> str:
@@ -2088,6 +2139,58 @@ class CodexRunner(DockerRuntimeRunner):
     def _is_likely_incompatible_custom_provider(provider: str) -> bool:
         normalized = provider.strip().lower()
         return normalized in {"llama.cpp", "llama_cpp", "llamacpp"}
+
+    def _ensure_langfuse_plugin_cache(self) -> Path | None:
+        """Extract the image-baked Langfuse plugin once per run."""
+        if not self.config.agent.langfuse.enabled:
+            return None
+        if self._langfuse_plugin_cache is None:
+            with self._langfuse_plugin_lock:
+                if self._langfuse_plugin_cache is None:
+                    self._ensure_image()
+                    cache_dir = Path(tempfile.mkdtemp(prefix="teich-langfuse-plugin-"))
+                    self._extract_langfuse_plugin(cache_dir)
+                    self._langfuse_plugin_cache = cache_dir
+        return self._langfuse_plugin_cache
+
+    def _extract_langfuse_plugin(self, cache_dir: Path) -> None:
+        created = subprocess.run(
+            ["docker", "create", self.image_name],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        container_id = created.stdout.strip()
+        try:
+            subprocess.run(
+                [
+                    "docker",
+                    "cp",
+                    f"{container_id}:{LANGFUSE_PLUGIN_STAGE_CODEX_HOME}/plugins",
+                    str(cache_dir / "plugins"),
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        finally:
+            subprocess.run(
+                ["docker", "rm", "-f", container_id],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+    def _install_codex_langfuse_plugin(self, codex_home: Path) -> None:
+        cache = self._ensure_langfuse_plugin_cache()
+        if cache is None:
+            return
+        source = cache / "plugins"
+        dest = codex_home / "plugins"
+        shutil.copytree(source, dest, dirs_exist_ok=True)
+        for path in dest.rglob("*"):
+            path.chmod(0o777 if path.is_dir() else 0o644)
+        dest.chmod(0o777)
 
     def _prepare_shared_host_auth(self) -> Path:
         """Seed (once) and return the shared project ``auth.json`` snapshot.
@@ -2217,6 +2320,18 @@ class CodexRunner(DockerRuntimeRunner):
                 for key, value in mcp.env.items():
                     lines.append(f"{self._toml_string(key)} = {self._toml_string(value)}")
 
+        if self.config.agent.langfuse.enabled:
+            lines.extend(
+                [
+                    "",
+                    "[features]",
+                    "plugin_hooks = true",
+                    "",
+                    f'[plugins."{LANGFUSE_PLUGIN_ID}"]',
+                    "enabled = true",
+                ]
+            )
+
         config_text = "\n".join(lines).strip()
         config_path = codex_home / "config.toml"
         config_path.write_text(
@@ -2343,6 +2458,8 @@ class CodexRunner(DockerRuntimeRunner):
         provider_name = self.config.api.provider
         provider_env_key = self._provider_env_key(provider_name)
         broker = self._ensure_broker()
+        langfuse = self.config.agent.langfuse
+        langfuse_base_url = self._langfuse_container_base_url()
         cmd = [
             "docker",
             "run",
@@ -2364,7 +2481,12 @@ class CodexRunner(DockerRuntimeRunner):
             WORKSPACE_IN_CONTAINER,
         ]
         broker_active = broker is not None
-        if proxy_target or broker_active or (configured_base_url and base_url != configured_base_url):
+        if (
+            proxy_target
+            or broker_active
+            or self._langfuse_is_host_local()
+            or (configured_base_url and base_url != configured_base_url)
+        ):
             cmd.extend([
                 "--add-host",
                 "host.docker.internal:host-gateway",
@@ -2375,6 +2497,19 @@ class CodexRunner(DockerRuntimeRunner):
             # sole owner of the rotating refresh token. Codex is seeded with its
             # own auth.json copy in CODEX_HOME (see _write_seeded_codex_auth).
             cmd.extend(["-e", f"CODEX_REFRESH_TOKEN_URL_OVERRIDE={broker.override_url}"])
+        if langfuse.enabled:
+            cmd.extend(
+                [
+                    "-e",
+                    "TRACE_TO_LANGFUSE=true",
+                    "-e",
+                    f"LANGFUSE_PUBLIC_KEY={langfuse.public_key}",
+                    "-e",
+                    f"LANGFUSE_SECRET_KEY={langfuse.secret_key}",
+                    "-e",
+                    f"LANGFUSE_BASE_URL={langfuse_base_url or ''}",
+                ]
+            )
         if proxy_target:
             cmd.extend(
                 [
@@ -2413,6 +2548,8 @@ class CodexRunner(DockerRuntimeRunner):
             codex_cmd.extend(["resume", "--last"])
         codex_cmd.extend(["--model", model])
         codex_cmd.append("--skip-git-repo-check")
+        if self.config.agent.langfuse.enabled:
+            codex_cmd.append("--dangerously-bypass-hook-trust")
         if base_url and not self._is_oss_local_provider(provider_name):
             provider_key = self._custom_provider_key(provider_name)
             provider_literal = (
@@ -2566,6 +2703,7 @@ class CodexRunner(DockerRuntimeRunner):
             broker = self._ensure_broker()
             if broker is not None:
                 self._write_seeded_codex_auth(codex_home, broker)
+            self._install_codex_langfuse_plugin(codex_home)
             if self._local_provider_proxy_target(self.config.api.provider, self.config.get_base_url()):
                 self._write_local_provider_proxy(codex_home)
             existing_sessions = {path.resolve() for path in self._list_session_files(codex_home)}
@@ -2710,6 +2848,9 @@ class CodexRunner(DockerRuntimeRunner):
             if self._broker is not None:
                 self._broker.stop()
                 self._broker = None
+            if self._langfuse_plugin_cache is not None:
+                shutil.rmtree(self._langfuse_plugin_cache, ignore_errors=True)
+                self._langfuse_plugin_cache = None
 
 
 class ExternalCliRunner(DockerRuntimeRunner):
@@ -2762,6 +2903,12 @@ class ExternalCliRunner(DockerRuntimeRunner):
             ("ANTHROPIC_BASE_URL", base_url),
         ]
 
+    def _langfuse_env_items(self) -> list[tuple[str, str]]:
+        return []
+
+    def _prepare_agent_home(self, home_dir: Path) -> None:
+        return
+
     def _build_external_docker_base_command(
         self,
         workspace: Path,
@@ -2791,9 +2938,17 @@ class ExternalCliRunner(DockerRuntimeRunner):
             WORKSPACE_IN_CONTAINER,
         ]
         configured_base_url = self.config.get_base_url()
-        if configured_base_url and self._container_base_url(configured_base_url) != configured_base_url:
+        base_url_is_host_local = bool(
+            configured_base_url
+            and self._container_base_url(configured_base_url) != configured_base_url
+        )
+        if base_url_is_host_local or self._langfuse_is_host_local():
             command.extend(["--add-host", "host.docker.internal:host-gateway"])
-        for key, value in [*self._api_env_items(), *self._base_url_env_items()]:
+        for key, value in [
+            *self._api_env_items(),
+            *self._base_url_env_items(),
+            *self._langfuse_env_items(),
+        ]:
             command.extend(["-e", f"{key}={value}"])
         command.append(self.image_name)
         return command
@@ -2996,6 +3151,7 @@ class ExternalCliRunner(DockerRuntimeRunner):
         workspace_root, workspace = self._prepare_workspace(session_id, prompt_input, self.container_kind)
         home_dir = Path(tempfile.mkdtemp(prefix=f"{self.container_kind}-home-{session_id}-"))
         home_dir.chmod(0o777)
+        self._prepare_agent_home(home_dir)
         started_at = datetime.now(timezone.utc)
         container_name = self._container_name(self.container_kind, session_id)
         turn_prompts = _agent_turn_prompts(prompt, prompt_input)
@@ -3067,6 +3223,36 @@ class ClaudeCodeRunner(ExternalCliRunner):
     home_in_container = CLAUDE_HOME_IN_CONTAINER
     source_name = "claude-code"
     default_model_provider = "anthropic"
+
+    def _runtime_image_name(self) -> str:
+        if self.config.agent.langfuse.enabled:
+            return LANGFUSE_RUNTIME_IMAGE_NAME
+        return RUNTIME_IMAGE_NAME
+
+    def _runtime_build_args(self) -> list[str]:
+        if self.config.agent.langfuse.enabled:
+            return ["--build-arg", "TEICH_INSTALL_LANGFUSE=1"]
+        return []
+
+    def _langfuse_env_items(self) -> list[tuple[str, str]]:
+        langfuse = self.config.agent.langfuse
+        if not langfuse.enabled:
+            return []
+        return [
+            ("TRACE_TO_LANGFUSE", "true"),
+            ("LANGFUSE_PUBLIC_KEY", langfuse.public_key or ""),
+            ("LANGFUSE_SECRET_KEY", langfuse.secret_key or ""),
+            ("LANGFUSE_BASE_URL", self._langfuse_container_base_url() or ""),
+        ]
+
+    def _prepare_agent_home(self, home_dir: Path) -> None:
+        if not self.config.agent.langfuse.enabled:
+            return
+        hook = {"hooks": [{"type": "command", "command": CLAUDE_LANGFUSE_HOOK_COMMAND}]}
+        settings = {"hooks": {"Stop": [hook], "SessionEnd": [hook]}}
+        settings_path = home_dir / "settings.json"
+        settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+        settings_path.chmod(0o666)
 
     @staticmethod
     def _list_native_session_files(home_dir: Path) -> list[Path]:
@@ -3402,6 +3588,7 @@ class ClaudeCodeRunner(ExternalCliRunner):
         workspace_root, workspace = self._prepare_workspace(session_id, prompt_input, self.container_kind)
         home_dir = Path(tempfile.mkdtemp(prefix=f"{self.container_kind}-home-{session_id}-"))
         home_dir.chmod(0o777)
+        self._prepare_agent_home(home_dir)
         started_at = datetime.now(timezone.utc)
         container_name = self._container_name(self.container_kind, session_id)
         turn_prompts = _agent_turn_prompts(prompt, prompt_input)
@@ -3954,6 +4141,7 @@ class HermesRunner(ExternalCliRunner):
         workspace_root, workspace = self._prepare_workspace(session_id, prompt_input, self.container_kind)
         home_dir = Path(tempfile.mkdtemp(prefix=f"{self.container_kind}-home-{session_id}-"))
         home_dir.chmod(0o777)
+        self._prepare_agent_home(home_dir)
         container_name = self._container_name(self.container_kind, session_id)
         turn_prompts = _agent_turn_prompts(prompt, prompt_input)
         fallback_destination = self._resolve_hermes_trace_path()

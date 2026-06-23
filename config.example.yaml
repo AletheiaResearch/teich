@@ -29,6 +29,19 @@ agent:
   #   host_auth_file: null            # default: $CODEX_HOME/auth.json or ~/.codex/auth.json
   #   auth_dir: ./.teich/codex-auth
 
+  # Trace each agent session to Langfuse (https://langfuse.com). Works for Codex
+  # and Claude Code -- each uses its own native integration (Codex plugin, Claude
+  # Code Stop hook) and Teich passes the credentials into the container. Side-
+  # channel only: it reads transcripts, fails open, and doesn't change agent
+  # behavior or Teich's output files. All three credentials are required when
+  # enabled. base_url may be Langfuse Cloud or a self-hosted URL; for a host-local
+  # instance use http://host.docker.internal:<port>.
+  # langfuse:
+  #   enabled: true
+  #   public_key: pk-lf-...
+  #   secret_key: sk-lf-...
+  #   base_url: https://cloud.langfuse.com
+
 model:
   # Model id passed to the selected agent/provider.
   model: deepseek/deepseek-v4-flash

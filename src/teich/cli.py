@@ -725,10 +725,20 @@ def generate(
                     "[yellow]Heads up: once the rotating token is refreshed, your host Codex login "
                     "will be invalidated — run `codex login` on the host afterward to restore it.[/yellow]"
                 )
+            if cfg.agent.langfuse.enabled:
+                console.print(
+                    "[cyan]Codex Langfuse tracing enabled: uploading each session to "
+                    f"{cfg.agent.langfuse.base_url}.[/cyan]"
+                )
         elif agent_provider == "pi":
             runner = PiRunner(cfg)
         elif agent_provider in {"claude", "claude-code", "claude_code"}:
             runner = ClaudeCodeRunner(cfg)
+            if cfg.agent.langfuse.enabled:
+                console.print(
+                    "[cyan]Claude Code Langfuse tracing enabled: uploading each session to "
+                    f"{cfg.agent.langfuse.base_url}.[/cyan]"
+                )
         elif agent_provider in {"hermes", "hermes-agent", "hermes_agent"}:
             runner = HermesRunner(cfg)
         elif agent_provider == "chat":
@@ -1043,6 +1053,19 @@ agent:
   #   use_host_auth: true
   #   host_auth_file: null            # default: $CODEX_HOME/auth.json or ~/.codex/auth.json
   #   auth_dir: ./.teich/codex-auth
+
+  # Trace each agent session to Langfuse (https://langfuse.com). Works for Codex
+  # and Claude Code -- each uses its own native integration (Codex plugin, Claude
+  # Code Stop hook) and Teich passes the credentials into the container. Side-
+  # channel only: it reads transcripts, fails open, and doesn't change agent
+  # behavior or Teich's output files. All three credentials are required when
+  # enabled. base_url may be Langfuse Cloud or a self-hosted URL; for a host-local
+  # instance use http://host.docker.internal:<port>.
+  # langfuse:
+  #   enabled: true
+  #   public_key: pk-lf-...
+  #   secret_key: sk-lf-...
+  #   base_url: https://cloud.langfuse.com
 
 model:
   # Model id passed to the selected agent/provider.

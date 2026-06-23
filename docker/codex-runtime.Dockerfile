@@ -26,6 +26,7 @@ RUN ln -sf /usr/bin/python3 /usr/local/bin/python && \
     ln -sf /opt/venv/bin/pip3 /usr/local/bin/pip3
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 ENV VIRTUAL_ENV=/opt/venv
+ARG TEICH_INSTALL_LANGFUSE=0
 
 # Install Astral uv and npm-backed agent CLIs in one layer
 # Use npm cache mount for faster installs
@@ -46,6 +47,31 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     printf '#!/usr/bin/env bash\nunset PYTHONPATH\nunset PYTHONHOME\nexec /usr/local/lib/hermes-agent/venv/bin/hermes "$@"\n' > /usr/local/bin/hermes && \
     chmod +x /usr/local/bin/hermes && \
     (hermes --version || hermes --help >/dev/null)
+
+# Bake Langfuse tooling only for the tracing-enabled runtime image. The default
+# runtime image leaves this off so normal Teich runs do not depend on Langfuse
+# plugin, pip, or git availability during Docker rebuilds.
+RUN HOME=/opt/codex-langfuse CODEX_HOME=/opt/codex-langfuse/.codex \
+    sh -c 'mkdir -p "$CODEX_HOME" \
+      && if [ "$TEICH_INSTALL_LANGFUSE" = "1" ]; then \
+        codex plugin marketplace add langfuse/codex-observability-plugin \
+        && codex plugin add tracing@codex-observability-plugin; \
+      fi \
+      && chmod -R a+rX /opt/codex-langfuse'
+
+# Langfuse hook + SDK for Claude Code, pinned to a known-good commit so the
+# baked hook script is reproducible. The SDK goes in the venv because Claude
+# strips it from a hook's PATH, so the hook calls it by full path.
+RUN if [ "$TEICH_INSTALL_LANGFUSE" = "1" ]; then \
+      /opt/venv/bin/pip install --no-cache-dir "langfuse>=4.0,<5" \
+      && git clone https://github.com/langfuse/Claude-Observability-Plugin.git \
+          /opt/claude-langfuse-plugin \
+      && git -C /opt/claude-langfuse-plugin checkout 597af67d6c6b369f3e55db6cfa2ebe444f1af46c \
+      && rm -rf /opt/claude-langfuse-plugin/.git \
+      && chmod -R a+rX /opt/claude-langfuse-plugin; \
+    else \
+      mkdir -p /opt/claude-langfuse-plugin; \
+    fi
 
 # Create working directory and user in one layer
 WORKDIR /workspace
