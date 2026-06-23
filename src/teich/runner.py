@@ -1499,7 +1499,9 @@ class DockerRuntimeRunner:
         if self.config.tasks.restore_verifier_files and restore_files:
             try:
                 self._restore_verifier_files(workspace, restore_files)
-            except (subprocess.CalledProcessError, OSError) as exc:
+            except (subprocess.CalledProcessError, OSError, ValueError) as exc:
+                # ValueError = the path-traversal guard rejected a crafted verifier_files
+                # entry; treat it as a failed verification, not a crashed task.
                 return VerificationResult(
                     verifier=verifier,
                     passed=False,

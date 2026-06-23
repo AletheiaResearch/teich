@@ -6662,3 +6662,19 @@ def test_restore_verifier_files_removes_in_workspace_untracked_file(tmp_path: Pa
     added.write_text("print('x')", encoding="utf-8")
     DockerRuntimeRunner._restore_verifier_files(workspace, ["added.py"])
     assert not added.exists()
+
+
+def test_run_verifier_treats_path_traversal_as_failed_verification(tmp_path: Path):
+    # The traversal guard's ValueError must surface as a graceful failed verification
+    # (passed=False with an error), not propagate and crash the whole task.
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    with patch.object(DockerRuntimeRunner, "_ensure_image"):
+        runner = DockerRuntimeRunner(
+            Config(output={"traces_dir": tmp_path / "o", "sandbox_dir": tmp_path / "s"})
+        )
+    prompt_input = PromptInput(prompt="x", verifier="true", verifier_files=["../../secret.txt"])
+    result = runner._run_verifier(workspace, prompt_input)
+    assert result is not None
+    assert result.passed is False
+    assert "restore verifier files" in (result.error or "")
