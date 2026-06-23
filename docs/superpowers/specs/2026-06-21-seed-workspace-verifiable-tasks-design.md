@@ -2,6 +2,12 @@
 
 Status: approved · Date: 2026-06-21 · Branch: `worktree-seed-workspace-verifiable-tasks`
 
+> **Update (2026-06-23):** the "v2" items below — proper `FAIL_TO_PASS`/`PASS_TO_PASS`
+> with a real before/after seed baseline, and `base_commit` (clone a repo/bundle at a
+> commit, SWE-bench-style) — are now **implemented**. Reward falls back to the exit
+> code when no F2P/P2P lists are set. Remaining future work: fresh-clean-container
+> verifier isolation and per-repo (non-pytest) parsers. See [generation.md](../../generation.md#swe-bench-style-tasks-base_commit--f2pp2p).
+
 ## Goal
 
 Let teich generate **verifiable bug-fix traces**: seed an agent's workspace from a repository that already contains a planted bug (with real git history), run the agent to fix it, then run a verifier and record a reward + granular per-test results. The trace is SFT data; the reward is the RL signal.
