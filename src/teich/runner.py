@@ -40,6 +40,7 @@ from .converter import (
     normalize_codex_trace_events,
 )
 from .tool_schema import snapshot_configured_tools
+from .verification import verification_sidecar_path, write_verification_sidecar
 
 RUNTIME_IMAGE_NAME = "teich-runtime:v3"
 RUNTIME_DOCKERFILE_NAME = "codex-runtime.Dockerfile"
@@ -2129,7 +2130,7 @@ class DockerRuntimeRunner:
         return metrics
 
     def _verification_sidecar_path(self, trace_path: Path) -> Path:
-        return self.config.output.traces_dir / "verification" / f"{trace_path.stem}.json"
+        return verification_sidecar_path(self.config.output.traces_dir, trace_path.stem)
 
     def _route_destination(self, trace_path: Path, passed: bool) -> Path:
         subdir = "passed" if passed else "failed"
@@ -2224,12 +2225,7 @@ class DockerRuntimeRunner:
         if result is None:
             return trace_path, None
         self._apply_f2p_p2p_reward(result, prompt_input)
-        sidecar = self._verification_sidecar_path(trace_path)
-        sidecar.parent.mkdir(parents=True, exist_ok=True)
-        sidecar.write_text(
-            json.dumps(result.to_dict(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        write_verification_sidecar(self.config.output.traces_dir, trace_path.stem, result.to_dict())
         if not self.config.tasks.route_by_result:
             return trace_path, result
         destination = self._route_destination(trace_path, result.passed)

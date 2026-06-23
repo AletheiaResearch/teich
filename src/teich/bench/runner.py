@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..converter import convert_traces_to_training_data
+from ..verification import apply_reward_to_row, write_verification_sidecar
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -268,21 +269,15 @@ def _ingest_session_dir(
     passed = reward.get("passed") if isinstance(reward, dict) else None
     reward_value = reward.get("reward") if isinstance(reward, dict) else None
     for row in rows:
-        if isinstance(passed, bool):
-            row["passed"] = passed
-        if isinstance(reward_value, (int, float)) and not isinstance(reward_value, bool):
-            row["reward"] = float(reward_value)
-        elif isinstance(passed, bool):
-            row["reward"] = 1.0 if passed else 0.0
-    out_path = cfg.output.traces_dir / f"bench-{task_name}.jsonl"
+        apply_reward_to_row(row, passed=passed, reward=reward_value)
+    stem = f"bench-{task_name}"
+    out_path = cfg.output.traces_dir / f"{stem}.jsonl"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
     if reward is not None:
-        sidecar = cfg.output.traces_dir / "verification" / f"bench-{task_name}.json"
-        sidecar.parent.mkdir(parents=True, exist_ok=True)
-        sidecar.write_text(json.dumps(reward, ensure_ascii=False, indent=2), encoding="utf-8")
+        write_verification_sidecar(cfg.output.traces_dir, stem, reward)
     return [out_path]
 
 

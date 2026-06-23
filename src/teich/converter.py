@@ -16,6 +16,7 @@ from .tool_schema import (
     OPENCLAW_BUILTIN_TOOLS,
     PI_BUILTIN_TOOLS,
 )
+from .verification import apply_reward_to_row, reward_from_sidecar_data, verification_sidecar_path
 
 _INLINE_THINKING_BLOCK_PATTERN = re.compile(r"<(think|thinking)>(.*?)</\1>", re.DOTALL)
 FIRST_MESSAGE_TIMESTAMP_METADATA_KEY = "first_message_timestamp"
@@ -3948,8 +3949,8 @@ def _verification_reward_for_trace(trace_path: Path) -> dict[str, Any] | None:
     candidates: list[Path] = []
     if trace_path.parent.name in {"passed", "failed"}:
         # Routed trace: prefer the canonical <output_root>/verification sidecar.
-        candidates.append(trace_path.parent.parent / "verification" / f"{trace_path.stem}.json")
-    candidates.append(trace_path.parent / "verification" / f"{trace_path.stem}.json")
+        candidates.append(verification_sidecar_path(trace_path.parent.parent, trace_path.stem))
+    candidates.append(verification_sidecar_path(trace_path.parent, trace_path.stem))
     seen: set[Path] = set()
     for candidate in candidates:
         if candidate in seen:
@@ -4013,9 +4014,10 @@ def convert_traces_to_training_data(traces_dir: Path | str, *, skip_invalid_line
         file_rows = _convert_jsonl_file_to_training_rows(path, skip_invalid_lines=skip_invalid_lines)
         reward_data = _verification_reward_for_trace(path)
         if reward_data is not None:
-            passed = reward_data["passed"]  # guaranteed bool by _verification_reward_for_trace
+            # passed is a guaranteed bool here; reward is the explicit numeric value
+            # when the sidecar carries one (e.g. a fractional Harbor reward), else binary.
+            passed, reward = reward_from_sidecar_data(reward_data)
             for row in file_rows:
-                row["passed"] = passed
-                row["reward"] = 1.0 if passed else 0.0
+                apply_reward_to_row(row, passed=passed, reward=reward)
         rows.extend(file_rows)
     return rows
