@@ -277,6 +277,18 @@ class PromptInput(BaseModel):
         return [self.prompt, *self.follow_up_prompts]
 
 
+class BenchConfig(BaseModel):
+    """Benchmark-task settings for ``generate --mode bench``.
+
+    ``source`` points at Harbor-format tasks (a directory of tasks, a git repo,
+    or an HF dataset). Bench mode drives the `harbor` package (optional ``bench``
+    extra) to run each task in its own environment image, then ingests the
+    agent's native session + the task verifier's reward into teich's output.
+    """
+    source: str | None = None
+    backend: str = "docker"
+
+
 class Config(BaseModel):
     """Main configuration."""
     agent: AgentConfig = Field(default_factory=AgentConfig)
@@ -287,6 +299,7 @@ class Config(BaseModel):
     prompts_file: Path | None = None
     output: OutputConfig = Field(default_factory=OutputConfig)
     publish: PublishConfig = Field(default_factory=PublishConfig)
+    bench: BenchConfig = Field(default_factory=BenchConfig)
     max_concurrency: int = Field(default=1, ge=1)
     timeout_seconds: int = 600
     openai_api_key: str | None = None

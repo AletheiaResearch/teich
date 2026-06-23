@@ -652,6 +652,11 @@ def generate(
         "--resume",
         help="Skip prompts that already have completed answers in the output directory",
     ),
+    mode: str = typer.Option(
+        "prompts",
+        "--mode",
+        help="Generation mode: 'prompts' (default) or 'bench' (run Harbor-format benchmark tasks from bench.source).",
+    ),
 ) -> None:
     """Generate training traces from prompts."""
     console.print(Panel.fit("Teich", style="bold blue"))
@@ -665,6 +670,19 @@ def generate(
         cfg.output.traces_dir = output
     if concurrency is not None:
         cfg.max_concurrency = concurrency
+
+    if mode not in {"prompts", "bench"}:
+        console.print(f"[red]Unknown --mode '{mode}'. Use 'prompts' or 'bench'.[/red]")
+        raise typer.Exit(1)
+    if mode == "bench":
+        from .bench import run_bench  # lazy: harbor is an optional extra
+
+        try:
+            run_bench(cfg, console=console, resume=resume)
+        except RuntimeError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1) from exc
+        return
 
     prompt_inputs = unique_prompt_inputs_by_completion_key(cfg.get_prompt_inputs())
     if not prompt_inputs:
