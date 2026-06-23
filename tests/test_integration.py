@@ -287,7 +287,7 @@ class TestSeedVerifierDocker:
     """Real-Docker verification of the seed-workspace verifier reward path."""
 
     @staticmethod
-    def _require_runtime_image():
+    def _require_runtime_image() -> None:
         present = subprocess.run(
             ["docker", "images", "-q", RUNTIME_IMAGE_NAME], capture_output=True, text=True
         ).stdout.strip()

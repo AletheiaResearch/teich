@@ -4366,6 +4366,7 @@ def test_run_session_clones_github_repo_into_codex_workspace(tmp_path: Path):
     captured_workspace = None
 
     def capture_clone(_github_repo: str, destination: Path, base_commit: str | None = None) -> None:
+        del base_commit  # keyword kept to mirror _clone_github_repo(..., base_commit=)
         nonlocal cloned_destination
         cloned_destination = destination
         destination.mkdir(parents=True, exist_ok=True)
@@ -4399,6 +4400,7 @@ def test_run_session_clones_github_repo_into_pi_workspace(tmp_path: Path):
     captured_workspace = None
 
     def capture_clone(_github_repo: str, destination: Path, base_commit: str | None = None) -> None:
+        del base_commit  # keyword kept to mirror _clone_github_repo(..., base_commit=)
         nonlocal cloned_destination
         cloned_destination = destination
         destination.mkdir(parents=True, exist_ok=True)
@@ -6637,3 +6639,26 @@ def test_pi_runner_preserves_malformed_tool_call_trace(tmp_path: Path):
     assert exported[1]["message"]["content"][1]["id"] == ""
     assert exported[2]["message"]["role"] == "toolResult"
     assert "Validation failed for tool" in exported[2]["message"]["content"][0]["text"]
+
+
+def test_restore_verifier_files_rejects_path_traversal(tmp_path: Path):
+    # A task-supplied verifier_files entry with `..` must not delete files outside the
+    # workspace (it would otherwise reach the working dir from ./sandbox/<trace>).
+    workspace = tmp_path / "sandbox" / "trace-xyz"
+    workspace.mkdir(parents=True)
+    outside = tmp_path / "secret.txt"
+    outside.write_text("do not delete", encoding="utf-8")
+    with pytest.raises(ValueError, match="escapes the workspace"):
+        DockerRuntimeRunner._restore_verifier_files(workspace, ["../../secret.txt"])
+    assert outside.exists()  # the traversal was refused before any unlink
+
+
+def test_restore_verifier_files_removes_in_workspace_untracked_file(tmp_path: Path):
+    # An in-workspace file that isn't in HEAD is agent-added and gets removed. No git
+    # repo here, so cat-file returns non-zero (untracked) and we hit the unlink branch.
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    added = workspace / "added.py"
+    added.write_text("print('x')", encoding="utf-8")
+    DockerRuntimeRunner._restore_verifier_files(workspace, ["added.py"])
+    assert not added.exists()

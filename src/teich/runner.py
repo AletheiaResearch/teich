@@ -1421,7 +1421,15 @@ class DockerRuntimeRunner:
         raised); files absent from ``HEAD`` are agent-added and removed. The caller
         treats a raised failure as a failed verification rather than a silent pass.
         """
+        workspace_root = workspace.resolve()
         for rel in files:
+            # verifier_files / test ids are task-supplied (incl. untrusted datasets) and may
+            # contain ``..`` or absolute paths; never restore/delete outside the workspace.
+            target = (workspace / rel).resolve()
+            if not target.is_relative_to(workspace_root):
+                raise ValueError(
+                    f"verifier file {rel!r} escapes the workspace; refusing to touch {target}"
+                )
             tracked = subprocess.run(
                 ["git", "-C", str(workspace), "cat-file", "-e", f"HEAD:{rel}"],
                 capture_output=True,
@@ -1435,10 +1443,8 @@ class DockerRuntimeRunner:
                     check=True,
                     **TEXT_SUBPROCESS_KWARGS,
                 )
-            else:
-                target = workspace / rel
-                if target.is_file():
-                    target.unlink()
+            elif target.is_file():
+                target.unlink()
 
     def _build_verifier_command(self, workspace: Path, verifier: str) -> list[str]:
         return [
