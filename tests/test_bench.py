@@ -321,3 +321,73 @@ def test_run_bench_resume_skips_already_harvested(tmp_path):
     # No harbor Trial is created for a skipped task; if it were, this would fail (sk-test).
     written = bench_runner.run_bench(cfg, resume=True)
     assert written == [existing]
+
+
+class _RecordingConsole:
+    def __init__(self):
+        self.lines: list[str] = []
+
+    def print(self, message=""):
+        self.lines.append(str(message))
+
+
+def test_run_bench_reports_agent_failure_and_empty_harvest(tmp_path, monkeypatch):
+    pytest.importorskip("harbor")
+    tasks_dir = tmp_path / "tasks"
+    task = tasks_dir / "add-bug"
+    task.mkdir(parents=True)
+    (task / "task.toml").write_text("", encoding="utf-8")
+    # A trial whose agent dir is empty -> nothing to harvest.
+    agent_dir = tmp_path / "trial" / "agent"
+    agent_dir.mkdir(parents=True)
+
+    async def _fake_create_and_run(config):
+        result = _FakeResult(verifier_result=None, exception_info={"exception_type": "NonZeroAgentExitCodeError"})
+        return _FakeTrial(agent_dir), result
+
+    monkeypatch.setattr(bench_runner, "_create_and_run", _fake_create_and_run)
+    cfg = Config(
+        agent={"provider": "pi"},
+        model={"model": "openrouter/z-ai/glm-5.2"},
+        api={"provider": "openrouter", "api_key": "sk-test"},
+        bench={"source": str(tasks_dir)},
+        output={"traces_dir": tmp_path / "output"},
+    )
+    console = _RecordingConsole()
+    written = bench_runner.run_bench(cfg, console=console, resume=False)
+    assert written == []
+    blob = "\n".join(console.lines)
+    assert "did not finish cleanly (NonZeroAgentExitCodeError)" in blob
+    assert "no trace harvested for add-bug" in blob
+
+
+def test_run_bench_continues_past_one_task_infra_failure(tmp_path, monkeypatch):
+    pytest.importorskip("harbor")
+    tasks_dir = tmp_path / "tasks"
+    for name in ("a-task", "b-task"):
+        (tasks_dir / name).mkdir(parents=True)
+        (tasks_dir / name / "task.toml").write_text("", encoding="utf-8")
+
+    calls: list[str] = []
+
+    async def _fake_create_and_run(config):
+        calls.append(str(config.task.path))
+        # First task blows up with a non-RuntimeError infra error; second must still run.
+        if len(calls) == 1:
+            raise OSError("docker build failed")
+        return _FakeTrial(tmp_path / "empty"), _FakeResult(verifier_result={"rewards": {"reward": 1.0}})
+
+    (tmp_path / "empty").mkdir()
+    monkeypatch.setattr(bench_runner, "_create_and_run", _fake_create_and_run)
+    cfg = Config(
+        agent={"provider": "pi"},
+        model={"model": "openrouter/z-ai/glm-5.2"},
+        api={"provider": "openrouter", "api_key": "sk-test"},
+        bench={"source": str(tasks_dir)},
+        output={"traces_dir": tmp_path / "output"},
+    )
+    console = _RecordingConsole()
+    bench_runner.run_bench(cfg, console=console, resume=False)
+    # Both tasks were attempted (the first failure did not abort the batch).
+    assert len(calls) == 2
+    assert any("failed (OSError" in line for line in console.lines)
