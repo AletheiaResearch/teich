@@ -1,59 +1,55 @@
-# Harbor interop for teich — design (Option A)
+# Harbor interop for teich — design (A′: drive + ingest)
 
-Status: draft for review · Date: 2026-06-23 · Branch: `worktree-harbor-interop` (off `origin/main`)
+Status: approved-in-principle · Date: 2026-06-23 · Branch: `worktree-harbor-interop` (off `origin/main`)
 
 ## Goal
 
-Let teich run its agents on **Harbor-format tasks** (the format used by Terminal-Bench, datacurve-ai/deep-swe, and SWE-bench-via-Harbor) and emit teich's normalized training traces **plus the task's reward**. This turns the entire Harbor/SWE ecosystem into trace + reward sources for SFT/RL, while keeping teich's native-trace normalization and its pi/hermes runners (which Pier/Harbor don't ship).
+Run teich's agents on **Harbor-format tasks** (Terminal-Bench, datacurve-ai/deep-swe, SWE-bench-via-Harbor) and emit teich's normalized training traces **plus the task's reward** — turning the Harbor/SWE ecosystem into SFT/RL trace+reward sources.
 
-Approved approach: **Option A** — wrap each teich runner as a Harbor agent that runs **inside the task's environment image**; Harbor owns the environment + verifier/reward; teich keeps `converter.py`. Build **vertical-slice-first** (codex on one real task) before generalizing.
+## What changed from the first draft (Option A → A′)
 
-## Verified Harbor contract (from harbor-framework/harbor + datacurve-ai/deep-swe)
+Installing `harbor` (0.15.0) and reading its source overturned the premise that justified reimplementing agents:
 
-- A task is a directory: `task.toml` + `instruction.md` + `environment/` (Dockerfile/compose/image) + `tests/` (verifier `test.sh` + grader) + optional `solution/`. `task.toml` sections: `[task]`, `[metadata]` (freeform — SWE fields `repository_url`/`base_commit_hash`/`language` live here), `[environment]`, `[agent]`, `[verifier]`, `[solution]`, `artifacts`.
-- **The agent runs INSIDE the per-task environment container.** The **repo** is baked into that image (`environment/Dockerfile` clones `repository_url` + checks out `base_commit_hash`); the **agent CLI is installed at runtime** by the agent's `install()` (not baked in).
-- **Verifier**: `[verifier] environment_mode="separate"` → grading in a pristine container. The agent's git diff is captured (`pre_artifacts.sh` → `model.patch`), reapplied on a clean checkout, F2P/P2P run → reward written to **`/logs/verifier/reward.json`** (binary + partial fractions; `reward.txt` fallback).
-- **Agent interface**: `BaseAgent` (`name`/`version`/`setup`/`run(instruction, environment, context)`) and `BaseInstalledAgent` (adds `install(environment)` + `exec_as_root`/`exec_as_agent` helpers + a `with_prompt_template` decorator). Run via `harbor run`/`harbor trials start -p <task> -a <agent> -m <model>`; backends docker/modal/daytona. `harbor` is a PyPI package.
+- Harbor **ships built-in installed agents for all four teich runners**: `codex`, `claude_code`, `pi`, `hermes` (plus aider/opencode/cursor/goose/…), via `AgentFactory._AGENT_MAP` keyed by an `AgentName` enum.
+- Each built-in agent already **installs the CLI into the per-task image, runs it, and copies the agent's NATIVE session JSONL out to `logs_dir/sessions/`** (codex: `cp -R $CODEX_HOME/sessions`; claude: `sessions/projects/**.jsonl`) — then also emits an ATIF `trajectory.json`.
+- The task's verifier already produces **`/logs/verifier/reward.json`**.
+
+So reimplementing `BaseInstalledAgent` per runner (old Option A) would duplicate harbor and re-introduce install-fragility for no gain. Instead:
+
+**A′ — drive harbor's built-in agents as a library, ingest their output.** teich keeps its crown jewel (`converter.py`) by consuming the **native session files harbor already exports**, and gets the reward from `reward.json`.
 
 ## Architecture
 
-**Surface / naming:** `teich generate **--mode {prompts,bench}**` (default `prompts`, = today's behavior). The *source* for each mode lives in config, consistent with prompts: `prompts_file`/`prompts` for prompts mode, a **`bench:` block** (`bench.source` = a dir of Harbor tasks, a git repo, or an HF dataset of tasks) for bench mode. `--mode bench` with no `bench.source` is an error. No path on the CLI, no separate command; "Harbor" stays an internal *format* detail. Internal package is `src/teich/bench/` with a Harbor-format adapter (`bench/harbor.py`); `agent.provider`, `model`, and `api` auth come from config as usual.
+- **Optional dependency.** `harbor` is the **`bench` extra** (`pip install teich[bench]`), gated to **Python ≥ 3.12** (`harbor>=0.15.0 ; python_full_version >= '3.12'`) since harbor requires 3.12 while teich core stays ≥3.10. Bench mode without it → a clear "install teich[bench] (needs Python 3.12+)" error. harbor is imported lazily, only on the bench path.
+- **Surface.** `teich generate **--mode {prompts,bench}**` (default `prompts` = today). Source for each mode lives in config: `prompts_file`/`prompts` vs a **`bench:` block** (`bench.source` = a dir of Harbor tasks, a git repo, or an HF dataset of tasks). `--mode bench` with no `bench.source` → error.
+- **Driver — `src/teich/bench/`** (imports harbor lazily):
+  1. Resolve `bench.source` → task dir(s).
+  2. For each task, run harbor **via its Python API** (built-in agent chosen from `agent.provider` → `AgentName`; model from `model.model`; `api` key/`base_url` passed as the agent's credentials; **docker** backend). Harbor builds the task image, runs the agent in it, runs the separate verifier.
+  3. **Ingest:** read the trial's `logs_dir/sessions/*.jsonl` (native session) → existing **`converter.py`** → teich training rows; read `reward.json` → attach `reward`/`passed` (+ partial fractions); write to `output/` with the verification sidecar shape from the verifiable-tasks work.
+- **Auth.** The in-container agent uses teich's existing `api` config (API key + optional `base_url`, incl. OpenRouter). **Codex ChatGPT-subscription/broker is excluded** (per-task-container conflicts).
+- Existing single-image runner path (`--mode prompts`) is **untouched**.
 
-**Auth:** the in-container agent authenticates via teich's existing **`api` config** (API key + optional `base_url`, incl. OpenRouter / OpenAI-compatible). The Codex ChatGPT-subscription/broker path is **explicitly excluded** for bench mode (per-task containers + broker host-wiring conflict).
+## Vertical slice (deliverable)
 
-New package `src/teich/bench/`:
+1. **Confirm harbor's programmatic run API** — how to run a single task/trial in-process (the trial runner / a `run`-equivalent), select a built-in agent + model, pick the docker backend, and get the resulting `logs_dir` (with `sessions/` + `reward.json`). (We use harbor as a package, not its CLI.)
+2. **Driver for codex** — `--mode bench` + `bench.source`; run harbor's `codex` agent on one real deep-swe task with `api` key auth.
+3. **Ingest** — `logs_dir/sessions/*.jsonl` → `converter.py` → a teich row; `reward.json` → reward; write to `output/` (+ sidecar).
+4. **One real-Docker end-to-end run** as acceptance.
 
-- **`<Runner>HarborAgent(BaseInstalledAgent)`** per teich runner (codex first):
-  - `install(environment)` — `exec_as_root` for system deps (e.g. node), `exec_as_agent` to install the CLI (`npm i -g @openai/codex`) and seed auth/config (CODEX_HOME/auth.json or API-key env, `config.toml`). Optional teich extras (Langfuse plugin, proxies) are **opt-in** and skipped for air-gapped tasks.
-  - `run(instruction, environment, context)` — exec the headless CLI (`codex exec --skip-git-repo-check …`) against `instruction.md` in the task workdir, teed to `/logs/agent/`.
-  - **harvest** (post-run hook) — read the agent's native session JSONL from the container, feed it to existing `converter.py` → teich training rows; read `/logs/verifier/reward.json` and attach `reward`/`passed`/partials.
-- **Driver** — `teich generate --bench <source>` runs Harbor with the teich agent over a task/dataset and writes teich rows + reward sidecars into `output/`. Reuses `converter.py` and the reward-sidecar shape from the verifiable-tasks work.
-- teich gains a dependency on **`harbor`**; the existing single-image runner path is untouched (Harbor tasks are a separate path).
+## Testability boundary
 
-## Vertical slice (this spec's deliverable)
-
-1. **Confirm the real Harbor agent API** — `pip install harbor`, read the actual `BaseInstalledAgent` import path + how a custom agent is registered/discovered (entry point vs `--agent` import path). Write a hello-world custom agent that runs on `examples/tasks/hello-world`.
-2. **CodexHarborAgent** — install codex + seed auth, run `codex exec` against one real **deep-swe** task (e.g. `abs-module-cache-flags`), let Harbor build the task image + run its separate verifier.
-3. **Harvest** — pull codex's native session out of the container → `converter.py` → a teich row; read `reward.json` and attach the reward.
-4. **One end-to-end run** on real Docker as the acceptance test.
-
-## Testability boundary (explicit)
-
-- **Unit-testable (no Docker/auth):** task.toml/`reward.json` parsing, the harvest→converter mapping, reward attachment, CLI-invocation construction.
-- **Needs Docker (no auth):** `install()` into a built task image; Harbor environment plumbing; reading the native session out of the container.
-- **Needs auth (your run):** the agent *actually fixing* the task end-to-end (codex needs an API key/ChatGPT subscription). I'll prove plumbing + a mocked/seeded run; the real fix run is yours.
+- **Unit-testable (no Docker/harbor/auth):** config (`--mode`, `bench.source`), the ingest mapping (native `logs_dir/sessions` layout → `converter.py` → row), `reward.json` parsing + attachment, the "harbor not installed / Python <3.12" guard.
+- **Needs Docker + harbor (no model auth):** harbor builds the task image + runs the agent/verifier plumbing.
+- **Needs model auth (your run):** the agent actually solving a task end-to-end (API key in env). I prove plumbing + ingest on a captured/seeded `logs_dir`; the real solve run is yours.
 
 ## Risks / open questions
 
-- **Custom-agent registration API** — exact mechanism (entry point? import path?) unconfirmed; step 1 resolves it. If harbor can't load an external agent cleanly, fall back to driving harbor programmatically or vendoring the agent base.
-- **Install fragility** — teich's heavier tooling (Langfuse, codex auth broker, proxies, `host.docker.internal`) into heterogeneous/air-gapped task images is the known cost; keep it opt-in, slice uses the minimum.
-- **Auth into the task container** — decided: use the `api` key (+ `base_url`) only; the Codex subscription/broker is excluded to avoid per-task-container conflicts.
-- **pi/hermes** — deferred to after the codex slice proves the contract.
-
-## Out of scope (this slice)
-
-pi/hermes Harbor agents; air-gapped/allowlist tooling; a full SWE-bench/deep-swe collection importer; the native teich seed-bundle verifier path (that's the separate PR #1 — Harbor tasks bring their own verifier).
+- **harbor internal-API stability** — we depend on harbor's Python API + `logs_dir`/`reward.json` layout, which can shift across versions. Pin a tested range and keep the ingest tolerant; step 1 confirms the exact API for 0.15.0.
+- **Python 3.12 floor for bench** — acceptable (optional extra); core teich unaffected.
+- **harbor's heavy deps** (supabase/tiktoken/…) — fine because optional.
+- **Backend** — docker first; modal/daytona later via harbor config.
+- **pi/hermes/claude** — should be near-free once codex ingest works (same `logs_dir/sessions` + converter path), but each agent's native layout is verified before claiming support.
 
 ## Relationship to PR #1
 
-Independent. PR #1 (seed bundles + teich's own F2P/P2P verifier) stays teich-native; Harbor interop is a parallel path where Harbor owns the environment + verifier. They share `converter.py` and the reward-sidecar idea but don't depend on each other.
+Independent. PR #1 (teich-native seed bundles + its own F2P/P2P verifier) stays; Harbor mode delegates env+verifier to harbor. They share `converter.py` and the reward-sidecar idea; neither depends on the other.
