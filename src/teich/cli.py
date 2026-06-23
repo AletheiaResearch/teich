@@ -716,10 +716,20 @@ def generate(
     try:
         if agent_provider == "codex":
             runner = CodexRunner(cfg)
+            if cfg.agent.langfuse.enabled:
+                console.print(
+                    "[cyan]Codex Langfuse tracing enabled: uploading each session to "
+                    f"{cfg.agent.langfuse.base_url}.[/cyan]"
+                )
         elif agent_provider == "pi":
             runner = PiRunner(cfg)
         elif agent_provider in {"claude", "claude-code", "claude_code"}:
             runner = ClaudeCodeRunner(cfg)
+            if cfg.agent.langfuse.enabled:
+                console.print(
+                    "[cyan]Claude Code Langfuse tracing enabled: uploading each session to "
+                    f"{cfg.agent.langfuse.base_url}.[/cyan]"
+                )
         elif agent_provider in {"hermes", "hermes-agent", "hermes_agent"}:
             runner = HermesRunner(cfg)
         elif agent_provider == "chat":
@@ -1020,6 +1030,19 @@ agent:
   # hermes = Hermes Agent CLI in Docker
   # chat = direct text-only dataset generation via an OpenAI-compatible API
   provider: pi
+
+  # Trace each agent session to Langfuse (https://langfuse.com). Works for Codex
+  # and Claude Code -- each uses its own native integration (Codex plugin, Claude
+  # Code Stop hook) and Teich passes the credentials into the container. Side-
+  # channel only: it reads transcripts, fails open, and doesn't change agent
+  # behavior or Teich's output files. All three credentials are required when
+  # enabled. base_url may be Langfuse Cloud or a self-hosted URL; for a host-local
+  # instance use http://host.docker.internal:<port>.
+  # langfuse:
+  #   enabled: true
+  #   public_key: pk-lf-...
+  #   secret_key: sk-lf-...
+  #   base_url: https://cloud.langfuse.com
 
 model:
   # Model id passed to the selected agent/provider.

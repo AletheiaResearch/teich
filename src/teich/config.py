@@ -96,9 +96,43 @@ class APIConfig(BaseModel):
     wire_api: str = "responses"
 
 
+class LangfuseConfig(BaseModel):
+    """Langfuse tracing credentials, set under ``agent.langfuse``.
+
+    When enabled, Teich wires each agent's Langfuse integration (the Codex
+    plugin, the Claude Code Stop hook) and passes these credentials into the
+    container. Tracing is side-channel only: it reads transcripts, fails open,
+    and does not change agent behavior or Teich's output files.
+    """
+    enabled: bool = False
+    public_key: str | None = None
+    secret_key: str | None = None
+    base_url: str | None = None
+
+    @model_validator(mode="after")
+    def require_credentials_when_enabled(self) -> LangfuseConfig:
+        if self.enabled:
+            missing = [
+                name
+                for name, value in (
+                    ("public_key", self.public_key),
+                    ("secret_key", self.secret_key),
+                    ("base_url", self.base_url),
+                )
+                if not (value and value.strip())
+            ]
+            if missing:
+                raise ValueError(
+                    "langfuse requires " + ", ".join(missing) + " when enabled"
+                )
+        return self
+
+
 class AgentConfig(BaseModel):
     """Agent runtime selection."""
     provider: str = "codex"
+    # Langfuse tracing, applied to every agent that supports it (Codex, Claude).
+    langfuse: LangfuseConfig = Field(default_factory=LangfuseConfig)
 
 
 class ModelConfig(BaseModel):
