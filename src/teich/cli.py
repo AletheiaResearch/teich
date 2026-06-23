@@ -210,6 +210,25 @@ def _has_non_empty_trace_outputs(traces_dir: Path) -> bool:
     return False
 
 
+def _existing_dataset_modes(traces_dir: Path) -> set[str]:
+    """Which generation modes already wrote dataset rows into ``traces_dir``.
+
+    bench rows are ``bench-<task>.jsonl``; anything else (incl. routed
+    ``passed/``|``failed/`` traces) is prompts. Used to keep bench and prompts as
+    separate, homogeneous datasets — a mixed dir is unpleasant to consume.
+    """
+    modes: set[str] = set()
+    if not traces_dir.exists():
+        return modes
+    for path in traces_dir.rglob("*.jsonl"):
+        if not path.is_file() or path.stat().st_size == 0:
+            continue
+        if NON_DATA_TRACE_DIR_NAMES.intersection(path.relative_to(traces_dir).parts):
+            continue
+        modes.add("bench" if path.name.startswith("bench-") else "prompts")
+    return modes
+
+
 def _write_output_metadata(cfg: Config) -> Path:
     return write_traces_readme(
         cfg.output.traces_dir,
@@ -672,6 +691,19 @@ def generate(
 
     if mode not in {"prompts", "bench"}:
         console.print(f"[red]Unknown --mode '{mode}'. Use 'prompts' or 'bench'.[/red]")
+        raise typer.Exit(1)
+    conflicting_modes = _existing_dataset_modes(cfg.output.traces_dir) - {mode}
+    if conflicting_modes:
+        other = ", ".join(sorted(conflicting_modes))
+        console.print(
+            f"[red]{cfg.output.traces_dir} already contains {other}-mode data; "
+            f"refusing to mix it with {mode}-mode output.[/red]"
+        )
+        console.print(
+            "[yellow]Keep bench and prompts as separate datasets (a mixed dataset is unpleasant "
+            "to consume). Point --output at a fresh directory, or use a separate config/project "
+            "with its own output.traces_dir and publish.repo_id.[/yellow]"
+        )
         raise typer.Exit(1)
     if mode == "bench":
         from .bench import run_bench  # lazy: harbor is an optional extra
@@ -1238,10 +1270,12 @@ tasks:
 # Optional Harbor benchmark mode (`teich generate --mode bench`). Instead of the
 # prompts above, teich drives the optional `harbor` package (pip install 'teich[bench]')
 # over Harbor-format tasks: harbor builds each task's image, runs its built-in agent for
-# `agent.provider`, runs the task verifier, and teich ingests the native trace + reward
-# into the same output/ as reward-labeled rows (output/bench-<task>.jsonl + a
-# output/verification/ sidecar). Harbor's raw trial dirs live under output/.bench/ and are
-# excluded from the dataset card and uploads. `--resume` skips tasks already harvested.
+# `agent.provider`, runs the task verifier, and teich ingests the native trace + reward as
+# reward-labeled rows (output/bench-<task>.jsonl + an output/verification/ sidecar).
+# Harbor's raw trial dirs live under output/.bench/ and are excluded from the card/uploads.
+# `--resume` skips tasks already harvested. Keep bench its own project: give it a dedicated
+# output.traces_dir + publish.repo_id so it's a standalone dataset (teich refuses to mix
+# bench and prompts rows in one output dir).
 bench:
   source: null                  # local Harbor task dir, or a dir of task dirs (git/HF: TBD)
   backend: docker               # harbor environment backend

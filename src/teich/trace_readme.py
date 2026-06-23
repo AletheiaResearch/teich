@@ -429,8 +429,7 @@ def _reward_labels_section(reward_stats: dict[str, int]) -> list[str]:
         "",
         f"Verified tasks: {reward_stats['total']} "
         f"({reward_stats['passed']} passed / {reward_stats['failed']} failed).",
-        "Rewards come from the task verifier — teich's own verifier (prompts mode: seed and "
-        "SWE-bench-style fail-to-pass/pass-to-pass) or the Harbor task verifier (bench mode).",
+        "Each reward comes from the task verifier run after the agent's attempt.",
         "",
     ]
 

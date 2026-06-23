@@ -330,13 +330,13 @@ def _write_structured_row(path: Path, **extra) -> None:
 
 
 def test_readme_is_reward_aware_from_verification_sidecars(tmp_path: Path):
-    # A mixed dataset: one prompts-style row + one bench row, each with a sidecar.
-    _write_structured_row(tmp_path / "app-fix.jsonl", passed=True, reward=1.0)
-    _write_structured_row(tmp_path / "bench-add-bug.jsonl", passed=False, reward=0.0)
+    # Two verified rows with sidecars; the card summarizes their pass/fail counts.
+    _write_structured_row(tmp_path / "task-a.jsonl", passed=True, reward=1.0)
+    _write_structured_row(tmp_path / "task-b.jsonl", passed=False, reward=0.0)
     verification = tmp_path / "verification"
     verification.mkdir()
-    (verification / "app-fix.json").write_text(json.dumps({"passed": True}), encoding="utf-8")
-    (verification / "bench-add-bug.json").write_text(
+    (verification / "task-a.json").write_text(json.dumps({"passed": True}), encoding="utf-8")
+    (verification / "task-b.json").write_text(
         json.dumps({"passed": False, "reward": 0.0}), encoding="utf-8"
     )
     # A harbor intermediate that must NOT be treated as data or pollute the card.

@@ -67,6 +67,48 @@ def test_generate_bench_mode_requires_source(tmp_path: Path):
     assert "bench.source" in result.output
 
 
+def test_generate_bench_refuses_to_mix_with_prompts_output(tmp_path: Path):
+    output = tmp_path / "output"
+    output.mkdir()
+    (output / "some-trace.jsonl").write_text('{"messages": []}\n', encoding="utf-8")  # prompts data
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        f"agent:\n  provider: pi\nbench:\n  source: {tmp_path}/tasks\noutput:\n  traces_dir: {output}\n",
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["generate", "-c", str(config_file), "--mode", "bench"])
+    assert result.exit_code == 1
+    assert "already contains prompts-mode data" in " ".join(result.output.split())
+
+
+def test_generate_prompts_refuses_to_mix_with_bench_output(tmp_path: Path):
+    output = tmp_path / "output"
+    output.mkdir()
+    (output / "bench-add-bug.jsonl").write_text('{"messages": []}\n', encoding="utf-8")  # bench data
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        f"agent:\n  provider: chat\nprompts:\n  - hello\noutput:\n  traces_dir: {output}\n",
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["generate", "-c", str(config_file)])
+    assert result.exit_code == 1
+    assert "already contains bench-mode data" in " ".join(result.output.split())
+
+
+def test_existing_dataset_modes_classifies_rows(tmp_path: Path):
+    from teich.cli import _existing_dataset_modes
+
+    (tmp_path / "bench-x.jsonl").write_text('{"messages": []}\n', encoding="utf-8")
+    (tmp_path / "organic.jsonl").write_text('{"messages": []}\n', encoding="utf-8")
+    (tmp_path / "passed").mkdir()
+    (tmp_path / "passed" / "routed.jsonl").write_text('{"messages": []}\n', encoding="utf-8")
+    # Intermediates / empties must not count as dataset rows.
+    (tmp_path / ".bench" / "sessions").mkdir(parents=True)
+    (tmp_path / ".bench" / "sessions" / "pi.jsonl").write_text('{"type":"session"}\n', encoding="utf-8")
+    (tmp_path / "empty.jsonl").write_text("", encoding="utf-8")
+    assert _existing_dataset_modes(tmp_path) == {"bench", "prompts"}
+
+
 def test_convert_command_writes_openai_style_training_jsonl(tmp_path: Path):
     traces_dir = tmp_path / "traces"
     traces_dir.mkdir()

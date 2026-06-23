@@ -191,10 +191,12 @@ tasks:
 # Optional Harbor benchmark mode (`teich generate --mode bench`). Instead of the
 # prompts above, teich drives the optional `harbor` package (pip install 'teich[bench]')
 # over Harbor-format tasks: harbor builds each task's image, runs its built-in agent for
-# `agent.provider`, runs the task verifier, and teich ingests the native trace + reward
-# into the same output/ as reward-labeled rows (output/bench-<task>.jsonl + a
-# output/verification/ sidecar). Harbor's raw trial dirs live under output/.bench/ and are
-# excluded from the dataset card and uploads. `--resume` skips tasks already harvested.
+# `agent.provider`, runs the task verifier, and teich ingests the native trace + reward as
+# reward-labeled rows (output/bench-<task>.jsonl + an output/verification/ sidecar).
+# Harbor's raw trial dirs live under output/.bench/ and are excluded from the card/uploads.
+# `--resume` skips tasks already harvested. Keep bench its own project: give it a dedicated
+# output.traces_dir + publish.repo_id so it's a standalone dataset (teich refuses to mix
+# bench and prompts rows in one output dir).
 bench:
   source: null                  # local Harbor task dir, or a dir of task dirs (git/HF: TBD)
   backend: docker               # harbor environment backend
