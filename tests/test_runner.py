@@ -2112,6 +2112,26 @@ def test_no_f2p_p2p_keeps_exit_code_reward():
     assert result.resolved is None and result.passed is True
 
 
+def test_f2p_p2p_baseline_missing_is_not_resolved():
+    """A baseline where the F2P test never ran must NOT count as a fail->pass transition."""
+    runner = _f2p_runner(check_seed_baseline=True)
+    result = _after_result({"t::bug": "passed"})  # after-state passes
+    pi = PromptInput(prompt="x", seed_repo="s", verifier="pytest", fail_to_pass=["t::bug"])
+    baseline = VerificationResult(verifier="pytest", passed=False, exit_code=2, duration_s=1.0, tests={})
+    with patch.object(runner, "_run_seed_baseline", return_value=baseline):
+        runner._apply_f2p_p2p_reward(result, pi)
+    assert result.resolved is False and result.valid_task is False
+
+
+def test_verifier_restore_files_includes_f2p_p2p_test_files():
+    pi = PromptInput(
+        prompt="x", verifier="pytest", verifier_files=["conftest.py"],
+        fail_to_pass=["tests/test_a.py::test_x", "tests/test_a.py::test_y"],
+        pass_to_pass=["tests/test_b.py::TestC::test_z"],
+    )
+    assert DockerRuntimeRunner._verifier_restore_files(pi) == ["conftest.py", "tests/test_a.py", "tests/test_b.py"]
+
+
 def test_external_runner_decodes_subprocess_output_as_utf8(tmp_path: Path):
     config = Config(
         agent={"provider": "hermes"},

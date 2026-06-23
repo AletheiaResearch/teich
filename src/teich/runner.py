@@ -1458,6 +1458,23 @@ class DockerRuntimeRunner:
             verifier,
         ]
 
+    @staticmethod
+    def _was_failing(outcome: str) -> bool:
+        """An observed failure on the baseline (not 'missing'/skipped/passed)."""
+        return outcome in {"failed", "error"}
+
+    @staticmethod
+    def _verifier_restore_files(prompt_input: PromptInput) -> list[str]:
+        """Files to restore from HEAD before verifying: verifier_files plus the test
+        files backing each fail_to_pass/pass_to_pass id, so the agent can't edit the
+        oracle even when it isn't hand-listed."""
+        files = list(prompt_input.verifier_files)
+        for test_id in (*prompt_input.fail_to_pass, *prompt_input.pass_to_pass):
+            head = test_id.split("::", 1)[0].strip()
+            if head and head not in files:
+                files.append(head)
+        return files
+
     def _run_verifier(
         self,
         workspace: Path,
@@ -1471,9 +1488,10 @@ class DockerRuntimeRunner:
         # `codex` user, so make the tree writable or git checkout / pytest caches
         # fail with permission errors.
         _make_tree_world_writable(workspace)
-        if self.config.tasks.restore_verifier_files and prompt_input.verifier_files:
+        restore_files = self._verifier_restore_files(prompt_input)
+        if self.config.tasks.restore_verifier_files and restore_files:
             try:
-                self._restore_verifier_files(workspace, prompt_input.verifier_files)
+                self._restore_verifier_files(workspace, restore_files)
             except (subprocess.CalledProcessError, OSError) as exc:
                 return VerificationResult(
                     verifier=verifier,
@@ -2172,12 +2190,14 @@ class DockerRuntimeRunner:
                     "exit_code": baseline.exit_code,
                     "error": baseline.error,
                 }
+                # "Was failing" must be an OBSERVED failure on the seed — a test that
+                # never ran (missing / collection error / exit-5) is not a transition.
                 result.valid_task = (
-                    all(base_f2p[t] != "passed" for t in f2p_ids)
+                    all(self._was_failing(base_f2p[t]) for t in f2p_ids)
                     and all(base_p2p[t] == "passed" for t in p2p_ids)
                 )
                 result.resolved = (
-                    all(base_f2p[t] != "passed" and after_f2p[t] == "passed" for t in f2p_ids)
+                    all(self._was_failing(base_f2p[t]) and after_f2p[t] == "passed" for t in f2p_ids)
                     and all(base_p2p[t] == "passed" and after_p2p[t] == "passed" for t in p2p_ids)
                 )
                 result.passed = result.resolved
