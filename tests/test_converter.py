@@ -2924,3 +2924,32 @@ def test_convert_ignores_non_bool_passed(tmp_path: Path):
     rows = convert_traces_to_training_data(out)
     assert "reward" not in rows[0]
     assert "passed" not in rows[0]
+
+
+def test_codex_skips_injected_runtime_context(tmp_path: Path):
+    """Codex injects <environment_context>/<user_instructions> as leading user
+    messages; they must not become the prompt (which also breaks --resume)."""
+    trace_file = tmp_path / "codex-session.jsonl"
+    events = [
+        {"type": "session_meta", "payload": {"id": "codex-session"}},
+        {"type": "response_item", "payload": {"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "<environment_context>\n  <cwd>/workspace</cwd>\n</environment_context>"}]}},
+        {"type": "response_item", "payload": {"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "<user_instructions>\n  Be concise.\n</user_instructions>"}]}},
+        {"type": "response_item", "payload": {"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "make me a delivery routing dashboard"}]}},
+        {"type": "response_item", "payload": {"type": "message", "role": "assistant",
+            "content": [{"type": "output_text", "text": "Done."}]}},
+    ]
+    trace_file.write_text("\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8")
+
+    example = convert_trace_to_training_example(trace_file)
+
+    assert example.prompt == "make me a delivery routing dashboard"
+    user_contents = [m["content"] for m in example.messages if m["role"] == "user"]
+    assert user_contents == ["make me a delivery routing dashboard"]
+    assert not any(
+        tag in (m.get("content") or "")
+        for m in example.messages
+        for tag in ("<environment_context>", "<user_instructions>")
+    )

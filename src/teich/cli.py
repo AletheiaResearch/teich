@@ -722,19 +722,23 @@ def generate(
                     f"{cfg.get_codex_host_auth_source()}.[/yellow]"
                 )
                 console.print(
-                    "[yellow]Heads up: once Codex refreshes the rotating token, your host Codex login "
+                    "[yellow]Heads up: once the rotating token is refreshed, your host Codex login "
                     "will be invalidated — run `codex login` on the host afterward to restore it.[/yellow]"
                 )
-                if cfg.max_concurrency > 1:
-                    console.print(
-                        f"[yellow]Warning: max_concurrency={cfg.max_concurrency} with host-auth can hit "
-                        "concurrent token-refresh races on long batches (refresh_token_reused). "
-                        "Prefer max_concurrency: 1 for long runs.[/yellow]"
-                    )
+            if cfg.agent.langfuse.enabled:
+                console.print(
+                    "[cyan]Codex Langfuse tracing enabled: uploading each session to "
+                    f"{cfg.agent.langfuse.base_url}.[/cyan]"
+                )
         elif agent_provider == "pi":
             runner = PiRunner(cfg)
         elif agent_provider in {"claude", "claude-code", "claude_code"}:
             runner = ClaudeCodeRunner(cfg)
+            if cfg.agent.langfuse.enabled:
+                console.print(
+                    "[cyan]Claude Code Langfuse tracing enabled: uploading each session to "
+                    f"{cfg.agent.langfuse.base_url}.[/cyan]"
+                )
         elif agent_provider in {"hermes", "hermes-agent", "hermes_agent"}:
             runner = HermesRunner(cfg)
         elif agent_provider == "chat":
@@ -1038,19 +1042,33 @@ agent:
 
   # Codex-only: use your ChatGPT subscription instead of an API key.
   # When enabled, Teich copies the host Codex login (defaults to
-  # $CODEX_HOME/auth.json or ~/.codex/auth.json) once into auth_dir and
-  # bind-mounts that single shared file into every Codex container, so all
-  # instances share and refresh the same rotating token instead of fighting
-  # over separate copies.
-  # NOTE: once Codex refreshes the token, your interactive host `codex` login
+  # $CODEX_HOME/auth.json or ~/.codex/auth.json) once into auth_dir, then runs a
+  # host-side token broker that owns the rotating refresh token for the whole
+  # run. Each Codex container gets its own seeded auth.json (refresh token
+  # replaced by a per-run secret) and refreshes through the broker, which
+  # single-flights the rotation -- so any max_concurrency is safe and concurrent
+  # containers won't hit refresh_token_reused races.
+  # NOTE: once the broker rotates the token, your interactive host `codex` login
   # is invalidated server-side; run `codex login` again afterward to restore it.
   # auth_dir holds your credentials: Teich keeps it out of output/sandbox/failures
-  # and gitignores it for you. Prefer max_concurrency: 1 for long batches to
-  # avoid concurrent token-refresh races.
+  # and gitignores it for you.
   # codex:
   #   use_host_auth: true
   #   host_auth_file: null            # default: $CODEX_HOME/auth.json or ~/.codex/auth.json
   #   auth_dir: ./.teich/codex-auth
+
+  # Trace each agent session to Langfuse (https://langfuse.com). Works for Codex
+  # and Claude Code -- each uses its own native integration (Codex plugin, Claude
+  # Code Stop hook) and Teich passes the credentials into the container. Side-
+  # channel only: it reads transcripts, fails open, and doesn't change agent
+  # behavior or Teich's output files. All three credentials are required when
+  # enabled. base_url may be Langfuse Cloud or a self-hosted URL; for a host-local
+  # instance use http://host.docker.internal:<port>.
+  # langfuse:
+  #   enabled: true
+  #   public_key: pk-lf-...
+  #   secret_key: sk-lf-...
+  #   base_url: https://cloud.langfuse.com
 
 model:
   # Model id passed to the selected agent/provider.

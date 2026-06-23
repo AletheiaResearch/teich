@@ -445,21 +445,73 @@ def test_codex_prepare_shared_host_auth_errors_when_missing(tmp_path: Path):
         runner._prepare_shared_host_auth()
 
 
-def test_codex_command_mounts_host_auth_and_suppresses_api_key(tmp_path: Path, monkeypatch):
-    """With host-auth on, mount the shared auth.json and pass no API key env (even ambient)."""
+def _codex_host_auth_config_with_tokens(tmp_path: Path) -> Config:
+    """Host-auth config whose snapshot is a complete ChatGPT login (the broker
+    validates that both an access and a refresh token are present)."""
+    host_auth = tmp_path / "host" / "auth.json"
+    host_auth.parent.mkdir(parents=True, exist_ok=True)
+    host_auth.write_text(
+        '{"tokens":{"access_token":"A0","refresh_token":"R0","account_id":"acct"}}',
+        encoding="utf-8",
+    )
+    return Config(
+        agent={
+            "provider": "codex",
+            "codex": {
+                "use_host_auth": True,
+                "host_auth_file": str(host_auth),
+                "auth_dir": str(tmp_path / "project" / ".teich" / "codex-auth"),
+            },
+        },
+    )
+
+
+def test_codex_command_uses_broker_and_suppresses_api_key(tmp_path: Path, monkeypatch):
+    """With host-auth on, point Codex at the broker (refresh override + host-gateway),
+    mount no auth.json, and pass no API key env (even an ambient one)."""
     monkeypatch.setenv("OPENAI_API_KEY", "sk-ambient-should-not-leak")
-    config, _ = _codex_host_auth_config(tmp_path)
+    config = _codex_host_auth_config_with_tokens(tmp_path)
     with patch.object(CodexRunner, "_ensure_image"):
         runner = CodexRunner(config)
-    cmd = runner._build_codex_command(
-        "Build app",
-        workspace=tmp_path / "ws",
-        codex_home=tmp_path / "ch",
-        container_name="teich-codex-x",
-    )
-    shared = tmp_path / "project" / ".teich" / "codex-auth" / "auth.json"
-    assert f"{shared}:/home/codex/.codex/auth.json" in cmd
-    assert not any(part.startswith("OPENAI_API_KEY=") for part in cmd)
+    try:
+        cmd = runner._build_codex_command(
+            "Build app",
+            workspace=tmp_path / "ws",
+            codex_home=tmp_path / "ch",
+            container_name="teich-codex-x",
+        )
+        override = next(
+            part for part in cmd if part.startswith("CODEX_REFRESH_TOKEN_URL_OVERRIDE=")
+        )
+        assert override.startswith("CODEX_REFRESH_TOKEN_URL_OVERRIDE=http://host.docker.internal:")
+        assert override.endswith("/oauth/token")
+        assert "host.docker.internal:host-gateway" in cmd
+        # No auth.json bind-mount, and no API key env (broker owns the real token).
+        assert not any(":/home/codex/.codex/auth.json" in part for part in cmd)
+        assert not any(part.startswith("OPENAI_API_KEY=") for part in cmd)
+    finally:
+        if runner._broker is not None:
+            runner._broker.stop()
+
+
+def test_codex_write_seeded_auth_hides_real_refresh_token(tmp_path: Path):
+    """Each container's seeded auth.json carries real tokens but a secret refresh token."""
+    config = _codex_host_auth_config_with_tokens(tmp_path)
+    with patch.object(CodexRunner, "_ensure_image"):
+        runner = CodexRunner(config)
+    try:
+        broker = runner._ensure_broker()
+        assert broker is not None
+        codex_home = tmp_path / "ch"
+        codex_home.mkdir()
+        runner._write_seeded_codex_auth(codex_home, broker)
+        seeded = json.loads((codex_home / "auth.json").read_text(encoding="utf-8"))
+        assert seeded["tokens"]["access_token"] == "A0"
+        assert seeded["tokens"]["refresh_token"] == broker.secret
+        assert seeded["tokens"]["refresh_token"] != "R0"
+    finally:
+        if runner._broker is not None:
+            runner._broker.stop()
 
 
 def test_codex_command_without_host_auth_still_passes_api_key(tmp_path: Path):
