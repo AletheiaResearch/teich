@@ -7,13 +7,14 @@ These tests require:
 
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from teich.config import APIConfig, Config, ModelConfig
+from teich.config import APIConfig, Config, ModelConfig, PromptInput
 from teich.runner import CodexRunner, RUNTIME_CONTAINER_USER, RUNTIME_IMAGE_NAME
 
 
@@ -278,6 +279,59 @@ class TestEndToEnd:
                 result = runner.run_session("Create a Python hello world script", "test")
 
         assert result is not None
+
+
+@pytest.mark.integration
+@pytest.mark.usefixtures("require_docker")
+class TestSeedVerifierDocker:
+    """Real-Docker verification of the seed-workspace verifier reward path."""
+
+    @staticmethod
+    def _require_runtime_image():
+        present = subprocess.run(
+            ["docker", "images", "-q", RUNTIME_IMAGE_NAME], capture_output=True, text=True
+        ).stdout.strip()
+        if not present:
+            pytest.skip(f"{RUNTIME_IMAGE_NAME} not built")
+
+    @staticmethod
+    def _make_seed_bundle(tmp_path: Path) -> Path:
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e.st",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e.st"}
+        repo = tmp_path / "src"
+        repo.mkdir()
+        (repo / "app.py").write_text("def add(a, b):\n    return a - b  # BUG\n", encoding="utf-8")
+        (repo / "check.py").write_text("import app\nassert app.add(2, 2) == 4\nprint('OK')\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, env=env)
+        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "seed"], check=True, env=env)
+        bundle = tmp_path / "app.bundle"
+        subprocess.run(["git", "-C", str(repo), "bundle", "create", str(bundle), "--all"], check=True, env=env)
+        return bundle
+
+    def test_verifier_reward_bug_then_fix(self, tmp_path):
+        """Seed clone -> verifier fails on the bug -> passes once fixed (real docker run)."""
+        self._require_runtime_image()
+        bundle = self._make_seed_bundle(tmp_path)
+        with patch.object(CodexRunner, "_ensure_image"):
+            runner = CodexRunner(Config(agent={"provider": "codex"}, tasks={"verifier_timeout_seconds": 120}))
+        pi = PromptInput(prompt="fix", seed_repo=str(bundle), verifier="python check.py")
+
+        root_a, ws_a = runner._prepare_workspace("seed-a", pi, "codex")
+        try:
+            assert (ws_a / "app.py").exists() and (ws_a / ".git").is_dir()  # cloned with history
+            buggy = runner._run_verifier(ws_a, pi)
+        finally:
+            shutil.rmtree(root_a, ignore_errors=True)
+        assert buggy is not None and buggy.passed is False and buggy.exit_code != 0
+
+        root_b, ws_b = runner._prepare_workspace("seed-b", pi, "codex")
+        try:
+            (ws_b / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+            fixed = runner._run_verifier(ws_b, pi)
+        finally:
+            shutil.rmtree(root_b, ignore_errors=True)
+        assert fixed is not None and fixed.passed is True and fixed.exit_code == 0
 
 
 # Integration test markers
