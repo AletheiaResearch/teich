@@ -21,7 +21,9 @@ from .verification import apply_reward_to_row, reward_from_sidecar_data, verific
 _INLINE_THINKING_BLOCK_PATTERN = re.compile(r"<(think|thinking)>(.*?)</\1>", re.DOTALL)
 # Output subdirectories that hold non-dataset artifacts (partial/failed runs, verifier
 # sidecars, sandbox checkouts, harbor bench intermediates). Dataset scanners, the README
-# builder, and publish all skip these so a mixed prompts+bench output/ stays coherent.
+# builder, and the mode guard skip these so the dataset view stays clean. (Publish keeps
+# its own UPLOAD_IGNORE_PATTERNS in cli.py, which drops partials/failures/.bench but still
+# uploads verifier sidecars as dataset provenance.)
 NON_DATA_TRACE_DIR_NAMES = frozenset(
     {"partials", "failures", "verification", "sandbox", "__pycache__", ".bench"}
 )

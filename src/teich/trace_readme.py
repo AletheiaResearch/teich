@@ -386,18 +386,23 @@ def _extraction_snippet(provider: str) -> list[str]:
     ]
 
 
-def _reward_stats(traces_dir: Path) -> dict[str, int] | None:
+def _reward_stats(traces_dir: Path, trace_files: Iterable[Path]) -> dict[str, int] | None:
     """Summarize verifier outcomes from the canonical ``verification/`` sidecars.
 
     Both reward-labeled paths write a ``verification/<stem>.json`` with a ``passed``
     bool (bench also writes a numeric ``reward``), so one scan describes a dataset
-    that is all-prompts, all-bench, or a mix. Returns None when nothing is verified.
+    that is all-prompts, all-bench, or a mix. Only sidecars whose stem matches a live
+    dataset row are counted, so a stale/orphaned sidecar can't inflate the count.
+    Returns None when nothing is verified.
     """
     verification_dir = traces_dir / "verification"
     if not verification_dir.is_dir():
         return None
+    live_stems = {path.stem for path in trace_files}
     passed = failed = numeric = 0
     for sidecar in sorted(verification_dir.glob("*.json")):
+        if sidecar.stem not in live_stems:
+            continue
         try:
             data = json.loads(sidecar.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -417,7 +422,7 @@ def _reward_stats(traces_dir: Path) -> dict[str, int] | None:
 
 
 def _reward_labels_section(reward_stats: dict[str, int]) -> list[str]:
-    return [
+    lines = [
         "## Reward labels",
         "",
         "This is a verifiable dataset: rows carry the task verifier's outcome so it can be "
@@ -430,8 +435,14 @@ def _reward_labels_section(reward_stats: dict[str, int]) -> list[str]:
         f"Verified tasks: {reward_stats['total']} "
         f"({reward_stats['passed']} passed / {reward_stats['failed']} failed).",
         "Each reward comes from the task verifier run after the agent's attempt.",
-        "",
     ]
+    if reward_stats.get("numeric"):
+        lines.append(
+            f"{reward_stats['numeric']} of {reward_stats['total']} carry an explicit numeric "
+            "score (the rest are binary pass/fail)."
+        )
+    lines.append("")
+    return lines
 
 
 def build_traces_readme(
@@ -595,7 +606,7 @@ def write_traces_readme(
             repo_id=repo_id,
             tools=dataset_tools,
             extraction_provider=extraction_provider,
-            reward_stats=_reward_stats(traces_dir),
+            reward_stats=_reward_stats(traces_dir, trace_files),
         ),
         encoding="utf-8",
     )

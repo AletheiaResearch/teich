@@ -41,7 +41,7 @@ from .converter import (
     normalize_codex_trace_events,
 )
 from .tool_schema import snapshot_configured_tools
-from .verification import verification_sidecar_path, write_verification_sidecar
+from .verification import write_verification_sidecar
 
 RUNTIME_IMAGE_NAME = "teich-runtime:v3"
 RUNTIME_DOCKERFILE_NAME = "codex-runtime.Dockerfile"
@@ -72,7 +72,6 @@ HERMES_DEFAULT_TOOLSETS = "safe,terminal,file,skills,memory,session_search,deleg
 HERMES_TRACE_WRITE_LOCK = threading.Lock()
 CHAT_REQUEST_MAX_ATTEMPTS = 3
 AGENT_TURN_RETRY_LIMIT = 3
-# Re-exported from converter as the single source of truth (see converter.NON_DATA_TRACE_DIR_NAMES).
 
 
 def _make_tree_world_writable(path: Path) -> None:
@@ -2129,9 +2128,6 @@ class DockerRuntimeRunner:
             metrics.add_structured_usage(provider_stats)
             metrics.finalize()
         return metrics
-
-    def _verification_sidecar_path(self, trace_path: Path) -> Path:
-        return verification_sidecar_path(self.config.output.traces_dir, trace_path.stem)
 
     def _route_destination(self, trace_path: Path, passed: bool) -> Path:
         subdir = "passed" if passed else "failed"

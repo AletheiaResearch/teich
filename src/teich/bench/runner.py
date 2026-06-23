@@ -79,12 +79,19 @@ def _agent_auth_env(cfg: Config) -> dict[str, str]:
 
     Uses an API key (+ optional base_url for OpenRouter/OpenAI-compatible). The
     Codex ChatGPT-subscription/broker path is intentionally not used here.
+
+    For an OpenRouter project the same key is exported under both names because the
+    in-container agent picks the var by *agent* type, not provider: pi/hermes read
+    ``OPENROUTER_API_KEY`` while codex/claude-code use ``OPENAI_API_KEY`` against the
+    OpenRouter ``base_url``. For a plain ``openai`` project only ``OPENAI_API_KEY`` is
+    set, so an OpenAI key is never leaked under the OpenRouter name.
     """
     env: dict[str, str] = {}
     api_key = cfg.get_api_key()
     if api_key:
         env["OPENAI_API_KEY"] = api_key
-        env["OPENROUTER_API_KEY"] = api_key
+        if cfg.api.provider == "openrouter":
+            env["OPENROUTER_API_KEY"] = api_key
     base_url = cfg.get_base_url()
     if base_url:
         env["OPENAI_BASE_URL"] = base_url
@@ -119,16 +126,57 @@ def _build_trial_config(cfg: Config, task_dir: Path, trials_dir: Path) -> Any:
     if model:
         config.agent.model_name = model
     config.agent.env.update(_agent_auth_env(cfg))
-    config.environment.type = EnvironmentType(cfg.bench.backend)
+    try:
+        config.environment.type = EnvironmentType(cfg.bench.backend)
+    except ValueError as exc:
+        supported = ", ".join(t.value for t in EnvironmentType)
+        raise RuntimeError(
+            f"Unknown bench.backend {cfg.bench.backend!r}; harbor supports: {supported}."
+        ) from exc
     return config
 
 
+def _reward_dict_from_value(value: Any) -> dict[str, Any] | None:
+    """Wrap a single numeric reward into our ``{reward, passed}`` shape.
+
+    ``passed`` is ``reward > 0``: any positive score (including partial credit)
+    counts as passed, which is looser than prompts mode, where ``passed`` is the
+    verifier exit code / a full fail-to-pass-pass-to-pass transition.
+    """
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    return {"reward": float(value), "passed": float(value) > 0}
+
+
+def _reward_from_mapping(data: Any) -> dict[str, Any] | None:
+    """Normalize any of harbor's reward-dict shapes into our ``{reward, passed}``.
+
+    Accepts ``{"reward": <num>}``, the verifier's ``{"rewards": {...}}`` wrapper, or
+    a flat ``{name: <num>}`` map; prefers a ``reward`` key, else the first numeric
+    value. Returns None when no numeric reward is present. Normalizing here keeps
+    every reward source on the same contract, so callers never see a raw harbor
+    dict that lacks a ``reward``/``passed``.
+    """
+    if not isinstance(data, dict):
+        return None
+    rewards = data.get("rewards") if isinstance(data.get("rewards"), dict) else data
+    reward = _reward_dict_from_value(rewards.get("reward"))
+    if reward is not None:
+        return reward
+    for value in rewards.values():
+        reward = _reward_dict_from_value(value)
+        if reward is not None:
+            return reward
+    return None
+
+
 def _reward_from_sidecar(reward_path: Path) -> dict[str, Any] | None:
+    """Parse harbor's reward.json/rewards.json sidecar into our ``{reward, passed}``."""
     try:
         data = json.loads(reward_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    return data if isinstance(data, dict) else None
+    return _reward_from_mapping(data)
 
 
 def _reward_from_text(reward_path: Path) -> dict[str, Any] | None:
@@ -141,14 +189,7 @@ def _reward_from_text(reward_path: Path) -> dict[str, Any] | None:
         value = float(raw)
     except ValueError:
         return None
-    return {"reward": value, "passed": value > 0}
-
-
-def _reward_dict_from_value(value: Any) -> dict[str, Any] | None:
-    """Wrap a single numeric reward into our ``{reward, passed}`` shape."""
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
-        return None
-    return {"reward": float(value), "passed": float(value) > 0}
+    return _reward_dict_from_value(value)
 
 
 def _reward_from_result(result: Any) -> dict[str, Any] | None:
@@ -158,17 +199,9 @@ def _reward_from_result(result: Any) -> dict[str, Any] | None:
     take ``reward`` when present, else the first numeric reward value.
     """
     verifier = getattr(result, "verifier_result", None)
-    rewards = verifier.get("rewards") if isinstance(verifier, dict) else getattr(verifier, "rewards", None)
-    if not isinstance(rewards, dict):
-        return None
-    reward = _reward_dict_from_value(rewards.get("reward"))
-    if reward is not None:
-        return reward
-    for value in rewards.values():
-        reward = _reward_dict_from_value(value)
-        if reward is not None:
-            return reward
-    return None
+    if isinstance(verifier, dict):
+        return _reward_from_mapping(verifier)
+    return _reward_from_mapping(getattr(verifier, "rewards", None))
 
 
 def _reward_from_files(base: Path | None) -> dict[str, Any] | None:
@@ -284,14 +317,13 @@ def _ingest_session_dir(
     reward_value = reward.get("reward") if isinstance(reward, dict) else None
     for row in rows:
         apply_reward_to_row(row, passed=passed, reward=reward_value)
-    stem = _bench_stem(task_name)
-    out_path = cfg.output.traces_dir / f"{stem}.jsonl"
+    out_path = _bench_output_path(cfg, task_name)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
     if reward is not None:
-        write_verification_sidecar(cfg.output.traces_dir, stem, reward)
+        write_verification_sidecar(cfg.output.traces_dir, _bench_stem(task_name), reward)
     return [out_path]
 
 
@@ -309,7 +341,8 @@ def run_bench(cfg: Config, *, console: Any = None, resume: bool = False) -> list
     if not source:
         raise RuntimeError(
             "--mode bench requires bench.source in config "
-            "(a Harbor task directory, a git repo, or an HF dataset of tasks)."
+            "(a local Harbor task directory, or a directory of task dirs; "
+            "git/HF sources are planned but not yet wired)."
         )
     _require_harbor()
     task_dirs = _resolve_task_dirs(source)
@@ -325,8 +358,15 @@ def run_bench(cfg: Config, *, console: Any = None, resume: bool = False) -> list
             continue
         if console is not None:
             console.print(f"[blue]bench: running {task_dir.name}[/blue]")
-        config = _build_trial_config(cfg, task_dir, trials_dir)
-        trial, result = asyncio.run(_create_and_run(config))
+        try:
+            config = _build_trial_config(cfg, task_dir, trials_dir)
+            trial, result = asyncio.run(_create_and_run(config))
+        except RuntimeError:
+            raise  # config-level problem (provider/backend/source) — applies to every task
+        except Exception as exc:  # one task's infra failure (Docker build, image pull, harbor)
+            if console is not None:
+                console.print(f"[red]bench: {task_dir.name}: failed ({type(exc).__name__}: {exc})[/red]")
+            continue
         exc_info = getattr(result, "exception_info", None)
         if console is not None and exc_info:
             exc_type = (
@@ -343,7 +383,7 @@ def run_bench(cfg: Config, *, console: Any = None, resume: bool = False) -> list
                 console.print(f"[yellow]bench: no trace harvested for {task_dir.name}[/yellow]")
             continue
         if console is not None:
-            label = f"reward={reward['reward']:g}" if reward else "no reward"
+            label = f"reward={reward.get('reward'):g}" if reward else "no reward"
             console.print(f"[green]bench: {task_dir.name}: wrote {len(paths)} file(s) ({label})[/green]")
         written.extend(paths)
     return written

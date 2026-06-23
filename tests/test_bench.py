@@ -51,6 +51,14 @@ def test_agent_auth_env_from_api_config():
     assert env["OPENAI_BASE_URL"] == "https://openrouter.ai/api/v1"
 
 
+def test_agent_auth_env_openai_provider_does_not_set_openrouter_key():
+    # An OpenAI key must not be smeared into OPENROUTER_API_KEY.
+    cfg = Config(api={"provider": "openai", "api_key": "sk-openai"})
+    env = bench_runner._agent_auth_env(cfg)
+    assert env["OPENAI_API_KEY"] == "sk-openai"
+    assert "OPENROUTER_API_KEY" not in env
+
+
 def test_resolve_task_dirs_single_and_collection(tmp_path):
     single = tmp_path / "one"
     single.mkdir()
@@ -157,6 +165,44 @@ def test_reward_from_result_falls_back_and_handles_missing():
     assert bench_runner._reward_from_result(_FakeResult(verifier_result={"rewards": {}})) is None
 
 
+def test_reward_from_result_multi_key_precedence():
+    # A "reward" key wins over other numeric components...
+    assert bench_runner._reward_from_result(
+        _FakeResult(verifier_result={"rewards": {"penalty": 1.0, "reward": 0.0}})
+    ) == {"reward": 0.0, "passed": False}
+    # ...otherwise the first numeric value (insertion order) is taken.
+    assert bench_runner._reward_from_result(
+        _FakeResult(verifier_result={"rewards": {"a": 0.0, "b": 0.5}})
+    ) == {"reward": 0.0, "passed": False}
+
+
+def test_reward_from_files_normalizes_each_sidecar_shape(tmp_path):
+    # reward.txt single value
+    txt = tmp_path / "txt"
+    txt.mkdir()
+    (txt / "reward.txt").write_text("1.0\n", encoding="utf-8")
+    assert bench_runner._reward_from_files(txt) == {"reward": 1.0, "passed": True}
+    # rewards.json with the {"rewards": {...}} wrapper
+    wrapped = tmp_path / "wrapped"
+    wrapped.mkdir()
+    (wrapped / "rewards.json").write_text(json.dumps({"rewards": {"reward": 0.0}}), encoding="utf-8")
+    assert bench_runner._reward_from_files(wrapped) == {"reward": 0.0, "passed": False}
+    # reward.json as a flat multi-key map with no "reward" key -> first numeric
+    flat = tmp_path / "flat"
+    flat.mkdir()
+    (flat / "reward.json").write_text(json.dumps({"score": 0.5}), encoding="utf-8")
+    assert bench_runner._reward_from_files(flat) == {"reward": 0.5, "passed": True}
+
+
+def test_reward_parsers_reject_non_numeric(tmp_path):
+    (tmp_path / "reward.txt").write_text("not-a-number\n", encoding="utf-8")
+    assert bench_runner._reward_from_text(tmp_path / "reward.txt") is None
+    (tmp_path / "reward.json").write_text(json.dumps({"reward": True}), encoding="utf-8")  # bool != numeric
+    assert bench_runner._reward_from_sidecar(tmp_path / "reward.json") is None
+    (tmp_path / "empty.json").write_text(json.dumps({}), encoding="utf-8")
+    assert bench_runner._reward_from_sidecar(tmp_path / "empty.json") is None
+
+
 # A minimal pi `--mode json` stream (as harbor's --no-session pi run emits to pi.txt).
 _PI_STREAM_LINES = [
     'Warning: Model "z-ai/glm-5.2" not found for provider "openrouter". Using custom model id.',
@@ -188,6 +234,23 @@ def test_pi_stream_to_session_events(tmp_path):
     model_change = next(e for e in events if e["type"] == "model_change")
     assert model_change == {"type": "model_change", "provider": "openrouter", "modelId": "z-ai/glm-5.2"}
     assert all(e["message"]["role"] for e in events if e["type"] == "message")
+
+
+def test_pi_stream_without_provider_model_omits_model_change(tmp_path):
+    # When the first assistant message carries no provider/model, no model_change is
+    # synthesized, but the messages still convert.
+    lines = [
+        json.dumps({"type": "session", "id": "x", "cwd": "/app"}),
+        json.dumps({"type": "message_end", "message": {"role": "user",
+            "content": [{"type": "text", "text": "hi"}]}}),
+        json.dumps({"type": "message_end", "message": {"role": "assistant",
+            "content": [{"type": "text", "text": "done"}]}}),
+    ]
+    pi_txt = tmp_path / "pi.txt"
+    pi_txt.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    events = bench_runner._pi_stream_to_session_events(pi_txt)
+    assert [e["type"] for e in events] == ["session", "message", "message"]
+    assert not any(e["type"] == "model_change" for e in events)
 
 
 class _FakeTrial:

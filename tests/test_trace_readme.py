@@ -351,6 +351,7 @@ def test_readme_is_reward_aware_from_verification_sidecars(tmp_path: Path):
     assert "## Reward labels" in readme
     assert '- "reward-labeled"' in readme
     assert "Verified tasks: 2 (1 passed / 1 failed)." in readme
+    assert "1 of 2 carry an explicit numeric score" in readme  # task-b has reward 0.0
     assert "Rows: 2" in readme  # the .bench/ session file is excluded from the row count
 
 

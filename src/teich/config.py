@@ -335,10 +335,12 @@ class PromptInput(BaseModel):
 class BenchConfig(BaseModel):
     """Benchmark-task settings for ``generate --mode bench``.
 
-    ``source`` points at Harbor-format tasks (a directory of tasks, a git repo,
-    or an HF dataset). Bench mode drives the `harbor` package (optional ``bench``
-    extra) to run each task in its own environment image, then ingests the
-    agent's native session + the task verifier's reward into teich's output.
+    ``source`` points at a local Harbor task directory (or a directory of task
+    dirs); git-repo / HF-dataset sources are planned but not yet wired. Bench mode
+    drives the `harbor` package (optional ``bench`` extra) to run each task in its
+    own environment image, then ingests the agent's native session + the task
+    verifier's reward into teich's output. ``backend`` is passed to harbor's
+    EnvironmentType (e.g. ``docker``).
     """
     source: str | None = None
     backend: str = "docker"

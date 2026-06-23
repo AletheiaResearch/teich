@@ -676,7 +676,7 @@ def generate(
         help="Generation mode: 'prompts' (default) or 'bench' (run Harbor-format benchmark tasks from bench.source).",
     ),
 ) -> None:
-    """Generate training traces from prompts."""
+    """Generate reward-labeled training traces from prompts (--mode prompts) or Harbor benchmark tasks (--mode bench)."""
     console.print(Panel.fit("Teich", style="bold blue"))
 
     if not config.exists():
@@ -1273,9 +1273,10 @@ tasks:
 # `agent.provider`, runs the task verifier, and teich ingests the native trace + reward as
 # reward-labeled rows (output/bench-<task>.jsonl + an output/verification/ sidecar).
 # Harbor's raw trial dirs live under output/.bench/ and are excluded from the card/uploads.
-# `--resume` skips tasks already harvested. Keep bench its own project: give it a dedicated
-# output.traces_dir + publish.repo_id so it's a standalone dataset (teich refuses to mix
-# bench and prompts rows in one output dir).
+# `--resume` skips tasks already harvested. Bench runs tasks sequentially (max_concurrency
+# does not apply). Keep bench its own project: give it a dedicated output.traces_dir +
+# publish.repo_id so it's a standalone dataset (teich refuses to mix bench and prompts rows
+# in one output dir).
 bench:
   source: null                  # local Harbor task dir, or a dir of task dirs (git/HF: TBD)
   backend: docker               # harbor environment backend
