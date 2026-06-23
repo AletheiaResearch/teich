@@ -51,6 +51,22 @@ def test_generate_command_missing_config():
     assert "not found" in result.output
 
 
+def test_generate_rejects_unknown_mode(tmp_path: Path):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("prompts:\n  - hello\n", encoding="utf-8")
+    result = runner.invoke(app, ["generate", "-c", str(config_file), "--mode", "wat"])
+    assert result.exit_code == 1
+    assert "Unknown --mode" in result.output
+
+
+def test_generate_bench_mode_requires_source(tmp_path: Path):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("agent:\n  provider: codex\n", encoding="utf-8")  # no bench.source
+    result = runner.invoke(app, ["generate", "-c", str(config_file), "--mode", "bench"])
+    assert result.exit_code == 1
+    assert "bench.source" in result.output
+
+
 def test_convert_command_writes_openai_style_training_jsonl(tmp_path: Path):
     traces_dir = tmp_path / "traces"
     traces_dir.mkdir()
