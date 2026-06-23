@@ -391,3 +391,44 @@ def test_run_bench_continues_past_one_task_infra_failure(tmp_path, monkeypatch):
     # Both tasks were attempted (the first failure did not abort the batch).
     assert len(calls) == 2
     assert any("failed (OSError" in line for line in console.lines)
+
+
+def test_run_bench_skips_task_level_runtimeerror(tmp_path, monkeypatch):
+    pytest.importorskip("harbor")
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "t").mkdir(parents=True)
+    (tasks_dir / "t" / "task.toml").write_text("", encoding="utf-8")
+
+    async def _boom(config):
+        raise RuntimeError("harbor blew up on this task")
+
+    monkeypatch.setattr(bench_runner, "_create_and_run", _boom)
+    cfg = Config(
+        agent={"provider": "pi"},
+        model={"model": "openrouter/z-ai/glm-5.2"},
+        api={"provider": "openrouter", "api_key": "sk-test"},
+        bench={"source": str(tasks_dir)},
+        output={"traces_dir": tmp_path / "output"},
+    )
+    console = _RecordingConsole()
+    # A RuntimeError from trial execution is a task failure, not a config error -> skip it.
+    written = bench_runner.run_bench(cfg, console=console, resume=False)
+    assert written == []
+    assert any("failed (RuntimeError" in line for line in console.lines)
+
+
+def test_run_bench_aborts_on_invalid_backend(tmp_path):
+    pytest.importorskip("harbor")
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "t").mkdir(parents=True)
+    (tasks_dir / "t" / "task.toml").write_text("", encoding="utf-8")
+    cfg = Config(
+        agent={"provider": "pi"},
+        model={"model": "openrouter/z-ai/glm-5.2"},
+        api={"provider": "openrouter", "api_key": "sk-test"},
+        bench={"source": str(tasks_dir), "backend": "dokcer"},  # typo -> config-level error
+        output={"traces_dir": tmp_path / "output"},
+    )
+    # A bad backend applies to every task, so it aborts (RuntimeError) instead of skipping.
+    with pytest.raises(RuntimeError, match="Unknown bench.backend"):
+        bench_runner.run_bench(cfg, resume=False)

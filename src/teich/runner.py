@@ -1421,6 +1421,17 @@ class DockerRuntimeRunner:
         raised); files absent from ``HEAD`` are agent-added and removed. The caller
         treats a raised failure as a failed verification rather than a silent pass.
         """
+        head_present = subprocess.run(
+            ["git", "-C", str(workspace), "rev-parse", "--verify", "--quiet", "HEAD"],
+            capture_output=True,
+            check=False,
+            **TEXT_SUBPROCESS_KWARGS,
+        ).returncode == 0
+        if not head_present:
+            # No seed HEAD to restore from (the workspace isn't a git checkout, e.g. a task
+            # with no seed_repo/github_repo). Without HEAD every file looks "untracked", so
+            # the delete branch below would wipe the verifier oracle right before it runs.
+            return
         workspace_root = workspace.resolve()
         for rel in files:
             # verifier_files / test ids are task-supplied (incl. untrusted datasets) and may

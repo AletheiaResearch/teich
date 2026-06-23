@@ -6641,11 +6641,20 @@ def test_pi_runner_preserves_malformed_tool_call_trace(tmp_path: Path):
     assert "Validation failed for tool" in exported[2]["message"]["content"][0]["text"]
 
 
+def _init_git_repo(workspace: Path) -> None:
+    """A minimal committed git repo so _restore_verifier_files has a HEAD to restore from."""
+    workspace.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+    (workspace / "oracle.py").write_text("def test_ok(): assert True\n", encoding="utf-8")
+    env_args = ["-c", "user.email=t@t", "-c", "user.name=t"]
+    subprocess.run(["git", "-C", str(workspace), "add", "oracle.py"], check=True)
+    subprocess.run(["git", "-C", str(workspace), *env_args, "commit", "-qm", "seed"], check=True)
+
+
 def test_restore_verifier_files_rejects_path_traversal(tmp_path: Path):
-    # A task-supplied verifier_files entry with `..` must not delete files outside the
-    # workspace (it would otherwise reach the working dir from ./sandbox/<trace>).
+    # In a git workspace, a verifier_files entry with `..` must be refused before any unlink.
     workspace = tmp_path / "sandbox" / "trace-xyz"
-    workspace.mkdir(parents=True)
+    _init_git_repo(workspace)
     outside = tmp_path / "secret.txt"
     outside.write_text("do not delete", encoding="utf-8")
     with pytest.raises(ValueError, match="escapes the workspace"):
@@ -6653,22 +6662,35 @@ def test_restore_verifier_files_rejects_path_traversal(tmp_path: Path):
     assert outside.exists()  # the traversal was refused before any unlink
 
 
-def test_restore_verifier_files_removes_in_workspace_untracked_file(tmp_path: Path):
-    # An in-workspace file that isn't in HEAD is agent-added and gets removed. No git
-    # repo here, so cat-file returns non-zero (untracked) and we hit the unlink branch.
+def test_restore_verifier_files_removes_untracked_restores_tracked(tmp_path: Path):
+    # In a git workspace: an agent-added (untracked) file is removed; a tracked oracle is
+    # restored from HEAD even if the agent edited it.
     workspace = tmp_path / "ws"
-    workspace.mkdir()
+    _init_git_repo(workspace)
+    (workspace / "oracle.py").write_text("def test_ok(): assert False  # tampered\n", encoding="utf-8")
     added = workspace / "added.py"
     added.write_text("print('x')", encoding="utf-8")
-    DockerRuntimeRunner._restore_verifier_files(workspace, ["added.py"])
+    DockerRuntimeRunner._restore_verifier_files(workspace, ["added.py", "oracle.py"])
     assert not added.exists()
+    assert (workspace / "oracle.py").read_text(encoding="utf-8") == "def test_ok(): assert True\n"
+
+
+def test_restore_verifier_files_noop_without_git_head(tmp_path: Path):
+    # No git repo -> no HEAD oracle to restore from; the listed files must NOT be deleted
+    # (deleting them would wipe the verifier oracle right before it runs).
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    oracle = workspace / "test_thing.py"
+    oracle.write_text("def test_x(): assert True", encoding="utf-8")
+    DockerRuntimeRunner._restore_verifier_files(workspace, ["test_thing.py"])
+    assert oracle.exists()  # preserved, not unlinked
 
 
 def test_run_verifier_treats_path_traversal_as_failed_verification(tmp_path: Path):
     # The traversal guard's ValueError must surface as a graceful failed verification
     # (passed=False with an error), not propagate and crash the whole task.
     workspace = tmp_path / "ws"
-    workspace.mkdir()
+    _init_git_repo(workspace)
     with patch.object(DockerRuntimeRunner, "_ensure_image"):
         runner = DockerRuntimeRunner(
             Config(output={"traces_dir": tmp_path / "o", "sandbox_dir": tmp_path / "s"})

@@ -358,12 +358,12 @@ def run_bench(cfg: Config, *, console: Any = None, resume: bool = False) -> list
             continue
         if console is not None:
             console.print(f"[blue]bench: running {task_dir.name}[/blue]")
+        # Config errors (bad provider/backend) are the same for every task, so let them
+        # abort the run (the CLI turns RuntimeError into a clean message).
+        config = _build_trial_config(cfg, task_dir, trials_dir)
         try:
-            config = _build_trial_config(cfg, task_dir, trials_dir)
             trial, result = asyncio.run(_create_and_run(config))
-        except RuntimeError:
-            raise  # config-level problem (provider/backend/source) — applies to every task
-        except Exception as exc:  # one task's infra failure (Docker build, image pull, harbor)
+        except Exception as exc:  # this task's failure (Docker build, harbor, etc.) — skip it
             if console is not None:
                 console.print(f"[red]bench: {task_dir.name}: failed ({type(exc).__name__}: {exc})[/red]")
             continue
