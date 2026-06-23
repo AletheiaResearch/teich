@@ -2029,6 +2029,89 @@ def test_verify_and_record_missing_snapshot_is_noop(tmp_path: Path):
     assert result is None and new_path == trace
 
 
+def test_materialize_seed_checks_out_base_commit(tmp_path: Path):
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e.st",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e.st"}
+    repo = tmp_path / "src"
+    repo.mkdir()
+    (repo / "v.txt").write_text("one\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, env=env)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "c1"], check=True, env=env)
+    first = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                           capture_output=True, text=True, check=True).stdout.strip()
+    (repo / "v.txt").write_text("two\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "commit", "-aqm", "c2"], check=True, env=env)
+    bundle = tmp_path / "r.bundle"
+    subprocess.run(["git", "-C", str(repo), "bundle", "create", str(bundle), "--all"], check=True, env=env)
+
+    with patch.object(CodexRunner, "_ensure_image"):
+        runner = CodexRunner(Config(agent={"provider": "codex"}))
+    pi = PromptInput(prompt="x", seed_repo=str(bundle), base_commit=first)
+    root = tmp_path / "root"
+    root.mkdir()
+    workspace = runner._materialize_seed(pi, root)
+    assert (workspace / "v.txt").read_text(encoding="utf-8") == "one\n"  # checked out base_commit
+
+
+def _f2p_runner(check_seed_baseline: bool):
+    with patch.object(CodexRunner, "_ensure_image"):
+        return CodexRunner(Config(agent={"provider": "codex"}, tasks={"check_seed_baseline": check_seed_baseline}))
+
+
+def _after_result(tests: dict[str, str]) -> VerificationResult:
+    return VerificationResult(verifier="pytest", passed=True, exit_code=0, duration_s=1.0, tests=tests)
+
+
+def test_f2p_p2p_after_only_resolved():
+    runner = _f2p_runner(check_seed_baseline=False)
+    result = _after_result({"t::bug": "passed", "t::other": "passed"})
+    pi = PromptInput(prompt="x", verifier="pytest", fail_to_pass=["t::bug"], pass_to_pass=["t::other"])
+    runner._apply_f2p_p2p_reward(result, pi)
+    assert result.resolved is True and result.passed is True
+    assert result.fail_to_pass == {"t::bug": "passed"}
+
+
+def test_f2p_p2p_after_only_regression_fails():
+    runner = _f2p_runner(check_seed_baseline=False)
+    result = _after_result({"t::bug": "passed", "t::other": "failed"})
+    pi = PromptInput(prompt="x", verifier="pytest", fail_to_pass=["t::bug"], pass_to_pass=["t::other"])
+    runner._apply_f2p_p2p_reward(result, pi)
+    assert result.resolved is False and result.passed is False
+
+
+def test_f2p_p2p_baseline_genuine_transition():
+    runner = _f2p_runner(check_seed_baseline=True)
+    result = _after_result({"t::bug": "passed", "t::other": "passed"})
+    pi = PromptInput(prompt="x", seed_repo="s", verifier="pytest",
+                     fail_to_pass=["t::bug"], pass_to_pass=["t::other"])
+    baseline = VerificationResult(verifier="pytest", passed=False, exit_code=1, duration_s=1.0,
+                                  tests={"t::bug": "failed", "t::other": "passed"})
+    with patch.object(runner, "_run_seed_baseline", return_value=baseline):
+        runner._apply_f2p_p2p_reward(result, pi)
+    assert result.resolved is True and result.valid_task is True and result.passed is True
+    assert result.baseline["fail_to_pass"] == {"t::bug": "failed"}
+
+
+def test_f2p_p2p_baseline_invalid_task_when_bug_already_passes():
+    runner = _f2p_runner(check_seed_baseline=True)
+    result = _after_result({"t::bug": "passed", "t::other": "passed"})
+    pi = PromptInput(prompt="x", seed_repo="s", verifier="pytest",
+                     fail_to_pass=["t::bug"], pass_to_pass=["t::other"])
+    baseline = VerificationResult(verifier="pytest", passed=True, exit_code=0, duration_s=1.0,
+                                  tests={"t::bug": "passed", "t::other": "passed"})
+    with patch.object(runner, "_run_seed_baseline", return_value=baseline):
+        runner._apply_f2p_p2p_reward(result, pi)
+    assert result.valid_task is False and result.resolved is False and result.passed is False
+
+
+def test_no_f2p_p2p_keeps_exit_code_reward():
+    runner = _f2p_runner(check_seed_baseline=True)
+    result = VerificationResult(verifier="x", passed=True, exit_code=0, duration_s=1.0)
+    runner._apply_f2p_p2p_reward(result, PromptInput(prompt="x", verifier="x"))
+    assert result.resolved is None and result.passed is True
+
+
 def test_external_runner_decodes_subprocess_output_as_utf8(tmp_path: Path):
     config = Config(
         agent={"provider": "hermes"},
@@ -4262,7 +4345,7 @@ def test_run_session_clones_github_repo_into_codex_workspace(tmp_path: Path):
     cloned_destination = None
     captured_workspace = None
 
-    def capture_clone(_github_repo: str, destination: Path) -> None:
+    def capture_clone(_github_repo: str, destination: Path, base_commit: str | None = None) -> None:
         nonlocal cloned_destination
         cloned_destination = destination
         destination.mkdir(parents=True, exist_ok=True)
@@ -4295,7 +4378,7 @@ def test_run_session_clones_github_repo_into_pi_workspace(tmp_path: Path):
     cloned_destination = None
     captured_workspace = None
 
-    def capture_clone(_github_repo: str, destination: Path) -> None:
+    def capture_clone(_github_repo: str, destination: Path, base_commit: str | None = None) -> None:
         nonlocal cloned_destination
         cloned_destination = destination
         destination.mkdir(parents=True, exist_ok=True)

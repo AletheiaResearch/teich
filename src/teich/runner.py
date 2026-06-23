@@ -570,9 +570,15 @@ class VerificationResult:
     stdout_tail: str = ""
     stderr_tail: str = ""
     seed_repo: str | None = None
+    # SWE-bench-style per-test reward (populated only when fail_to_pass/pass_to_pass set).
+    fail_to_pass: dict[str, str] = field(default_factory=dict)
+    pass_to_pass: dict[str, str] = field(default_factory=dict)
+    baseline: dict[str, Any] | None = None
+    resolved: bool | None = None
+    valid_task: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "verifier": self.verifier,
             "passed": self.passed,
             "exit_code": self.exit_code,
@@ -584,6 +590,13 @@ class VerificationResult:
             "stdout_tail": self.stdout_tail,
             "stderr_tail": self.stderr_tail,
         }
+        if self.fail_to_pass or self.pass_to_pass:
+            data["fail_to_pass"] = self.fail_to_pass
+            data["pass_to_pass"] = self.pass_to_pass
+            data["resolved"] = self.resolved
+            data["valid_task"] = self.valid_task
+            data["baseline"] = self.baseline
+        return data
 
 
 def _prompt_text_completion_key(prompt: str) -> str:
@@ -1297,16 +1310,18 @@ class DockerRuntimeRunner:
         return github_repo.rsplit("/", maxsplit=1)[-1]
 
     @staticmethod
-    def _clone_github_repo(github_repo: str, destination: Path) -> None:
+    def _clone_github_repo(github_repo: str, destination: Path, base_commit: str | None = None) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
         repo_url = f"https://github.com/{github_repo}.git"
+        # A pinned base_commit needs the full history (a shallow clone won't contain
+        # it); --filter=blob:none keeps that lean. Otherwise a depth-1 clone is enough.
+        clone_cmd = (
+            ["git", "clone", "--filter=blob:none", repo_url, str(destination)]
+            if base_commit
+            else ["git", "clone", "--depth", "1", repo_url, str(destination)]
+        )
         try:
-            subprocess.run(
-                ["git", "clone", "--depth", "1", repo_url, str(destination)],
-                capture_output=True,
-                check=True,
-                **TEXT_SUBPROCESS_KWARGS,
-            )
+            subprocess.run(clone_cmd, capture_output=True, check=True, **TEXT_SUBPROCESS_KWARGS)
         except subprocess.CalledProcessError as exc:
             stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or "")
             stdout = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or "")
@@ -1517,6 +1532,42 @@ class DockerRuntimeRunner:
             seed_repo=prompt_input.seed_repo,
         )
 
+    @staticmethod
+    def _checkout_base_commit(workspace: Path, base_commit: str) -> None:
+        try:
+            subprocess.run(
+                ["git", "-C", str(workspace), "checkout", "--quiet", base_commit],
+                capture_output=True,
+                check=True,
+                **TEXT_SUBPROCESS_KWARGS,
+            )
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or "")
+            stdout = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or "")
+            details = stderr.strip() or stdout.strip() or str(exc)
+            raise RuntimeError(f"Failed to checkout base_commit {base_commit}: {details}") from exc
+
+    def _materialize_seed(self, prompt_input: PromptInput, workspace_root: Path) -> Path:
+        """Clone the prompt's seed source into ``workspace_root`` and return the workspace dir.
+
+        Supports a seed bundle (``seed_repo``) or a GitHub clone (``github_repo``),
+        then checks out ``base_commit`` on either source so a SWE-bench instance
+        (repo + base_commit) maps directly.
+        """
+        if prompt_input.seed_repo:
+            reference = self.config.resolve_seed_reference(prompt_input.seed_repo)
+            bundle = self._fetch_seed_bundle(reference, prompt_input.seed_repo)
+            workspace = workspace_root / self._seed_checkout_name(reference, prompt_input.seed_repo)
+            self._clone_seed_bundle(bundle, workspace)
+        elif prompt_input.github_repo:
+            workspace = workspace_root / self._github_repo_checkout_name(prompt_input.github_repo)
+            self._clone_github_repo(prompt_input.github_repo, workspace, base_commit=prompt_input.base_commit)
+        else:
+            return workspace_root
+        if prompt_input.base_commit:
+            self._checkout_base_commit(workspace, prompt_input.base_commit)
+        return workspace
+
     def _prepare_workspace(
         self,
         session_id: str,
@@ -1533,14 +1584,7 @@ class DockerRuntimeRunner:
                 "Prompt image inputs are not supported yet. Leave the image column blank or set it to None."
             )
         try:
-            if prompt_input.seed_repo:
-                reference = self.config.resolve_seed_reference(prompt_input.seed_repo)
-                bundle = self._fetch_seed_bundle(reference, prompt_input.seed_repo)
-                workspace = workspace_root / self._seed_checkout_name(reference, prompt_input.seed_repo)
-                self._clone_seed_bundle(bundle, workspace)
-            elif prompt_input.github_repo:
-                workspace = workspace_root / self._github_repo_checkout_name(prompt_input.github_repo)
-                self._clone_github_repo(prompt_input.github_repo, workspace)
+            workspace = self._materialize_seed(prompt_input, workspace_root)
         except BaseException:
             shutil.rmtree(workspace_root, ignore_errors=True)
             raise
@@ -2083,6 +2127,68 @@ class DockerRuntimeRunner:
             return f"verifier: error ({result.error})"
         return f"verifier: {'passed' if result.passed else 'failed'} (exit {result.exit_code})"
 
+    def _run_seed_baseline(self, prompt_input: PromptInput) -> VerificationResult | None:
+        """Run the verifier on a pristine re-clone of the seed (the pre-agent state)."""
+        if not (prompt_input.seed_repo or prompt_input.github_repo):
+            return None
+        root = Path(tempfile.mkdtemp(prefix="seed-baseline-"))
+        root.chmod(0o777)
+        try:
+            workspace = self._materialize_seed(prompt_input, root)
+            return self._run_verifier(workspace, prompt_input)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def _apply_f2p_p2p_reward(self, result: VerificationResult, prompt_input: PromptInput) -> None:
+        """Turn the verifier's per-test results into a SWE-bench-style reward.
+
+        With ``fail_to_pass``/``pass_to_pass`` set, the reward is the genuine
+        transition: every FAIL_TO_PASS goes fail->pass and every PASS_TO_PASS stays
+        passing. A pristine-seed baseline run (``tasks.check_seed_baseline``) supplies
+        the before-state and flags invalid tasks; without it we fall back to the
+        after-only check (exact SWE-bench scoring). No lists -> exit-code reward stays.
+        """
+        f2p_ids = prompt_input.fail_to_pass
+        p2p_ids = prompt_input.pass_to_pass
+        if not f2p_ids and not p2p_ids:
+            return
+        result.fail_to_pass = {t: result.tests.get(t, "missing") for t in f2p_ids}
+        result.pass_to_pass = {t: result.tests.get(t, "missing") for t in p2p_ids}
+        if result.error:
+            # After-run failed to execute (restore/launch/timeout): not resolved.
+            result.resolved = False
+            result.passed = False
+            return
+        after_f2p = result.fail_to_pass
+        after_p2p = result.pass_to_pass
+        if self.config.tasks.check_seed_baseline:
+            baseline = self._run_seed_baseline(prompt_input)
+            if baseline is not None:
+                base_f2p = {t: baseline.tests.get(t, "missing") for t in f2p_ids}
+                base_p2p = {t: baseline.tests.get(t, "missing") for t in p2p_ids}
+                result.baseline = {
+                    "fail_to_pass": base_f2p,
+                    "pass_to_pass": base_p2p,
+                    "exit_code": baseline.exit_code,
+                    "error": baseline.error,
+                }
+                result.valid_task = (
+                    all(base_f2p[t] != "passed" for t in f2p_ids)
+                    and all(base_p2p[t] == "passed" for t in p2p_ids)
+                )
+                result.resolved = (
+                    all(base_f2p[t] != "passed" and after_f2p[t] == "passed" for t in f2p_ids)
+                    and all(base_p2p[t] == "passed" and after_p2p[t] == "passed" for t in p2p_ids)
+                )
+                result.passed = result.resolved
+                return
+        # After-only (SWE-bench parity / trusted labels).
+        result.resolved = (
+            all(after_f2p[t] == "passed" for t in f2p_ids)
+            and all(after_p2p[t] == "passed" for t in p2p_ids)
+        )
+        result.passed = result.resolved
+
     def _verify_and_record(
         self,
         trace_path: Path,
@@ -2097,6 +2203,7 @@ class DockerRuntimeRunner:
         result = self._run_verifier(snapshot, prompt_input)
         if result is None:
             return trace_path, None
+        self._apply_f2p_p2p_reward(result, prompt_input)
         sidecar = self._verification_sidecar_path(trace_path)
         sidecar.parent.mkdir(parents=True, exist_ok=True)
         sidecar.write_text(
