@@ -482,6 +482,26 @@ def test_tasks_config_defaults():
     assert tasks.verifier_timeout_seconds == 300
     assert tasks.restore_verifier_files is True
     assert tasks.route_by_result is True
+    assert tasks.check_seed_baseline is True
+
+
+def test_prompt_input_f2p_p2p_and_base_commit():
+    pi = PromptInput(
+        prompt="x", github_repo="owner/repo", base_commit="abc123",
+        fail_to_pass=["tests/t.py::test_bug"], pass_to_pass="tests/t.py::test_b, tests/t.py::test_c",
+    )
+    assert pi.base_commit == "abc123"
+    assert pi.fail_to_pass == ["tests/t.py::test_bug"]
+    assert pi.pass_to_pass == ["tests/t.py::test_b", "tests/t.py::test_c"]
+
+
+def test_base_commit_requires_seed_source():
+    with pytest.raises(ValueError, match="base_commit requires a seed source"):
+        PromptInput(prompt="x", base_commit="abc123")
+
+
+def test_base_commit_ok_with_seed_repo():
+    assert PromptInput(prompt="x", seed_repo="widgets", base_commit="abc").base_commit == "abc"
 
 
 def test_prompt_input_seed_and_verifier_fields():

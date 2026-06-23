@@ -213,6 +213,7 @@ class TasksConfig(BaseModel):
     verifier_timeout_seconds: int = Field(default=300, ge=1)
     restore_verifier_files: bool = True
     route_by_result: bool = True
+    check_seed_baseline: bool = True
 
     @field_validator("seed_dataset", mode="before")
     @classmethod
@@ -242,8 +243,11 @@ class PromptInput(BaseModel):
     prompt: str
     follow_up_prompts: list[str] = Field(default_factory=list)
     seed_repo: str | None = None
+    base_commit: str | None = None
     verifier: str | None = None
     verifier_files: list[str] = Field(default_factory=list)
+    fail_to_pass: list[str] = Field(default_factory=list)
+    pass_to_pass: list[str] = Field(default_factory=list)
 
     @staticmethod
     def _normalize_optional_text(value: object) -> str | None:
@@ -255,14 +259,14 @@ class PromptInput(BaseModel):
             return None
         return normalized
 
-    @field_validator("image", "github_repo", "system", "seed_repo", "verifier", mode="before")
+    @field_validator("image", "github_repo", "system", "seed_repo", "base_commit", "verifier", mode="before")
     @classmethod
     def normalize_optional_fields(cls, value: object) -> str | None:
         return cls._normalize_optional_text(value)
 
-    @field_validator("verifier_files", mode="before")
+    @field_validator("verifier_files", "fail_to_pass", "pass_to_pass", mode="before")
     @classmethod
-    def normalize_verifier_files(cls, value: object) -> list[str]:
+    def normalize_str_list(cls, value: object) -> list[str]:
         if value is None:
             return []
         if isinstance(value, str):
@@ -270,7 +274,7 @@ class PromptInput(BaseModel):
         elif isinstance(value, list):
             items = [item if isinstance(item, str) else str(item) for item in value]
         else:
-            raise ValueError("verifier_files must be a list of paths or a comma-separated string")
+            raise ValueError("expected a list of strings or a comma-separated string")
         return [text for text in (item.strip() for item in items) if text]
 
     @field_validator("prompt", mode="before")
@@ -319,6 +323,8 @@ class PromptInput(BaseModel):
     def validate_seed_source(self) -> PromptInput:
         if self.seed_repo and self.github_repo:
             raise ValueError("Set only one of seed_repo or github_repo, not both")
+        if self.base_commit and not (self.seed_repo or self.github_repo):
+            raise ValueError("base_commit requires a seed source (seed_repo or github_repo)")
         return self
 
     def turn_prompts(self) -> list[str]:
@@ -602,8 +608,11 @@ class Config(BaseModel):
                                 system=normalized_row.get("system"),
                                 prompt=prompt,
                                 seed_repo=normalized_row.get("seed_repo"),
+                                base_commit=normalized_row.get("base_commit"),
                                 verifier=normalized_row.get("verifier"),
                                 verifier_files=normalized_row.get("verifier_files"),
+                                fail_to_pass=normalized_row.get("fail_to_pass"),
+                                pass_to_pass=normalized_row.get("pass_to_pass"),
                             )
                         )
                     except ValueError as exc:
@@ -638,8 +647,11 @@ class Config(BaseModel):
                 prompt=prompt,
                 follow_up_prompts=normalized_row.get("follow_up_prompts"),
                 seed_repo=normalized_row.get("seed_repo"),
+                base_commit=normalized_row.get("base_commit"),
                 verifier=normalized_row.get("verifier"),
                 verifier_files=normalized_row.get("verifier_files"),
+                fail_to_pass=normalized_row.get("fail_to_pass"),
+                pass_to_pass=normalized_row.get("pass_to_pass"),
             )
         except ValueError as exc:
             raise ValueError(f"Invalid {source}: {exc}") from exc
