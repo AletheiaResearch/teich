@@ -321,8 +321,8 @@ def test_run_bench_resume_skips_and_failure_continues(tmp_path, monkeypatch):
 
 
 def test_run_bench_unknown_type_aborts(tmp_path):
-    # swe-bench is not registered until its phase -> a clear unknown-type error.
-    cfg = Config(bench={"sources": [{"type": "swe-bench", "source": "x"}]}, output={"traces_dir": tmp_path / "o"})
+    # An unregistered source type -> a clear unknown-type error (harbor + swe-bench are known).
+    cfg = Config(bench={"sources": [{"type": "nope", "source": "x"}]}, output={"traces_dir": tmp_path / "o"})
     with pytest.raises(RuntimeError, match="Unknown bench source type"):
         run_bench(cfg)
 

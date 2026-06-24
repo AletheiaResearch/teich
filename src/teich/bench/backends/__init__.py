@@ -16,10 +16,12 @@ from .base import (
     source_id,
 )
 from .harbor import HarborBackend
+from .swebench import SweBenchBackend
 
-# type -> backend factory. swe-bench is registered in a later phase.
+# type -> backend factory.
 _BACKENDS: dict[str, type] = {
     HarborBackend.type: HarborBackend,
+    SweBenchBackend.type: SweBenchBackend,
 }
 
 

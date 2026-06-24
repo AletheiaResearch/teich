@@ -1259,6 +1259,7 @@ bench:
     # - { type: harbor,    source: terminal-bench@2.0 }          # registry spec
     # - { type: harbor,    source: ./local-tasks }               # local task dir / dir of task dirs
     # - { type: swe-bench, source: SWE-bench/SWE-bench_Verified, split: test }
+    # - { type: swe-bench, source: SWE-bench/SWE-bench_Lite, instances: [django__django-12345] }
     #   # optional per-source: repo (git/HF registry), version, instances [..], backend (harbor)
 
 # Number of prompts to run in parallel.
