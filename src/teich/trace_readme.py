@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Any, Iterable
 
-from .converter import convert_traces_to_training_data
+from .converter import NON_DATA_TRACE_DIR_NAMES, convert_traces_to_training_data
 
 README_SAMPLE_MAX_CHARS = 4_000
 README_SAMPLE_STRING_MAX_CHARS = 600
@@ -15,7 +15,6 @@ README_INLINE_TOOLS_MAX_CHARS = 80_000
 TEICH_TRAINING_DOCS_URL = "https://github.com/TeichAI/teich/blob/main/docs/training.md"
 TEICH_PREPARE_DOCS_URL = "https://github.com/TeichAI/teich/blob/main/docs/prepare-data.md"
 EXTRACTION_PROVIDERS = {"claude", "codex", "cursor", "hermes", "pi"}
-NON_DATA_README_SCAN_DIR_NAMES = {"failures", "partials", "sandbox", "__pycache__"}
 
 
 def normalize_extraction_provider(provider: str | None) -> str | None:
@@ -61,7 +60,7 @@ def extraction_provider_from_dataset_rows(traces_dir: Path) -> str | None:
             relative_parts = trace_file.relative_to(traces_dir).parts
         except ValueError:
             relative_parts = trace_file.parts
-        if any(part in NON_DATA_README_SCAN_DIR_NAMES for part in relative_parts):
+        if any(part in NON_DATA_TRACE_DIR_NAMES for part in relative_parts):
             continue
         try:
             with trace_file.open("r", encoding="utf-8") as handle:
@@ -182,7 +181,23 @@ def _dataset_tools(trace_files: Iterable[Path]) -> list[dict[str, Any]]:
     return [merged_by_name[name] for name in sorted(merged_by_name)]
 
 
-def _frontmatter(pretty_name: str, tags: list[str]) -> str:
+def _split_data_files(traces_dir: Path) -> list[tuple[str, str]]:
+    """Dataset-card split -> file glob, reflecting the actual routing folders.
+
+    When routed split folders (passed/failed/borderline) hold data, expose them as
+    HF splits; otherwise everything is a single ``train`` split.
+    """
+    splits = [
+        (name, f"{name}/*.jsonl")
+        for name in ("passed", "failed", "borderline")
+        if (traces_dir / name).is_dir() and any((traces_dir / name).glob("*.jsonl"))
+    ]
+    return splits or [("train", "**/*.jsonl")]
+
+
+def _frontmatter(
+    pretty_name: str, tags: list[str], data_files: list[tuple[str, str]] | None = None
+) -> str:
     lines = [
         "---",
         f'pretty_name: "{pretty_name}"',
@@ -193,17 +208,11 @@ def _frontmatter(pretty_name: str, tags: list[str]) -> str:
         lines.append("tags:")
         for tag in tags:
             lines.append(f'- "{tag}"')
-    lines.extend(
-        [
-            "configs:",
-            "- config_name: default",
-            "  data_files:",
-            "  - split: train",
-            '    path: "**/*.jsonl"',
-            "---",
-            "",
-        ]
-    )
+    lines.extend(["configs:", "- config_name: default", "  data_files:"])
+    for split, path in data_files or [("train", "**/*.jsonl")]:
+        lines.append(f"  - split: {split}")
+        lines.append(f'    path: "{path}"')
+    lines.extend(["---", ""])
     return "\n".join(lines)
 
 
@@ -387,6 +396,65 @@ def _extraction_snippet(provider: str) -> list[str]:
     ]
 
 
+def _reward_stats(traces_dir: Path, trace_files: Iterable[Path]) -> dict[str, int] | None:
+    """Summarize verifier outcomes from the canonical ``verification/`` sidecars.
+
+    Both reward-labeled paths write a ``verification/<stem>.json`` with a ``passed``
+    bool (bench also writes a numeric ``reward``), so one scan describes a dataset
+    that is all-prompts, all-bench, or a mix. Only sidecars whose stem matches a live
+    dataset row are counted, so a stale/orphaned sidecar can't inflate the count.
+    Returns None when nothing is verified.
+    """
+    verification_dir = traces_dir / "verification"
+    if not verification_dir.is_dir():
+        return None
+    live_stems = {path.stem for path in trace_files}
+    passed = failed = numeric = 0
+    for sidecar in sorted(verification_dir.glob("*.json")):
+        if sidecar.stem not in live_stems:
+            continue
+        try:
+            data = json.loads(sidecar.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict) or not isinstance(data.get("passed"), bool):
+            continue
+        if data["passed"]:
+            passed += 1
+        else:
+            failed += 1
+        reward = data.get("reward")
+        if isinstance(reward, (int, float)) and not isinstance(reward, bool):
+            numeric += 1
+    if passed + failed == 0:
+        return None
+    return {"total": passed + failed, "passed": passed, "failed": failed, "numeric": numeric}
+
+
+def _reward_labels_section(reward_stats: dict[str, int]) -> list[str]:
+    lines = [
+        "## Reward labels",
+        "",
+        "This is a verifiable dataset: rows carry the task verifier's outcome so it can be "
+        "used for reward-based training and filtering.",
+        "",
+        "- `passed` (bool): whether the task verifier succeeded after the agent's edits",
+        "- `reward` (float): the verifier's own score when it reports one, else the binary "
+        "`1.0`/`0.0` implied by `passed`",
+        "",
+        f"Verified tasks: {reward_stats['total']} "
+        f"({reward_stats['passed']} passed / {reward_stats['failed']} failed).",
+        "Each reward comes from the task verifier run after the agent's attempt.",
+    ]
+    if reward_stats.get("numeric"):
+        lines.append(
+            f"{reward_stats['numeric']} of {reward_stats['total']} carry an explicit numeric "
+            "score (the rest are binary pass/fail)."
+        )
+    lines.append("")
+    return lines
+
+
 def build_traces_readme(
     *,
     pretty_name: str,
@@ -396,6 +464,8 @@ def build_traces_readme(
     repo_id: str | None = None,
     tools: list[dict[str, Any]] | None = None,
     extraction_provider: str | None = None,
+    reward_stats: dict[str, int] | None = None,
+    data_files: list[tuple[str, str]] | None = None,
 ) -> str:
     structured_dataset = _is_structured_dataset(trace_files)
     agent_trace_rows = _is_agent_trace_row_dataset(trace_files)
@@ -404,8 +474,12 @@ def build_traces_readme(
     row_count = _row_count(trace_files)
     sample_lines = _sample_lines(trace_files)
     sample_block = "\n".join(sample_lines)
+    effective_tags = list(tags)
+    routed = bool(data_files) and [split for split, _ in data_files] != ["train"]
+    if (reward_stats or routed) and "reward-labeled" not in effective_tags:
+        effective_tags.append("reward-labeled")
     lines = [
-        _frontmatter(pretty_name, tags),
+        _frontmatter(pretty_name, effective_tags, data_files),
         'This dataset was generated using [teich](https://github.com/TeichAI/teich) by [TeichAI](https://huggingface.co/TeichAI) <img src="https://cdn-avatars.huggingface.co/v1/production/uploads/6837935ac3b7ffe0d2559ce9/-AxyvV4wfUY8uo87kNKkK.png" width="20" height="20" style="display: inline-block; vertical-align: middle; margin: 0 3px;">',
         "",
         f"# {pretty_name}",
@@ -421,6 +495,8 @@ def build_traces_readme(
     ]
     if model_id:
         lines.extend([f"Model metadata: `{model_id}`", ""])
+    if reward_stats:
+        lines.extend(_reward_labels_section(reward_stats))
     if dataset_tools:
         lines.extend(
             [
@@ -528,7 +604,7 @@ def write_traces_readme(
         path
         for path in traces_dir.rglob("*.jsonl")
         if path.is_file()
-        and not {"partials", "failures"}.intersection(path.relative_to(traces_dir).parts)
+        and not NON_DATA_TRACE_DIR_NAMES.intersection(path.relative_to(traces_dir).parts)
         and not any(_path_is_relative_to(path, excluded_dir) for excluded_dir in excluded_dirs or [])
     )
     dataset_tools = tools if tools is not None else _dataset_tools(trace_files)
@@ -542,6 +618,8 @@ def write_traces_readme(
             repo_id=repo_id,
             tools=dataset_tools,
             extraction_provider=extraction_provider,
+            reward_stats=_reward_stats(traces_dir, trace_files),
+            data_files=_split_data_files(traces_dir),
         ),
         encoding="utf-8",
     )
