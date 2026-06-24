@@ -325,3 +325,40 @@ def test_run_bench_unknown_type_aborts(tmp_path):
     cfg = Config(bench={"sources": [{"type": "swe-bench", "source": "x"}]}, output={"traces_dir": tmp_path / "o"})
     with pytest.raises(RuntimeError, match="Unknown bench source type"):
         run_bench(cfg)
+
+
+def test_run_bench_honors_max_concurrency(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    state = {"current": 0, "peak": 0}
+    lock = threading.Lock()
+
+    class _ConcBackend:
+        type = "fake"
+
+        def require(self):
+            pass
+
+        def tasks(self, cfg, source, *, refresh=False):
+            return [base.BenchTask(id=f"t{i}") for i in range(6)]
+
+        def run(self, cfg, source, task):
+            with lock:
+                state["current"] += 1
+                state["peak"] = max(state["peak"], state["current"])
+            time.sleep(0.05)
+            with lock:
+                state["current"] -= 1
+            return base.BenchRun(native_lines=['{"type":"session"}'], rewards={"reward": 1.0})
+
+    monkeypatch.setattr(bench_runner, "get_backend", lambda t: _ConcBackend())
+    cfg = Config(
+        agent={"provider": "pi"},
+        bench={"sources": [{"type": "fake", "source": "S"}]},
+        output={"traces_dir": tmp_path / "output"},
+        max_concurrency=3,
+    )
+    written = run_bench(cfg)
+    assert len(written) == 6
+    assert 1 < state["peak"] <= 3  # tasks ran concurrently, capped at max_concurrency
