@@ -4004,6 +4004,79 @@ def test_run_session_copies_workspace_into_named_sandbox(tmp_path: Path):
     assert captured_destination == tmp_path / 'sandbox' / 'trace-1.jsonl'
 
 
+def test_run_session_clones_github_repo_into_codex_workspace(tmp_path: Path):
+    config = Config(output={"traces_dir": tmp_path / "output", "sandbox_dir": tmp_path / "sandbox"})
+
+    with patch.object(CodexRunner, '_ensure_image'):
+        runner = CodexRunner(config)
+
+    cloned_destination = None
+    captured_workspace = None
+
+    def capture_clone(_github_repo: str, destination: Path) -> None:
+        nonlocal cloned_destination
+        cloned_destination = destination
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / "README.md").write_text("repo", encoding="utf-8")
+
+    def capture_copy(workspace: Path, _destination: Path) -> None:
+        nonlocal captured_workspace
+        captured_workspace = workspace
+
+    prompt_input = PromptInput(github_repo="armand0e/perplexica-mcp", prompt="Fix the issue")
+
+    with patch.object(runner, '_clone_github_repo', side_effect=capture_clone) as mock_clone, \
+         patch.object(runner, '_run_process'), \
+         patch.object(runner, '_extract_session_file', return_value=tmp_path / 'output' / 'trace-1.jsonl'), \
+         patch.object(runner, '_copy_workspace_snapshot', side_effect=capture_copy):
+        runner.run_session('Fix the issue', 'test-session', prompt_input=prompt_input)
+
+    assert mock_clone.called
+    assert cloned_destination is not None
+    assert cloned_destination.name == "perplexica-mcp"
+    assert captured_workspace == cloned_destination
+
+
+def test_run_session_clones_github_repo_into_pi_workspace(tmp_path: Path):
+    config = Config(output={"traces_dir": tmp_path / "output", "sandbox_dir": tmp_path / "sandbox"})
+
+    with patch.object(PiRunner, '_ensure_image'):
+        runner = PiRunner(config)
+
+    cloned_destination = None
+    captured_workspace = None
+
+    def capture_clone(_github_repo: str, destination: Path) -> None:
+        nonlocal cloned_destination
+        cloned_destination = destination
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / "package.json").write_text("{}", encoding="utf-8")
+
+    def capture_project_settings(workspace: Path) -> None:
+        nonlocal captured_workspace
+        captured_workspace = workspace
+
+    def write_completed_trace(command, *args, **kwargs) -> None:
+        mounts = [command[index + 1] for index, item in enumerate(command) if item == "-v"]
+        session_mount = next(mount for mount in mounts if mount.endswith(":/home/codex/pi-sessions"))
+        session_dir = Path(session_mount.rsplit(":", maxsplit=1)[0])
+        _write_fake_pi_native_session(session_dir / "trace-1.jsonl", [("Fix the issue", "Done")])
+
+    prompt_input = PromptInput(github_repo="armand0e/perplexica-mcp", prompt="Fix the issue")
+
+    with patch.object(runner, '_clone_github_repo', side_effect=capture_clone) as mock_clone, \
+         patch.object(runner, '_run_process', side_effect=write_completed_trace), \
+         patch.object(runner, '_copy_workspace_snapshot'), \
+         patch.object(runner, '_write_pi_agent_settings'), \
+         patch.object(runner, '_write_pi_project_settings', side_effect=capture_project_settings):
+        runner.run_session('Fix the issue', 'test-session', prompt_input=prompt_input)
+
+    assert mock_clone.called
+    assert cloned_destination is not None
+    assert cloned_destination.name == "perplexica-mcp"
+    assert captured_workspace == cloned_destination
+
+
 def test_copy_normalized_session_file_preserves_codex_native_reasoning_event(tmp_path: Path):
     source = tmp_path / "source.jsonl"
     destination = tmp_path / "destination.jsonl"

@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..config import Config
+from ..config import Config, PromptInput
 from ..runner import (
     HERMES_DEFAULT_TOOLSETS,
     PI_SESSIONS_DIR_IN_CONTAINER,
@@ -222,7 +222,7 @@ class InteractiveSession:
     mode "chat": direct API loop for the chat provider.
     """
 
-    def __init__(self, config: Config, *, system: str | None = None):
+    def __init__(self, config: Config, *, github_repo: str | None = None, system: str | None = None):
         self.id = str(uuid.uuid4())
         self.config = config
         self.provider = config.get_agent_provider()
@@ -231,6 +231,7 @@ class InteractiveSession:
         if self.provider in {"hermes-agent", "hermes_agent"}:
             self.provider = "hermes"
         self.mode = "chat" if self.provider == "chat" else "terminal"
+        self.github_repo = github_repo
         self.system = system
         self.events = EventLog()
         self.status = "starting"
@@ -298,7 +299,12 @@ class InteractiveSession:
 
     def _prepare_environment(self) -> None:
         runner = self._runner
-        workspace_root, workspace = runner._prepare_workspace(self.id, None, self.provider.replace("-", ""))
+        prompt_input = (
+            PromptInput(prompt="interactive session", github_repo=self.github_repo)
+            if self.github_repo
+            else None
+        )
+        workspace_root, workspace = runner._prepare_workspace(self.id, prompt_input, self.provider.replace("-", ""))
         self._cleanup_paths.append(workspace_root)
         workspace.mkdir(parents=True, exist_ok=True)
         self.workspace = workspace
@@ -614,6 +620,7 @@ class InteractiveSession:
             "model": self.config.get_effective_model(),
             "status": self.status,
             "turns": len(self.turn_prompts),
+            "github_repo": self.github_repo,
             "system": self.system,
             "saved_trace": str(self.saved_trace) if self.saved_trace else None,
             "started_at": self.started_at.isoformat(),
@@ -631,8 +638,8 @@ class SessionManager:
         self._sessions: dict[str, InteractiveSession] = {}
         self._lock = threading.Lock()
 
-    def create(self, config: Config, *, system: str | None = None) -> InteractiveSession:
-        session = InteractiveSession(config, system=system)
+    def create(self, config: Config, *, github_repo: str | None = None, system: str | None = None) -> InteractiveSession:
+        session = InteractiveSession(config, github_repo=github_repo, system=system)
         with self._lock:
             self._sessions[session.id] = session
         session.start_async()

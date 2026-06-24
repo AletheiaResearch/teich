@@ -11,7 +11,7 @@ import yaml
 
 from ..config import Config, PromptInput
 
-PROMPT_FIELDS = ("prompt", "system", "follow_up_prompts")
+PROMPT_FIELDS = ("prompt", "system", "github_repo", "follow_up_prompts")
 JSONL_PROMPT_SUFFIXES = {".jsonl", ".ndjson"}
 DIRECT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 CHAT_API_COMPATIBILITY_ERROR = (

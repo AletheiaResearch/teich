@@ -232,6 +232,7 @@ function normalizeSessionProvider(provider) {
 function syncSessionProviderFields() {
   const isChat = state.sessionProvider === "chat";
   $("#sess-system-field").hidden = !isChat;
+  $("#sess-repo-field").hidden = isChat;
 }
 
 function syncSessionProviderFromConfig() {
@@ -496,6 +497,7 @@ function renderPrompts() {
     head.appendChild(el("span", "prompt-index", `#${index + 1}`));
     const badges = el("div", "prompt-badges");
     if (prompt.system) badges.appendChild(el("span", "badge", "system"));
+    if (prompt.github_repo) badges.appendChild(el("span", "badge", prompt.github_repo));
     if (prompt.follow_up_prompts && prompt.follow_up_prompts.length) {
       badges.appendChild(el("span", "badge", `${prompt.follow_up_prompts.length} follow-ups`));
     }
@@ -521,7 +523,7 @@ function renderPrompts() {
     card.appendChild(textArea);
 
     const extra = el("div", "prompt-extra");
-    extra.hidden = !(prompt.system || (prompt.follow_up_prompts || []).length);
+    extra.hidden = !(prompt.system || prompt.github_repo || (prompt.follow_up_prompts || []).length);
 
     const systemInput = el("input");
     systemInput.type = "text";
@@ -529,6 +531,15 @@ function renderPrompts() {
     systemInput.value = prompt.system || "";
     systemInput.addEventListener("input", () => {
       if (systemInput.value.trim()) prompt.system = systemInput.value; else delete prompt.system;
+      markPromptsDirty();
+    });
+
+    const repoInput = el("input");
+    repoInput.type = "text";
+    repoInput.placeholder = "GitHub repo: owner/repo (optional)";
+    repoInput.value = prompt.github_repo || "";
+    repoInput.addEventListener("input", () => {
+      if (repoInput.value.trim()) prompt.github_repo = repoInput.value.trim(); else delete prompt.github_repo;
       markPromptsDirty();
     });
 
@@ -543,6 +554,7 @@ function renderPrompts() {
     });
 
     extra.appendChild(systemInput);
+    extra.appendChild(repoInput);
     extra.appendChild(followUps);
     card.appendChild(extra);
 
@@ -881,6 +893,7 @@ $("#btn-start-session").addEventListener("click", async () => {
   const body = {
     provider,
     model: $("#sess-model").value.trim() || null,
+    github_repo: provider === "chat" ? null : $("#sess-repo").value.trim() || null,
     system: provider === "chat" ? $("#sess-system").value.trim() || null : null,
   };
   $("#sess-note").textContent = "Launching…";

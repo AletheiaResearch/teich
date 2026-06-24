@@ -1263,6 +1263,27 @@ class DockerRuntimeRunner:
             ignore_dangling_symlinks=True,
         )
 
+    @staticmethod
+    def _github_repo_checkout_name(github_repo: str) -> str:
+        return github_repo.rsplit("/", maxsplit=1)[-1]
+
+    @staticmethod
+    def _clone_github_repo(github_repo: str, destination: Path) -> None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        repo_url = f"https://github.com/{github_repo}.git"
+        try:
+            subprocess.run(
+                ["git", "clone", "--depth", "1", repo_url, str(destination)],
+                capture_output=True,
+                check=True,
+                **TEXT_SUBPROCESS_KWARGS,
+            )
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or "")
+            stdout = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or "")
+            details = stderr.strip() or stdout.strip() or str(exc)
+            raise RuntimeError(f"Failed to clone github repo {github_repo}: {details}") from exc
+
     def _prepare_workspace(
         self,
         session_id: str,
@@ -1278,6 +1299,9 @@ class DockerRuntimeRunner:
             raise RuntimeError(
                 "Prompt image inputs are not supported yet. Leave the image column blank or set it to None."
             )
+        if prompt_input.github_repo:
+            workspace = workspace_root / self._github_repo_checkout_name(prompt_input.github_repo)
+            self._clone_github_repo(prompt_input.github_repo, workspace)
         return workspace_root, workspace
 
     def _sandbox_destination(self, trace_path: Path) -> Path:
@@ -5021,6 +5045,8 @@ class ChatRunner(DockerRuntimeRunner):
             session_id = str(uuid.uuid4())
         if self.config.mcp_servers:
             raise RuntimeError("Chat runner does not support mcp_servers.")
+        if prompt_input and prompt_input.github_repo:
+            raise RuntimeError("Chat runner does not support github_repo prompt inputs.")
         destination = self._resolve_output_path(f"{session_id}.jsonl")
         destination.parent.mkdir(parents=True, exist_ok=True)
         training_row = self._request_chat_conversation(prompt_input or PromptInput(prompt=prompt))
@@ -5070,6 +5096,8 @@ class ChatRunner(DockerRuntimeRunner):
         try:
             if self.config.mcp_servers:
                 raise RuntimeError("Chat runner does not support mcp_servers.")
+            if prompt_input.github_repo:
+                raise RuntimeError("Chat runner does not support github_repo prompt inputs.")
             training_row = self._request_or_extend_chat_conversation(prompt_input, destination, append_lock)
             if progress_callback:
                 progress_callback(

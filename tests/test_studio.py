@@ -85,14 +85,14 @@ def test_read_prompts_supports_csv_prompt_file(tmp_path):
     state = ProjectState(tmp_path)
     state.ensure_initialized()
     (tmp_path / "prompts.csv").write_text(
-        "prompt,system\n"
-        "Build the feature,Be concise\n",
+        "prompt,system,github_repo\n"
+        "Build the feature,Be concise,owner/repo\n",
         encoding="utf-8",
     )
     state.write_config_data({"prompts_file": "prompts.csv"})
 
     assert state.read_prompts() == [
-        {"prompt": "Build the feature", "system": "Be concise"}
+        {"prompt": "Build the feature", "system": "Be concise", "github_repo": "owner/repo"}
     ]
 
 

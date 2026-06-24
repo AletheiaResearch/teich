@@ -93,6 +93,7 @@ class ExtractRequest(BaseModel):
 class SessionCreate(BaseModel):
     provider: str | None = None
     model: str | None = None
+    github_repo: str | None = None
     system: str | None = None
 
 
@@ -572,6 +573,7 @@ def create_app(project_dir: Path) -> FastAPI:
             )
         session = sessions.create(
             cfg,
+            github_repo=(payload.github_repo or "").strip() or None,
             system=(payload.system or "").strip() or None,
         )
         return session.to_dict()

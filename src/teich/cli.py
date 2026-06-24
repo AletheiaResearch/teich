@@ -1344,6 +1344,7 @@ def studio(
 
 PROMPTS_TEMPLATE = '''{"prompt":"Build a simple todo list app in React"}
 {"prompt":"Create a Python script that fetches weather data from an API"}
+{"github_repo":"armand0e/perplexica-mcp","prompt":"Add a small usability improvement and update the tests"}
 {"system":"Answer as a concise project manager.","prompt":"Draft a compact project plan"}
 {"prompt":"Draft a compact project plan","follow_up_prompts":["Revise it for a solo developer","Add a risk checklist"]}
 '''

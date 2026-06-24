@@ -213,6 +213,7 @@ class PublishConfig(BaseModel):
 class PromptInput(BaseModel):
     """Structured prompt input row."""
     image: str | None = None
+    github_repo: str | None = None
     system: str | None = None
     prompt: str
     follow_up_prompts: list[str] = Field(default_factory=list)
@@ -227,7 +228,7 @@ class PromptInput(BaseModel):
             return None
         return normalized
 
-    @field_validator("image", "system", mode="before")
+    @field_validator("image", "github_repo", "system", mode="before")
     @classmethod
     def normalize_optional_fields(cls, value: object) -> str | None:
         return cls._normalize_optional_text(value)
@@ -262,6 +263,17 @@ class PromptInput(BaseModel):
                 raise ValueError(f"follow_up_prompts entry {index} cannot be empty")
             prompts.append(normalized)
         return prompts
+
+    @field_validator("github_repo")
+    @classmethod
+    def validate_github_repo(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not GITHUB_REPO_ID_PATTERN.fullmatch(value):
+            raise ValueError(
+                "github_repo must be in owner/repo format, e.g. armand0e/perplexica-mcp"
+            )
+        return value
 
     def turn_prompts(self) -> list[str]:
         """Return the initial prompt plus any configured follow-up prompts."""
@@ -528,6 +540,7 @@ class Config(BaseModel):
                         prompt_inputs.append(
                             PromptInput(
                                 image=normalized_row.get("image"),
+                                github_repo=normalized_row.get("github_repo"),
                                 system=normalized_row.get("system"),
                                 prompt=prompt,
                             )
@@ -559,6 +572,7 @@ class Config(BaseModel):
         try:
             return PromptInput(
                 image=normalized_row.get("image"),
+                github_repo=normalized_row.get("github_repo"),
                 system=normalized_row.get("system"),
                 prompt=prompt,
                 follow_up_prompts=normalized_row.get("follow_up_prompts"),

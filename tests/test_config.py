@@ -166,9 +166,9 @@ def test_config_prompts_file(tmp_path: Path):
     """Test loading structured prompts from CSV file."""
     prompts_file = tmp_path / "prompts.csv"
     prompts_file.write_text(
-        "image,prompt\n"
-        'None,"Build a todo app"\n'
-        'None,"Improve the search flow"\n',
+        "image,github_repo,prompt\n"
+        'None,None,"Build a todo app"\n'
+        'None,armand0e/perplexica-mcp,"Improve the search flow"\n',
         encoding="utf-8",
     )
 
@@ -187,19 +187,20 @@ prompts:
     assert "Extra prompt" in prompts
     assert "Build a todo app" in prompts
     assert "Improve the search flow" in prompts
+    assert prompt_inputs[2].github_repo == "armand0e/perplexica-mcp"
     assert prompt_inputs[2].image is None
 
 
 def test_config_prompts_file_supports_multiline_csv_prompts(tmp_path: Path):
     prompts_file = tmp_path / "prompts.csv"
     prompts_file.write_text(
-        '"image","prompt"\n'
-        '"None","Premise:\n'
+        '"image","github_repo","prompt"\n'
+        '"None","None","Premise:\n'
         '""Apparently Thorn thought the same thing.""\n'
         'Available choices:\n'
         ' - yes\n'
         ' - no"\n'
-        '"None","Solve 1148583*a = 1148360*a - 5352 for a.\n'
+        '"None","None","Solve 1148583*a = 1148360*a - 5352 for a.\n'
         'Solve this problem."\n',
         encoding="utf-8",
     )
@@ -221,7 +222,7 @@ def test_config_prompts_file_supports_multiline_csv_prompts(tmp_path: Path):
 def test_config_prompts_file_rejects_csv_rows_with_extra_columns(tmp_path: Path):
     prompts_file = tmp_path / "prompts.csv"
     prompts_file.write_text(
-        "prompt,system\n"
+        "prompt,github_repo\n"
         "Build a dashboard,with an unquoted comma,None\n",
         encoding="utf-8",
     )
@@ -237,6 +238,7 @@ def test_config_prompts_file_supports_jsonl_prompts(tmp_path: Path):
         {
             "system": "Answer as a senior frontend reviewer.",
             "prompt": "Premise:\nUse a safer long prompt format.\nAvailable choices:\n - yes\n - no",
+            "github_repo": "armand0e/perplexica-mcp",
             "follow_up_prompts": ["Now add tests.", "Now update the README."],
         },
         {"prompt": "Build a todo app"},
@@ -252,6 +254,7 @@ def test_config_prompts_file_supports_jsonl_prompts(tmp_path: Path):
     assert len(prompt_inputs) == 2
     assert prompt_inputs[0].prompt == rows[0]["prompt"]
     assert prompt_inputs[0].system == "Answer as a senior frontend reviewer."
+    assert prompt_inputs[0].github_repo == "armand0e/perplexica-mcp"
     assert prompt_inputs[0].follow_up_prompts == ["Now add tests.", "Now update the README."]
     assert prompt_inputs[1].prompt == "Build a todo app"
 
@@ -313,8 +316,8 @@ def test_config_prompts_file_resolves_relative_to_yaml(tmp_path: Path):
     """Test loading prompts_file relative to the config file location."""
     prompts_file = tmp_path / "prompts.csv"
     prompts_file.write_text(
-        "image,prompt\n"
-        'None,"Build a dashboard"\n',
+        "image,github_repo,prompt\n"
+        'None,None,"Build a dashboard"\n',
         encoding="utf-8",
     )
 
@@ -329,11 +332,24 @@ def test_config_prompts_file_resolves_relative_to_yaml(tmp_path: Path):
     assert config.get_prompts() == ["Build a dashboard"]
 
 
+def test_config_prompts_file_rejects_invalid_github_repo(tmp_path: Path):
+    prompts_file = tmp_path / "prompts.csv"
+    prompts_file.write_text(
+        "image,github_repo,prompt\n"
+        'None,not a repo,"Build a dashboard"\n',
+        encoding="utf-8",
+    )
+    config = Config(prompts_file=prompts_file)
+
+    with pytest.raises(ValueError, match="github_repo must be in owner/repo format"):
+        config.get_prompt_inputs()
+
+
 def test_config_prompts_file_rejects_non_none_images(tmp_path: Path):
     prompts_file = tmp_path / "prompts.csv"
     prompts_file.write_text(
-        "image,prompt\n"
-        'diagram.png,"Build a dashboard"\n',
+        "image,github_repo,prompt\n"
+        'diagram.png,None,"Build a dashboard"\n',
         encoding="utf-8",
     )
     config = Config(prompts_file=prompts_file)

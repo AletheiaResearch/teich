@@ -126,11 +126,6 @@ Each row can include:
 - `system`: optional prompt-specific system prompt
 - `github_repo`: optional `owner/repo` checkout for Docker-backed agent runs
 - `follow_up_prompts`: optional list of additional user turns
-- `seed_repo`: optional git-bundle seed workspace with history (see [Verifiable bug-fix tasks](#verifiable-bug-fix-tasks)); mutually exclusive with `github_repo`
-- `base_commit`: optional commit to check out after cloning `seed_repo` or `github_repo` (SWE-bench-style)
-- `verifier`: optional shell command run after the agent; reward = its exit code (or F2P/P2P below)
-- `verifier_files`: optional paths restored from the seed's `HEAD` before verifying (anti-tamper)
-- `fail_to_pass` / `pass_to_pass`: optional test-id lists for SWE-bench-style per-test reward
 
 `follow_up_prompts` works across providers. The `chat` provider sends each follow-up as a real additional user turn in one generated training row. Agent providers keep one Docker container alive for the full prompt sequence and resume or continue the same saved agent session for each follow-up so workspace edits, tool caches, and in-container installs remain available.
 
@@ -335,56 +330,6 @@ api:
 ```
 
 A generated line contains `messages`, `prompt`, optional `thinking`, final `response`, and `model`. With follow-ups, the same row includes alternating `user` and `assistant` messages, `follow_up_prompts`, per-turn `responses`, and final `response`.
-
-## Verifiable bug-fix tasks
-
-Seed an agent in a repository that already contains a planted bug (with real git history), let it fix the bug, then run a verifier and record a pass/fail reward. The trace is SFT data; the reward is the RL signal. Works for codex, pi, claude-code, and hermes (not `chat`, which has no workspace).
-
-A task is a prompt row with a `seed_repo` and a `verifier`:
-
-```jsonl
-{"prompt":"The tests are failing. Find and fix the bug.","seed_repo":"widgets-bug-01","verifier":"pip install -e . >/dev/null 2>&1 && pytest -q","verifier_files":["tests/test_widgets.py"]}
-```
-
-- **`seed_repo`** is a **git bundle** (`git bundle create REPO.bundle --all`). It can be a bare key resolved against `tasks.seed_dataset` (`widgets-bug-01` → `<dataset>/widgets-bug-01.bundle`), an `hf://datasets/<owner>/<name>/<path>.bundle` URI, or a local `.bundle` path. Teich fetches it (via `huggingface_hub`, cached) and `git clone`s it into the workspace, so the agent gets the repo with full history (`git log`/`blame`/`bisect` work).
-- **`verifier`** runs in the runtime container over the post-edit workspace. **Reward = its exit code** (`0` = pass) — model your test like "a script that exits 0 only when the bug is fixed." The runtime image ships Python/Node/uv but **not your repo's dependencies**, so install them as part of the command (e.g. `pip install -e . >/dev/null 2>&1 && pytest -q`); a bare `pytest` will exit non-zero and score every task as failed.
-- **`verifier_files`** are restored from the seed's `HEAD` before the verifier runs, so the agent can't tamper with the oracle.
-
-### SWE-bench-style tasks (base_commit + F2P/P2P)
-
-A SWE-bench instance maps almost 1:1: `repo` → `github_repo`, `base_commit` → `base_commit`, `problem_statement` → `prompt`, and the held-out tests → `fail_to_pass` / `pass_to_pass`.
-
-```jsonl
-{"prompt":"Resolve the failing tests for the reported issue.","github_repo":"owner/repo","base_commit":"<sha>","verifier":"pip install -e . >/dev/null 2>&1 && pytest -rA","fail_to_pass":["tests/test_x.py::test_bug"],"pass_to_pass":["tests/test_x.py::test_other"]}
-```
-
-- **`base_commit`** is checked out after cloning either source (`github_repo` does a blobless full clone so the commit is present; bundles already carry full history).
-- **`fail_to_pass` / `pass_to_pass`** switch the reward from exit-code to **per-test**: resolved = every `fail_to_pass` test goes **fail → pass** and every `pass_to_pass` test **stays passing**. teich parses the verifier's pytest output (`-rA` recommended); a test id missing from the output counts as not-passed.
-- With `check_seed_baseline: true` (default), teich runs the verifier on a **pristine re-clone of the seed** to get the genuine before-state and flags **invalid tasks** (a `fail_to_pass` that already passes on the seed = no real bug; a `pass_to_pass` already failing = broken guard). Set it `false` for exact SWE-bench after-only scoring on trusted-label datasets (one fewer run per task).
-- Non-pytest frameworks need a verifier that emits pytest-style `PASSED`/`FAILED <id>` lines (or per-repo parsers, like SWE-bench, can be added later).
-
-Configure defaults under `tasks`:
-
-```yaml
-tasks:
-  seed_dataset: owner/my-seed-repos   # resolve bare seed_repo keys
-  verifier_timeout_seconds: 300
-  restore_verifier_files: true
-  route_by_result: true
-  check_seed_baseline: true           # before/after baseline for true F2P/P2P transitions
-```
-
-Outputs (per task):
-
-- the trace is routed into `output/passed/` or `output/failed/` (when `route_by_result`),
-- a granular `output/verification/<name>.json` sidecar records `passed`, `exit_code`, `duration_s`, `timed_out`, a best-effort per-test map, and stdout/stderr tails — plus `fail_to_pass`/`pass_to_pass` per-test results, the `baseline`, `resolved`, and `valid_task` when F2P/P2P are used,
-- `teich convert` adds `reward` (1.0/0.0) and `passed` to each training row.
-
-Failed-verifier traces are kept (and uploaded) — they're valid RL data; filter by `passed` if you only want successful fixes for SFT.
-
-**Auth:** HF downloads use `publish.hf_token` or `HF_TOKEN`/`HUGGINGFACE_HUB_TOKEN`/`TEICH_HF_TOKEN`; public datasets need no token.
-
-**Roadmap:** fresh-clean-container verifier isolation (apply the agent's diff onto a clean clone) and per-repo (non-pytest) result parsers, as SWE-bench does.
 
 ## Local Providers
 
