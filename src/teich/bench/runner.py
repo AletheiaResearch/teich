@@ -44,6 +44,18 @@ def run_bench(
 
     max_workers = max(1, int(cfg.max_concurrency))
     written: list[Path] = []
+
+    def record(task: BenchTask, run: base.BenchRun, src: BenchSource) -> None:
+        if not run.native_lines:
+            out(f"[yellow]bench: no trace harvested for {task.id}[/yellow]")
+            return
+        paths, split = base.harvest(cfg, src, task, run)
+        primary = base.primary_score(run.rewards)
+        score = f"reward={primary:g}" if primary is not None else "unscored"
+        out(f"[green]bench: {task.id}: {split} ({score})[/green]")
+        written.extend(paths)
+
+    interrupt_hint = "Re-run with --resume to continue from where it stopped."
     for source in sources:
         backend = get_backend(source.type)
         backend.require()
@@ -73,7 +85,29 @@ def run_bench(
         ) -> tuple[BenchTask, base.BenchRun]:
             return task, run(cfg, src, task)
 
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        if max_workers == 1:
+            # Single worker: run inline on the main thread so Ctrl-C propagates straight into
+            # the agent/Docker call and stops it. A thread pool would move the work off the
+            # main thread, where SIGINT can't reach it, so the container would keep running.
+            try:
+                for task in pending:
+                    try:
+                        _, run = _run(task)
+                    except Exception as exc:  # one task's failure (docker/agent/grade) — skip it
+                        out(f"[red]bench: {task.id}: failed ({type(exc).__name__}: {exc})[/red]")
+                        continue
+                    record(task, run, source)
+            except KeyboardInterrupt:
+                out(f"[red]bench: interrupted. {interrupt_hint}[/red]")
+                raise
+            continue
+
+        # Bounded concurrency: harvest on the main thread as results complete. On Ctrl-C, drop
+        # the queued tasks immediately (cancel_futures); workers already inside a Docker call
+        # can't be signalled, so those few finish before the process exits.
+        pool = ThreadPoolExecutor(max_workers=max_workers)
+        interrupted = False
+        try:
             futures = {pool.submit(_run, task): task for task in pending}
             for future in as_completed(futures):
                 task = futures[future]
@@ -82,12 +116,14 @@ def run_bench(
                 except Exception as exc:  # one task's failure (docker/agent/grade) — skip it
                     out(f"[red]bench: {task.id}: failed ({type(exc).__name__}: {exc})[/red]")
                     continue
-                if not run.native_lines:
-                    out(f"[yellow]bench: no trace harvested for {task.id}[/yellow]")
-                    continue
-                paths, split = base.harvest(cfg, source, task, run)
-                primary = base.primary_score(run.rewards)
-                score = f"reward={primary:g}" if primary is not None else "unscored"
-                out(f"[green]bench: {task.id}: {split} ({score})[/green]")
-                written.extend(paths)
+                record(task, run, source)
+        except KeyboardInterrupt:
+            interrupted = True
+            out(
+                "[red]bench: interrupt — cancelling queued tasks; in-flight containers will "
+                f"finish before exit. {interrupt_hint}[/red]"
+            )
+            raise
+        finally:
+            pool.shutdown(wait=not interrupted, cancel_futures=interrupted)
     return written
