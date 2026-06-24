@@ -1,9 +1,6 @@
-"""Tests for bench-mode config, driver helpers, and the native-session ingest.
-
-The live harbor `Trial` run is Docker/integration; here we cover the teich-side:
-config, provider/auth mapping, task resolution, TrialConfig construction (when the
-optional harbor extra is present), and the session->rows+reward ingest.
-"""
+"""Tests for bench mode: config (sources array), the shared backend base/harvest, the
+harbor backend, and the driver loop. Live harbor/Docker runs stay integration-only; here we
+cover config, reward/route/harvest, harbor resolution/normalization, and driver behavior."""
 
 import json
 
@@ -11,230 +8,169 @@ import pytest
 
 from teich.bench import run_bench
 from teich.bench import runner as bench_runner
-from teich.config import Config
+from teich.bench.backends import base, get_backend
+from teich.bench.backends import harbor as hb
+from teich.config import BenchSource, Config
 
+
+# --------------------------------------------------------------------------- config
 
 def test_bench_config_defaults():
-    bench = Config().bench
-    assert bench.source is None
-    assert bench.repo is None
-    assert bench.version is None
-    assert bench.backend == "docker"
+    assert Config().bench.sources == []
 
 
-def test_bench_config_from_yaml(tmp_path):
+def test_bench_sources_from_yaml(tmp_path):
     config_file = tmp_path / "config.yaml"
     config_file.write_text(
-        "bench:\n  source: org/set\n  repo: https://github.com/o/r\n  version: '2.0'\n  backend: docker\n",
+        "bench:\n"
+        "  sources:\n"
+        "    - { type: harbor, source: terminal-bench@2.0 }\n"
+        "    - { type: swe-bench, source: SWE-bench/SWE-bench_Verified, split: test }\n",
         encoding="utf-8",
     )
     cfg = Config.from_yaml(config_file)
-    assert cfg.bench.source == "org/set"
-    assert cfg.bench.repo == "https://github.com/o/r"
-    assert cfg.bench.version == "2.0"
-    assert cfg.bench.backend == "docker"
+    assert [s.type for s in cfg.bench.sources] == ["harbor", "swe-bench"]
+    assert cfg.bench.sources[0].source == "terminal-bench@2.0"
+    assert cfg.bench.sources[0].backend == "docker"          # default
+    assert cfg.bench.sources[1].split == "test"
 
 
-def test_classify_remote_source():
-    c = bench_runner._classify_remote_source
-    assert c("terminal-bench@2.0", None, None) == ("registry", "terminal-bench@2.0")
-    assert c("terminal-bench", None, "2.0") == ("registry", "terminal-bench@2.0")
-    assert c("terminal-bench", None, None) == ("registry", "terminal-bench")
-    assert c("org/name", None, None) == ("package", "org/name@latest")
-    assert c("org/name@ref", None, None) == ("package", "org/name@ref")
-    assert c("dataset", "https://github.com/o/r", None) == ("repo", "dataset")
-    # version encoded in source wins over the version field
-    assert c("terminal-bench@2.0", None, "9.9") == ("registry", "terminal-bench@2.0")
-
-
-def test_bench_source_slug():
-    assert bench_runner._bench_source_slug("terminal-bench@2.0", None) == "terminal-bench-2.0"
-    assert bench_runner._bench_source_slug("org/name@ref", None) == "org-name-ref"
-    assert bench_runner._bench_source_slug("terminal-bench", "2.0") == "terminal-bench-2.0"
-
-
-def test_resolve_bench_source_local_passthrough(tmp_path, monkeypatch):
-    # An existing local path is returned as-is and never triggers a download.
-    local = tmp_path / "tasks"
-    local.mkdir()
-    monkeypatch.setattr(
-        bench_runner, "_fetch_remote_source",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not download a local source")),
-    )
-    cfg = Config(bench={"source": str(local)}, output={"traces_dir": tmp_path / "out"})
-    assert bench_runner._resolve_bench_source(cfg) == local
-
-
-def test_resolve_bench_source_downloads_then_reuses(tmp_path, monkeypatch):
-    out = tmp_path / "out"
-    cfg = Config(bench={"source": "terminal-bench@2.0"}, output={"traces_dir": out})
-    calls = []
-
-    def fake_fetch(cfg_arg, cache_dir):
-        calls.append(cache_dir)
-        # mimic harbor's export layout: <cache>/<dataset>/<task>/task.toml
-        for task in ("task-a", "task-b"):
-            d = cache_dir / "terminal-bench" / task
-            d.mkdir(parents=True, exist_ok=True)
-            (d / "task.toml").write_text("version='1.0'\n", encoding="utf-8")
-
-    monkeypatch.setattr(bench_runner, "_fetch_remote_source", fake_fetch)
-
-    root = bench_runner._resolve_bench_source(cfg)
-    # bench intermediates default to a sibling `bench` dir next to traces_dir (out).
-    assert root == out.parent / "bench" / "sources" / "terminal-bench-2.0" / "terminal-bench"
-    assert sorted(d.name for d in bench_runner._resolve_task_dirs(root)) == ["task-a", "task-b"]
-    assert len(calls) == 1
-
-    # Second call reuses the cache (no re-download)...
-    bench_runner._resolve_bench_source(cfg)
-    assert len(calls) == 1
-    # ...but --refresh forces a re-download.
-    bench_runner._resolve_bench_source(cfg, refresh=True)
-    assert len(calls) == 2
-
-
-def test_resolve_bench_source_errors_when_download_yields_no_tasks(tmp_path, monkeypatch):
-    cfg = Config(bench={"source": "bogus@1.0"}, output={"traces_dir": tmp_path / "out"})
-    monkeypatch.setattr(bench_runner, "_fetch_remote_source", lambda *a, **k: None)  # writes nothing
-    with pytest.raises(RuntimeError, match="no Harbor tasks found"):
-        bench_runner._resolve_bench_source(cfg)
-
-
-def test_run_bench_requires_source():
-    with pytest.raises(RuntimeError, match="requires bench.source"):
+def test_run_bench_requires_sources():
+    with pytest.raises(RuntimeError, match="bench.sources"):
         run_bench(Config())
 
 
-def test_agent_name_mapping():
-    assert bench_runner._agent_name_for("codex") == "codex"
-    assert bench_runner._agent_name_for("claude-code") == "claude-code"
-    assert bench_runner._agent_name_for("claude") == "claude-code"
-    assert bench_runner._agent_name_for("pi") == "pi"
-    assert bench_runner._agent_name_for("hermes") == "hermes"
+def test_get_backend():
+    assert get_backend("harbor").type == "harbor"
+    with pytest.raises(RuntimeError, match="Unknown bench source type"):
+        get_backend("nope")
+
+
+# ------------------------------------------------------------------- base: scoring/routing
+
+def test_numeric_primary_route():
+    assert base.numeric(1) == 1.0 and base.numeric(True) is None and base.numeric("x") is None
+    assert base.primary_score({"reward": 1.0, "sub": 0.5}) == 1.0   # 'reward' preferred
+    assert base.primary_score({"score": 0.6}) == 0.6                # else first numeric
+    assert base.primary_score(None) is None
+    assert base.route_split(1.0) == "passed"
+    assert base.route_split(0.0) == "failed"
+    assert base.route_split(None) == "failed"
+    assert base.route_split(0.6) == "borderline"
+
+
+def test_rewards_from_mapping_keeps_full_dict():
+    assert base.rewards_from_mapping({"rewards": {"reward": 1.0, "sub": 0.5, "bad": "x"}}) == {
+        "reward": 1.0,
+        "sub": 0.5,
+    }
+    assert base.rewards_from_mapping({"rewards": {}}) is None
+    assert base.rewards_from_mapping(None) is None
+
+
+def test_bench_stem_namespaced_by_source():
+    s = BenchSource(type="harbor", source="terminal-bench@2.0")
+    assert base.bench_stem(s, "task-a") == "bench-terminal-bench-2.0-task-a"
+    s2 = BenchSource(type="swe-bench", source="SWE-bench/SWE-bench_Verified")
+    assert base.bench_stem(s2, "astropy__astropy-12907") == (
+        "bench-SWE-bench-SWE-bench_Verified-astropy__astropy-12907"
+    )
+
+
+def test_existing_output_across_splits(tmp_path):
+    cfg = Config(output={"traces_dir": tmp_path / "output"})
+    assert base.existing_output(cfg, "bench-x") is None
+    routed = tmp_path / "output" / "borderline" / "bench-x.jsonl"
+    routed.parent.mkdir(parents=True)
+    routed.write_text("{}\n", encoding="utf-8")
+    assert base.existing_output(cfg, "bench-x") == routed
+
+
+def test_bench_root_sibling_of_output(tmp_path):
+    cfg = Config(output={"traces_dir": tmp_path / "out"})
+    assert base.bench_root(cfg) == tmp_path / "bench"
+    cfg2 = Config(output={"traces_dir": tmp_path / "out", "bench_dir": tmp_path / "custom"})
+    assert base.bench_root(cfg2) == tmp_path / "custom"
+
+
+# ------------------------------------------------------------------- base: harvest
+
+def test_harvest_writes_native_trace_and_metadata(tmp_path):
+    cfg = Config(agent={"provider": "pi"}, output={"traces_dir": tmp_path / "output"})
+    source = BenchSource(type="harbor", source="terminal-bench@2.0")
+    task = base.BenchTask(id="add-bug")
+    run = base.BenchRun(
+        native_lines=['{"type":"session","id":"s"}', '{"type":"message","message":{"role":"user","content":[]}}'],
+        rewards={"reward": 0.6, "tests": 0.8},
+        metadata={"model": "z-ai/glm-5.2", "exception": None},
+    )
+    paths, split = base.harvest(cfg, source, task, run)
+    stem = base.bench_stem(source, "add-bug")
+    assert split == "borderline"
+    assert paths == [tmp_path / "output" / "borderline" / f"{stem}.jsonl"]
+    rows = [json.loads(line) for line in paths[0].read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert {row.get("type") for row in rows} == {"session", "message"}  # native, not converted
+    meta = json.loads((tmp_path / "output" / "metadata" / f"{stem}.json").read_text(encoding="utf-8"))
+    assert meta["split"] == "borderline" and meta["reward"] == 0.6
+    assert meta["rewards"] == {"reward": 0.6, "tests": 0.8}            # full dict, no clamping
+    assert meta["source"] == "terminal-bench-2.0" and meta["type"] == "harbor"
+    assert meta["agent"] == "pi" and meta["model"] == "z-ai/glm-5.2"
+
+
+# ------------------------------------------------------------------- harbor backend helpers
+
+def test_harbor_agent_name_mapping():
+    assert hb._agent_name_for("codex") == "codex"
+    assert hb._agent_name_for("claude-code") == "claude-code"
+    assert hb._agent_name_for("claude") == "claude-code"
+    assert hb._agent_name_for("pi") == "pi"
+    assert hb._agent_name_for("hermes") == "hermes"
     with pytest.raises(RuntimeError, match="does not support agent provider"):
-        bench_runner._agent_name_for("chat")
+        hb._agent_name_for("chat")
 
 
-def test_agent_auth_env_from_api_config():
-    cfg = Config(api={"provider": "openrouter", "base_url": "https://openrouter.ai/api/v1", "api_key": "sk-test"})
-    env = bench_runner._agent_auth_env(cfg)
-    assert env["OPENAI_API_KEY"] == "sk-test"
-    assert env["OPENROUTER_API_KEY"] == "sk-test"
+def test_harbor_auth_env():
+    env = hb._agent_auth_env(
+        Config(api={"provider": "openrouter", "base_url": "https://openrouter.ai/api/v1", "api_key": "sk"})
+    )
+    assert env["OPENAI_API_KEY"] == "sk" and env["OPENROUTER_API_KEY"] == "sk"
     assert env["OPENAI_BASE_URL"] == "https://openrouter.ai/api/v1"
+    env2 = hb._agent_auth_env(Config(api={"provider": "openai", "api_key": "sk-o"}))
+    assert env2["OPENAI_API_KEY"] == "sk-o" and "OPENROUTER_API_KEY" not in env2
 
 
-def test_agent_auth_env_openai_provider_does_not_set_openrouter_key():
-    # An OpenAI key must not be smeared into OPENROUTER_API_KEY.
-    cfg = Config(api={"provider": "openai", "api_key": "sk-openai"})
-    env = bench_runner._agent_auth_env(cfg)
-    assert env["OPENAI_API_KEY"] == "sk-openai"
-    assert "OPENROUTER_API_KEY" not in env
+def test_harbor_model_prefix():
+    pi_or = Config(agent={"provider": "pi"}, model={"model": "z-ai/glm-5.2"}, api={"provider": "openrouter"})
+    assert hb._bench_model_name(pi_or) == "openrouter/z-ai/glm-5.2"
+    already = Config(agent={"provider": "pi"}, model={"model": "openrouter/z-ai/glm-5.2"}, api={"provider": "openrouter"})
+    assert hb._bench_model_name(already) == "openrouter/z-ai/glm-5.2"
+    codex = Config(agent={"provider": "codex"}, model={"model": "z-ai/glm-5.2"}, api={"provider": "openrouter"})
+    assert hb._bench_model_name(codex) == "z-ai/glm-5.2"
 
 
-def test_resolve_task_dirs_single_and_collection(tmp_path):
+def test_harbor_classify_remote_source():
+    assert hb._classify_remote_source("terminal-bench@2.0", None, None) == ("registry", "terminal-bench@2.0")
+    assert hb._classify_remote_source("terminal-bench", None, "2.0") == ("registry", "terminal-bench@2.0")
+    assert hb._classify_remote_source("org/name", None, None) == ("package", "org/name@latest")
+    assert hb._classify_remote_source("org/name@ref", None, None) == ("package", "org/name@ref")
+    assert hb._classify_remote_source("ds", "https://github.com/o/r", None) == ("repo", "ds")
+
+
+def test_harbor_resolve_task_dirs(tmp_path):
     single = tmp_path / "one"
     single.mkdir()
     (single / "task.toml").write_text("", encoding="utf-8")
-    assert bench_runner._resolve_task_dirs(str(single)) == [single]
-
+    assert hb._resolve_task_dirs(single) == [single]
     coll = tmp_path / "many"
     (coll / "a").mkdir(parents=True)
     (coll / "a" / "task.toml").write_text("", encoding="utf-8")
-    (coll / "b").mkdir(parents=True)
+    (coll / "b").mkdir()
     (coll / "b" / "task.toml").write_text("", encoding="utf-8")
-    assert bench_runner._resolve_task_dirs(str(coll)) == [coll / "a", coll / "b"]
-
-    with pytest.raises(RuntimeError, match="not found"):
-        bench_runner._resolve_task_dirs(str(tmp_path / "missing"))
-    empty = tmp_path / "empty"
-    empty.mkdir()
+    assert hb._resolve_task_dirs(coll) == [coll / "a", coll / "b"]
     with pytest.raises(RuntimeError, match="No Harbor tasks"):
-        bench_runner._resolve_task_dirs(str(empty))
-
-
-def test_build_trial_config_maps_provider_model_auth_backend(tmp_path):
-    pytest.importorskip("harbor")
-    cfg = Config(
-        agent={"provider": "codex"},
-        model={"model": "z-ai/glm-5.2"},
-        api={"provider": "openrouter", "base_url": "https://openrouter.ai/api/v1", "api_key": "sk-test"},
-    )
-    task_dir = tmp_path / "t"
-    task_dir.mkdir()
-    config = bench_runner._build_trial_config(cfg, task_dir, tmp_path / "trials")
-    assert config.agent.name.value == "codex"
-    assert config.agent.model_name == "z-ai/glm-5.2"
-    assert config.agent.env["OPENAI_API_KEY"] == "sk-test"
-    assert config.agent.env["OPENAI_BASE_URL"] == "https://openrouter.ai/api/v1"
-    assert config.environment.type.value == "docker"
-
-
-def _write_codex_session(sessions_dir):
-    sessions_dir.mkdir(parents=True, exist_ok=True)
-    events = [
-        {"type": "session_meta", "payload": {"id": "s1"}},
-        {"type": "response_item", "payload": {"type": "message", "role": "user",
-            "content": [{"type": "input_text", "text": "Fix the bug"}]}},
-        {"type": "response_item", "payload": {"type": "message", "role": "assistant",
-            "content": [{"type": "output_text", "text": "Fixed it."}]}},
-    ]
-    (sessions_dir / "rollout.jsonl").write_text(
-        "\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8"
-    )
-
-
-class _FakeResult:
-    def __init__(self, verifier_result=None, exception_info=None):
-        self.verifier_result = verifier_result
-        self.exception_info = exception_info
-
-
-class _FakeTrial:
-    def __init__(self, agent_dir):
-        self.paths = type("P", (), {"agent_dir": agent_dir})()
-
-
-def test_rewards_from_result_preserves_full_dict():
-    # The full multi-component rewards dict is kept (no clamping to a single scalar).
-    r = _FakeResult(verifier_result={"rewards": {"reward": 1.0, "sub": 0.5}})
-    assert bench_runner._rewards_from_result(r) == {"reward": 1.0, "sub": 0.5}
-    assert bench_runner._rewards_from_result(_FakeResult(verifier_result=None)) is None
-    assert bench_runner._rewards_from_result(_FakeResult(verifier_result={"rewards": {}})) is None
-    # non-numeric / bool components are dropped; the numeric ones survive.
-    assert bench_runner._rewards_from_result(
-        _FakeResult(verifier_result={"rewards": {"reward": 0.0, "ok": True, "note": "x"}})
-    ) == {"reward": 0.0}
-
-
-def test_rewards_from_files_dict_and_text(tmp_path):
-    wrapped = tmp_path / "w"
-    wrapped.mkdir()
-    (wrapped / "rewards.json").write_text(json.dumps({"rewards": {"reward": 1.0, "sub": 0.5}}), encoding="utf-8")
-    assert bench_runner._rewards_from_files(wrapped) == {"reward": 1.0, "sub": 0.5}
-    flat = tmp_path / "f"
-    flat.mkdir()
-    (flat / "reward.json").write_text(json.dumps({"score": 0.6}), encoding="utf-8")
-    assert bench_runner._rewards_from_files(flat) == {"score": 0.6}
-    txt = tmp_path / "t"
-    txt.mkdir()
-    (txt / "reward.txt").write_text("0.0\n", encoding="utf-8")
-    assert bench_runner._rewards_from_files(txt) == {"reward": 0.0}
-    bad = tmp_path / "b"
-    bad.mkdir()
-    (bad / "reward.txt").write_text("not-a-number\n", encoding="utf-8")
-    assert bench_runner._rewards_from_files(bad) is None
-
-
-def test_primary_score_and_route_split():
-    assert bench_runner._primary_score({"reward": 1.0, "sub": 0.5}) == 1.0  # 'reward' key preferred
-    assert bench_runner._primary_score({"score": 0.6}) == 0.6               # else first numeric
-    assert bench_runner._primary_score(None) is None
-    assert bench_runner._route_split(1.0) == "passed"
-    assert bench_runner._route_split(0.0) == "failed"
-    assert bench_runner._route_split(None) == "failed"      # unscored -> failed
-    assert bench_runner._route_split(0.6) == "borderline"
-    assert bench_runner._route_split(2.0) == "borderline"
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        hb._resolve_task_dirs(empty)
 
 
 # A minimal pi `--mode json` stream (as harbor's --no-session pi run emits to pi.txt).
@@ -242,247 +178,150 @@ _PI_STREAM_LINES = [
     'Warning: Model "z-ai/glm-5.2" not found for provider "openrouter". Using custom model id.',
     json.dumps({"type": "session", "version": 3, "id": "abc", "cwd": "/app"}),
     json.dumps({"type": "agent_start"}),
-    json.dumps({"type": "message_end", "message": {"role": "user",
-        "content": [{"type": "text", "text": "Fix add()"}]}}),
+    json.dumps({"type": "message_end", "message": {"role": "user", "content": [{"type": "text", "text": "Fix add()"}]}}),
     json.dumps({"type": "message_end", "message": {"role": "assistant", "provider": "openrouter",
-        "model": "z-ai/glm-5.2", "content": [
-            {"type": "thinking", "thinking": "read it"},
-            {"type": "toolCall", "id": "c1", "name": "read", "arguments": {"path": "/app/app.py"}}]}}),
-    json.dumps({"type": "tool_execution_end", "toolCallId": "c1", "toolName": "read",
-        "result": {"content": [{"type": "text", "text": "return a - b"}]}, "isError": False}),
-    json.dumps({"type": "message_end", "message": {"role": "toolResult", "toolCallId": "c1",
-        "toolName": "read", "content": [{"type": "text", "text": "return a - b"}], "isError": False}}),
-    json.dumps({"type": "message_end", "message": {"role": "assistant",
-        "content": [{"type": "text", "text": "Fixed."}]}}),
+        "model": "z-ai/glm-5.2", "content": [{"type": "text", "text": "Fixed."}]}}),
 ]
 
 
 def test_pi_stream_to_session_events(tmp_path):
     pi_txt = tmp_path / "pi.txt"
     pi_txt.write_text("\n".join(_PI_STREAM_LINES) + "\n", encoding="utf-8")
-    events = bench_runner._pi_stream_to_session_events(pi_txt)
-    types = [e["type"] for e in events]
-    # Warning line skipped; session kept; message_end -> message; a model_change is
-    # synthesized just before the first assistant message (converter captures it anywhere).
-    assert types == ["session", "message", "model_change", "message", "message", "message"]
-    model_change = next(e for e in events if e["type"] == "model_change")
-    assert model_change == {"type": "model_change", "provider": "openrouter", "modelId": "z-ai/glm-5.2"}
-    assert all(e["message"]["role"] for e in events if e["type"] == "message")
+    events = hb._pi_stream_to_session_events(pi_txt)
+    assert [e["type"] for e in events] == ["session", "message", "model_change", "message"]
+    mc = next(e for e in events if e["type"] == "model_change")
+    assert mc == {"type": "model_change", "provider": "openrouter", "modelId": "z-ai/glm-5.2"}
 
 
-def test_pi_stream_without_provider_model_omits_model_change(tmp_path):
-    # When the first assistant message carries no provider/model, no model_change is
-    # synthesized, but the messages still convert.
-    lines = [
-        json.dumps({"type": "session", "id": "x", "cwd": "/app"}),
-        json.dumps({"type": "message_end", "message": {"role": "user",
-            "content": [{"type": "text", "text": "hi"}]}}),
-        json.dumps({"type": "message_end", "message": {"role": "assistant",
-            "content": [{"type": "text", "text": "done"}]}}),
-    ]
-    pi_txt = tmp_path / "pi.txt"
-    pi_txt.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    events = bench_runner._pi_stream_to_session_events(pi_txt)
-    assert [e["type"] for e in events] == ["session", "message", "message"]
-    assert not any(e["type"] == "model_change" for e in events)
+def test_native_trace_pi_stream(tmp_path):
+    cfg = Config(output={"traces_dir": tmp_path / "output"})
+    agent_dir = tmp_path / "agent"
+    agent_dir.mkdir()
+    (agent_dir / "pi.txt").write_text("\n".join(_PI_STREAM_LINES) + "\n", encoding="utf-8")
+    lines, native_dir = hb._native_trace(cfg, agent_dir, "add-bug")
+    assert lines and native_dir == tmp_path / "bench" / "sessions" / "add-bug"
+    assert (native_dir / "pi.jsonl").is_file()
+    types = {json.loads(line)["type"] for line in lines}
+    assert "session" in types and "message" in types
 
 
-def test_harvest_trace_pi_stream_writes_native_and_metadata(tmp_path):
-    cfg = Config(agent={"provider": "pi"}, output={"traces_dir": tmp_path / "output"})
+def test_rewards_from_result_and_files(tmp_path):
+    class R:
+        verifier_result = {"rewards": {"reward": 1.0, "sub": 0.5}}
+    assert hb._rewards_from_result(R()) == {"reward": 1.0, "sub": 0.5}
+
+    class N:
+        verifier_result = None
+    assert hb._rewards_from_result(N()) is None
+
+    d = tmp_path / "trial"
+    d.mkdir()
+    (d / "reward.txt").write_text("0.0\n", encoding="utf-8")
+    assert hb._rewards_from_files(d) == {"reward": 0.0}
+
+
+# ------------------------------------------------------------------- harbor backend run/tasks
+
+def test_harbor_tasks_local(tmp_path):
+    pytest.importorskip("harbor")
+    tasks_dir = tmp_path / "tasks"
+    (tasks_dir / "add-bug").mkdir(parents=True)
+    (tasks_dir / "add-bug" / "task.toml").write_text("", encoding="utf-8")
+    cfg = Config(output={"traces_dir": tmp_path / "output"})
+    source = BenchSource(type="harbor", source=str(tasks_dir))
+    tasks = list(hb.HarborBackend().tasks(cfg, source))
+    assert [t.id for t in tasks] == ["add-bug"]
+
+
+def test_harbor_run_builds_benchrun_from_trial(tmp_path, monkeypatch):
+    pytest.importorskip("harbor")
     agent_dir = tmp_path / "trial" / "agent"
     agent_dir.mkdir(parents=True)
     (agent_dir / "pi.txt").write_text("\n".join(_PI_STREAM_LINES) + "\n", encoding="utf-8")
-    paths, split = bench_runner._harvest_trace(
-        cfg, _FakeTrial(agent_dir), {"reward": 1.0, "sub": 0.5}, "add-bug"
-    )
-    assert split == "passed"
-    assert paths == [tmp_path / "output" / "passed" / "bench-add-bug.jsonl"]
-    # output is the PLAIN native trace (pi session events), NOT pre-converted training rows.
-    rows = [json.loads(line) for line in paths[0].read_text(encoding="utf-8").splitlines() if line.strip()]
-    types = {row.get("type") for row in rows}
-    assert "session" in types and "message" in types
-    assert all("messages" not in row and "prompt" not in row for row in rows)
-    # per-task metadata sidecar: full rewards dict (no clamping) + recovered trace metadata.
-    meta = json.loads((tmp_path / "output" / "metadata" / "bench-add-bug.json").read_text(encoding="utf-8"))
-    assert meta["split"] == "passed" and meta["reward"] == 1.0
-    assert meta["rewards"] == {"reward": 1.0, "sub": 0.5}
-    assert meta["agent"] == "pi" and meta["model"] == "z-ai/glm-5.2"
-    # the normalized native session is kept under the sibling bench/ dir.
-    assert (tmp_path / "bench" / "sessions" / "add-bug" / "bench-add-bug.jsonl").is_file()
 
+    class _Trial:
+        paths = type("P", (), {"agent_dir": agent_dir})()
 
-def test_harvest_trace_routes_by_primary_score(tmp_path):
+    class _Result:
+        verifier_result = {"rewards": {"reward": 1.0}}
+        exception_info = None
+
+    async def _fake_create_and_run(config):
+        return _Trial(), _Result()
+
+    monkeypatch.setattr(hb, "_create_and_run", _fake_create_and_run)
+    monkeypatch.setattr(hb, "_build_trial_config", lambda cfg, source, task_dir, trials_dir: object())
     cfg = Config(agent={"provider": "pi"}, output={"traces_dir": tmp_path / "output"})
-    for task, rewards, expected in [
-        ("zero", {"reward": 0.0}, "failed"),
-        ("unscored", None, "failed"),
-        ("frac", {"reward": 0.6}, "borderline"),
-    ]:
-        agent_dir = tmp_path / task / "agent"
-        agent_dir.mkdir(parents=True)
-        (agent_dir / "pi.txt").write_text("\n".join(_PI_STREAM_LINES) + "\n", encoding="utf-8")
-        paths, split = bench_runner._harvest_trace(cfg, _FakeTrial(agent_dir), rewards, task)
-        assert split == expected
-        assert paths == [tmp_path / "output" / expected / f"bench-{task}.jsonl"]
+    source = BenchSource(type="harbor", source="terminal-bench@2.0")
+    run = hb.HarborBackend().run(cfg, source, base.BenchTask(id="add-bug", raw=tmp_path / "task"))
+    assert run.rewards == {"reward": 1.0}
+    assert run.native_lines and run.metadata.get("exception") is None
 
 
-def test_harvest_trace_native_session_dir(tmp_path):
-    cfg = Config(agent={"provider": "codex"}, output={"traces_dir": tmp_path / "output"})
-    agent_dir = tmp_path / "trial" / "agent"
-    _write_codex_session(agent_dir / "sessions")
-    paths, split = bench_runner._harvest_trace(cfg, _FakeTrial(agent_dir), {"reward": 0.0}, "codex-task")
-    assert split == "failed"
-    rows = [json.loads(line) for line in paths[0].read_text(encoding="utf-8").splitlines() if line.strip()]
-    # native codex events preserved verbatim (not converted to training rows).
-    assert any(row.get("type") in ("session_meta", "response_item") for row in rows)
+# ------------------------------------------------------------------- driver
+
+class _FakeBackend:
+    type = "fake"
+
+    def __init__(self, runs):
+        self.runs = runs
+        self.ran: list[str] = []
+
+    def require(self):
+        pass
+
+    def tasks(self, cfg, source, *, refresh=False):
+        return [base.BenchTask(id=task_id) for task_id in self.runs]
+
+    def run(self, cfg, source, task):
+        self.ran.append(task.id)
+        result = self.runs[task.id]
+        if isinstance(result, Exception):
+            raise result
+        return result
 
 
-def test_harvest_trace_no_trace_returns_empty(tmp_path):
-    cfg = Config(output={"traces_dir": tmp_path / "output"})
-    agent_dir = tmp_path / "trial" / "agent"
-    agent_dir.mkdir(parents=True)
-    assert bench_runner._harvest_trace(cfg, _FakeTrial(agent_dir), None, "empty") == ([], None)
-
-
-def test_bench_existing_output_finds_across_splits(tmp_path):
-    cfg = Config(output={"traces_dir": tmp_path / "output"})
-    assert bench_runner._bench_existing_output(cfg, "x") is None
-    routed = tmp_path / "output" / "borderline" / "bench-x.jsonl"
-    routed.parent.mkdir(parents=True)
-    routed.write_text("{}\n", encoding="utf-8")
-    assert bench_runner._bench_existing_output(cfg, "x") == routed
-
-
-def test_run_bench_resume_skips_already_harvested(tmp_path):
-    pytest.importorskip("harbor")
-    # A task already harvested into a split -> resume skips it without invoking harbor.
-    tasks_dir = tmp_path / "tasks"
-    task = tasks_dir / "add-bug"
-    task.mkdir(parents=True)
-    (task / "task.toml").write_text("", encoding="utf-8")
-    out = tmp_path / "output"
-    existing = out / "passed" / "bench-add-bug.jsonl"
-    existing.parent.mkdir(parents=True)
-    existing.write_text('{"type": "session"}\n', encoding="utf-8")
-
-    cfg = Config(
+def _bench_cfg(tmp_path):
+    return Config(
         agent={"provider": "pi"},
-        model={"model": "openrouter/z-ai/glm-5.2"},
-        api={"provider": "openrouter", "api_key": "sk-test"},
-        bench={"source": str(tasks_dir)},
-        output={"traces_dir": out},
-    )
-    # No harbor Trial is created for a skipped task; if it were, this would fail (sk-test).
-    written = bench_runner.run_bench(cfg, resume=True)
-    assert written == [existing]
-
-
-class _RecordingConsole:
-    def __init__(self):
-        self.lines: list[str] = []
-
-    def print(self, message=""):
-        self.lines.append(str(message))
-
-
-def test_run_bench_reports_agent_failure_and_empty_harvest(tmp_path, monkeypatch):
-    pytest.importorskip("harbor")
-    tasks_dir = tmp_path / "tasks"
-    task = tasks_dir / "add-bug"
-    task.mkdir(parents=True)
-    (task / "task.toml").write_text("", encoding="utf-8")
-    # A trial whose agent dir is empty -> nothing to harvest.
-    agent_dir = tmp_path / "trial" / "agent"
-    agent_dir.mkdir(parents=True)
-
-    async def _fake_create_and_run(config):
-        result = _FakeResult(verifier_result=None, exception_info={"exception_type": "NonZeroAgentExitCodeError"})
-        return _FakeTrial(agent_dir), result
-
-    monkeypatch.setattr(bench_runner, "_create_and_run", _fake_create_and_run)
-    cfg = Config(
-        agent={"provider": "pi"},
-        model={"model": "openrouter/z-ai/glm-5.2"},
-        api={"provider": "openrouter", "api_key": "sk-test"},
-        bench={"source": str(tasks_dir)},
+        bench={"sources": [{"type": "fake", "source": "S"}]},
         output={"traces_dir": tmp_path / "output"},
     )
-    console = _RecordingConsole()
-    written = bench_runner.run_bench(cfg, console=console, resume=False)
-    assert written == []
-    blob = "\n".join(console.lines)
-    assert "did not finish cleanly (NonZeroAgentExitCodeError)" in blob
-    assert "no trace harvested for add-bug" in blob
 
 
-def test_run_bench_continues_past_one_task_infra_failure(tmp_path, monkeypatch):
-    pytest.importorskip("harbor")
-    tasks_dir = tmp_path / "tasks"
-    for name in ("a-task", "b-task"):
-        (tasks_dir / name).mkdir(parents=True)
-        (tasks_dir / name / "task.toml").write_text("", encoding="utf-8")
-
-    calls: list[str] = []
-
-    async def _fake_create_and_run(config):
-        calls.append(str(config.task.path))
-        # First task blows up with a non-RuntimeError infra error; second must still run.
-        if len(calls) == 1:
-            raise OSError("docker build failed")
-        return _FakeTrial(tmp_path / "empty"), _FakeResult(verifier_result={"rewards": {"reward": 1.0}})
-
-    (tmp_path / "empty").mkdir()
-    monkeypatch.setattr(bench_runner, "_create_and_run", _fake_create_and_run)
-    cfg = Config(
-        agent={"provider": "pi"},
-        model={"model": "openrouter/z-ai/glm-5.2"},
-        api={"provider": "openrouter", "api_key": "sk-test"},
-        bench={"source": str(tasks_dir)},
-        output={"traces_dir": tmp_path / "output"},
-    )
-    console = _RecordingConsole()
-    bench_runner.run_bench(cfg, console=console, resume=False)
-    # Both tasks were attempted (the first failure did not abort the batch).
-    assert len(calls) == 2
-    assert any("failed (OSError" in line for line in console.lines)
+def test_run_bench_drives_sources_and_harvests(tmp_path, monkeypatch):
+    fake = _FakeBackend({
+        "t1": base.BenchRun(native_lines=['{"type":"session"}'], rewards={"reward": 1.0}),
+        "t2": base.BenchRun(native_lines=['{"type":"session"}'], rewards={"reward": 0.0}),
+    })
+    monkeypatch.setattr(bench_runner, "get_backend", lambda t: fake)
+    written = run_bench(_bench_cfg(tmp_path))
+    assert len(written) == 2 and fake.ran == ["t1", "t2"]
+    s = BenchSource(type="fake", source="S")
+    assert (tmp_path / "output" / "passed" / f"{base.bench_stem(s, 't1')}.jsonl").is_file()
+    assert (tmp_path / "output" / "failed" / f"{base.bench_stem(s, 't2')}.jsonl").is_file()
 
 
-def test_run_bench_skips_task_level_runtimeerror(tmp_path, monkeypatch):
-    pytest.importorskip("harbor")
-    tasks_dir = tmp_path / "tasks"
-    (tasks_dir / "t").mkdir(parents=True)
-    (tasks_dir / "t" / "task.toml").write_text("", encoding="utf-8")
-
-    async def _boom(config):
-        raise RuntimeError("harbor blew up on this task")
-
-    monkeypatch.setattr(bench_runner, "_create_and_run", _boom)
-    cfg = Config(
-        agent={"provider": "pi"},
-        model={"model": "openrouter/z-ai/glm-5.2"},
-        api={"provider": "openrouter", "api_key": "sk-test"},
-        bench={"source": str(tasks_dir)},
-        output={"traces_dir": tmp_path / "output"},
-    )
-    console = _RecordingConsole()
-    # A RuntimeError from trial execution is a task failure, not a config error -> skip it.
-    written = bench_runner.run_bench(cfg, console=console, resume=False)
-    assert written == []
-    assert any("failed (RuntimeError" in line for line in console.lines)
+def test_run_bench_resume_skips_and_failure_continues(tmp_path, monkeypatch):
+    s = BenchSource(type="fake", source="S")
+    # Pre-harvest t1 so resume skips it; t2 raises (skipped); t3 succeeds.
+    done = tmp_path / "output" / "passed" / f"{base.bench_stem(s, 't1')}.jsonl"
+    done.parent.mkdir(parents=True)
+    done.write_text('{"type":"session"}\n', encoding="utf-8")
+    fake = _FakeBackend({
+        "t1": base.BenchRun(native_lines=['{"x":1}'], rewards={"reward": 1.0}),
+        "t2": RuntimeError("docker boom"),
+        "t3": base.BenchRun(native_lines=['{"type":"session"}'], rewards={"reward": 1.0}),
+    })
+    monkeypatch.setattr(bench_runner, "get_backend", lambda t: fake)
+    written = run_bench(_bench_cfg(tmp_path), resume=True)
+    assert "t1" not in fake.ran  # skipped via resume
+    assert fake.ran == ["t2", "t3"]
+    assert (tmp_path / "output" / "passed" / f"{base.bench_stem(s, 't3')}.jsonl").is_file()
 
 
-def test_run_bench_aborts_on_invalid_backend(tmp_path):
-    pytest.importorskip("harbor")
-    tasks_dir = tmp_path / "tasks"
-    (tasks_dir / "t").mkdir(parents=True)
-    (tasks_dir / "t" / "task.toml").write_text("", encoding="utf-8")
-    cfg = Config(
-        agent={"provider": "pi"},
-        model={"model": "openrouter/z-ai/glm-5.2"},
-        api={"provider": "openrouter", "api_key": "sk-test"},
-        bench={"source": str(tasks_dir), "backend": "dokcer"},  # typo -> config-level error
-        output={"traces_dir": tmp_path / "output"},
-    )
-    # A bad backend applies to every task, so it aborts (RuntimeError) instead of skipping.
-    with pytest.raises(RuntimeError, match="Unknown bench.backend"):
-        bench_runner.run_bench(cfg, resume=False)
+def test_run_bench_unknown_type_aborts(tmp_path):
+    # swe-bench is not registered until its phase -> a clear unknown-type error.
+    cfg = Config(bench={"sources": [{"type": "swe-bench", "source": "x"}]}, output={"traces_dir": tmp_path / "o"})
+    with pytest.raises(RuntimeError, match="Unknown bench source type"):
+        run_bench(cfg)

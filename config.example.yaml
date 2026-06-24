@@ -193,26 +193,20 @@ tasks:
   route_by_result: true         # write traces into output/passed | output/failed
   check_seed_baseline: true     # run the verifier on the pristine seed for a true F2P/P2P transition
 
-# Optional Harbor benchmark mode (`teich generate --mode bench`). Instead of the
-# prompts above, teich drives the optional `harbor` package (pip install 'teich[bench]')
-# over Harbor-format tasks: harbor builds each task's image, runs its built-in agent for
-# `agent.provider`, runs the task verifier, and teich ingests the native trace + reward as
-# reward-labeled rows (output/bench-<task>.jsonl + an output/verification/ sidecar).
-# Harbor's raw trial dirs live under output.bench_dir (a sibling `bench` dir by default) and
-# never enter the dataset/uploads. `--resume` skips tasks already harvested. Bench runs tasks
-# sequentially (max_concurrency does not apply). Keep bench its own project: give it a
-# dedicated output.traces_dir + publish.repo_id so it's a standalone dataset (teich refuses to
-# mix bench and prompts rows in one output dir).
-#
-# `source` may be: a local task dir / dir of task dirs; a registry spec
-# ('terminal-bench@2.0' or 'org/name@ref'); or a dataset name when `repo` is a git/HF
-# registry URL. Remote sources are downloaded into <bench_dir>/sources/ and reused on later
-# runs (`--refresh` forces a re-download). HF/private registries may need HF_TOKEN.
+# Benchmark mode (`teich generate --mode bench`). Each source is run by a backend selected
+# by `type`: `harbor` (the harbor package; needs teich[harbor], Python 3.12+) or `swe-bench`
+# (the swebench package; needs teich[swe]). teich runs the configured agent on each task/
+# instance, harvests the plain native trace into output/{passed,failed,borderline}/, and
+# writes scores + provenance to output/metadata/<stem>.json. Intermediates live under
+# output.bench_dir (a sibling `bench` dir by default), outside the dataset/uploads.
+# `--resume` skips already-harvested tasks; `--refresh` re-downloads remote sources.
+# Keep bench its own project: dedicated output.traces_dir + publish.repo_id.
 bench:
-  source: null                  # local path | name@version | org/name@ref | dataset name (with repo)
-  repo: null                    # optional git/HF registry URL; then `source` is a dataset name in it
-  version: null                 # optional dataset version (or encode it in source as name@version)
-  backend: docker               # harbor environment backend
+  sources: []
+    # - { type: harbor,    source: terminal-bench@2.0 }          # registry spec
+    # - { type: harbor,    source: ./local-tasks }               # local task dir / dir of task dirs
+    # - { type: swe-bench, source: SWE-bench/SWE-bench_Verified, split: test }
+    #   # optional per-source: repo (git/HF registry), version, instances [..], backend (harbor)
 
 # Number of prompts to run in parallel.
 max_concurrency: 1

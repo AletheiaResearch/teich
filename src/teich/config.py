@@ -335,23 +335,28 @@ class PromptInput(BaseModel):
         return [self.prompt, *self.follow_up_prompts]
 
 
-class BenchConfig(BaseModel):
-    """Benchmark-task settings for ``generate --mode bench``.
+class BenchSource(BaseModel):
+    """One benchmark source for ``generate --mode bench``.
 
-    ``source`` is a local Harbor task directory (or a directory of task dirs), a
-    registry dataset spec (``name@version`` for the legacy registry, or
-    ``org/name@ref`` for the package registry), or — together with ``repo`` — a
-    dataset name resolved from a git/HF registry. Remote specs are downloaded via
-    the `harbor` package into ``<output.bench_dir>/sources/`` and then run locally.
-    ``version`` supplies the dataset version when not encoded in ``source``.
-    Bench mode drives harbor (optional ``bench`` extra) to run each task in its own
-    environment image, then ingests the agent's native session + the task verifier's
-    reward into teich's output. ``backend`` is passed to harbor's EnvironmentType.
+    ``type`` selects the backend (``harbor`` | ``swe-bench``). ``source`` is the dataset
+    spec for that backend: harbor → a local task dir, a registry spec (``name@version`` or
+    ``org/name@ref``), or (with ``repo``) a dataset name in a git/HF registry; swe-bench →
+    a Hugging Face dataset id (or a local json/jsonl path). ``version``/``repo`` are harbor
+    knobs; ``split``/``instances`` select swe-bench rows; ``backend`` is harbor's
+    EnvironmentType. Remote data is fetched into ``<output.bench_dir>/`` and run locally.
     """
-    source: str | None = None
+    type: str = "harbor"
+    source: str
     repo: str | None = None
     version: str | None = None
+    split: str | None = None
+    instances: list[str] | None = None
     backend: str = "docker"
+
+
+class BenchConfig(BaseModel):
+    """Bench-mode settings: an array of benchmark sources, each run by its backend."""
+    sources: list[BenchSource] = Field(default_factory=list)
 
 
 class Config(BaseModel):

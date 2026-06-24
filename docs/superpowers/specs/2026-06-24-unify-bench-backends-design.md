@@ -91,12 +91,13 @@ bench:
   backend: docker            # harbor environment backend (harbor sources only)
 ```
 
-- `BenchConfig.sources: list[BenchSource]`. `BenchSource = {type, source, repo?, version?, split?, instances?}`.
+- `BenchConfig` = `{sources: list[BenchSource]}` — **no back-compat**; the old single
+  `source`/`repo`/`version`/`backend` fields are removed entirely.
+- `BenchSource = {type, source, repo?, version?, split?, instances?, backend?}`.
   - `type`: `harbor` | `swe-bench`.
-  - `source`: harbor → registry spec / local dir (existing); swe-bench → HF dataset id (or local json/jsonl path).
+  - `source`: harbor → registry spec / local dir; swe-bench → HF dataset id (or local json/jsonl path).
   - `split` / `instances`: swe-bench dataset split and an optional instance-id allowlist.
-- Back-compat: a bare `bench.source` (+ `repo`/`version`) is sugar for
-  `sources=[{type: harbor, source, repo, version}]`.
+  - `backend`: harbor EnvironmentType (default `docker`); per-source, harbor only.
 - `_existing_dataset_modes` guard and per-source namespacing (below) unchanged in spirit.
 
 ## Backends
@@ -165,7 +166,8 @@ Delete from `runner.py`: `VerificationResult`, `_materialize_seed`, `_fetch_seed
 `_verify_and_record`, `_route_destination`, `_verification_sidecar_path`. Delete from `config.py`:
 `TasksConfig`, `SeedReference`, `Config.resolve_seed_reference`, `Config.tasks`, and
 `PromptInput.{seed_repo,github_repo,base_commit,verifier,verifier_files,fail_to_pass,pass_to_pass}`
-+ their validators. Prompts-mode `_run_prompt_task` drops the verify/route step.
++ their validators. **Prompts mode reverts to its original pre-seed behavior**: run the agent
+on each prompt and write the trace — no verifier, no passed/failed routing, no reward surfacing.
 After removal, `verification.py` and the converter's verification-sidecar reward-surfacing
 (`_verification_reward_for_trace` + the `apply_reward_to_row`/`reward_from_sidecar_data` calls in
 `convert_traces_to_training_data`) are used *only* by the deleted seed feature — remove both in
