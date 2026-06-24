@@ -16,6 +16,7 @@ reward mapping — is plain logic with unit coverage.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -120,17 +121,19 @@ def _agent_layer(cfg: Config) -> AgentLayer:
 def _auth_env(cfg: Config) -> dict[str, str]:
     """Model credentials for the in-container agent, mirroring the harbor backend.
 
-    For an OpenRouter project the key is exported under both names (pi/codex read different
-    vars); a plain openai project only sets ``OPENAI_API_KEY``.
+    An ``anthropic`` project sets ``ANTHROPIC_API_KEY`` only (not shadowed under
+    ``OPENAI_API_KEY``); otherwise the key goes to ``OPENAI_API_KEY`` plus
+    ``OPENROUTER_API_KEY`` for an OpenRouter project.
     """
     env: dict[str, str] = {}
     api_key = cfg.get_api_key()
     if api_key:
-        env["OPENAI_API_KEY"] = api_key
-        if cfg.api.provider == "openrouter":
-            env["OPENROUTER_API_KEY"] = api_key
         if cfg.api.provider == "anthropic":
             env["ANTHROPIC_API_KEY"] = api_key
+        else:
+            env["OPENAI_API_KEY"] = api_key
+            if cfg.api.provider == "openrouter":
+                env["OPENROUTER_API_KEY"] = api_key
     base_url = cfg.get_base_url()
     if base_url:
         env["OPENAI_BASE_URL"] = base_url
@@ -253,26 +256,31 @@ def _native_trace(capture_dir: Path, session_glob: str) -> tuple[list[str], Path
 
 
 def _run_agent(
-    cfg: Config, instance: dict[str, Any], spec: Any, layer: AgentLayer, capture_dir: Path
+    cfg: Config, source: BenchSource, instance: dict[str, Any], spec: Any,
+    layer: AgentLayer, capture_dir: Path,
 ) -> tuple[list[str], Path | None, str]:
     """Build the agent layer, run the agent on the problem, return (trace, dir, model_patch)."""
     capture_dir.mkdir(parents=True, exist_ok=True)
     (capture_dir / "prompt.txt").write_text(instance.get("problem_statement") or "", encoding="utf-8")
 
-    slug = base.slug(instance["instance_id"])
+    # Namespace all scratch (image tag, container, env-file) by source so two sources that
+    # contain the same instance can't collide under concurrency; lowercased for Docker.
+    key = base.slug(f"{base.source_id(source)}-{instance['instance_id']}").lower()
     langfuse = cfg.agent.langfuse
     dockerfile = render_agent_dockerfile(spec.instance_image_key, layer, langfuse=langfuse.enabled)
-    agent_image = f"teich-swe-{slug}:latest"
+    agent_image = f"teich-swe-{key}:latest"
     timeout = cfg.timeout_seconds if cfg.timeout_seconds and cfg.timeout_seconds > 0 else None
     _build_image(dockerfile, agent_image, timeout=timeout)
 
-    # Pass credentials via an env-file (host-only, outside the mounted dir) rather than
-    # `-e KEY=VALUE`, so keys aren't visible in `docker inspect` or the host process list.
+    # Pass credentials via an env-file (host-only, outside the mounted dir, mode 0600) rather
+    # than `-e KEY=VALUE`, so keys aren't visible in `docker inspect` or the host process list.
     env = {**layer.env, **_auth_env(cfg)}
-    env_file = capture_dir.parent / f"{slug}.env"
-    env_file.write_text("".join(f"{key}={value}\n" for key, value in env.items()), encoding="utf-8")
+    env_file = capture_dir.parent / f"{key}.env"
+    fd = os.open(env_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write("".join(f"{name}={value}\n" for name, value in env.items()))
 
-    container = f"teich-swe-{slug}"
+    container = f"teich-swe-{key}"
     capture = f"{CAPTURE}/model.patch"
     shell = (
         f"cd {TESTBED} && ({layer.run} || true) && git -C {TESTBED} add -A && "
@@ -284,12 +292,19 @@ def _run_agent(
         agent_image, "bash", "-lc", shell,
     ]
     try:
-        subprocess.run(cmd, check=False, timeout=timeout)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         _docker(["rm", "-f", container], check=False)  # reap the named container, then fail the task
         raise
     finally:
         env_file.unlink(missing_ok=True)
+    if result.returncode != 0:
+        # The shell masks the *agent's* exit with `|| true`, so a non-zero exit here is a Docker/
+        # infra failure — fail the task rather than grade an empty patch as a real result.
+        raise RuntimeError(
+            f"docker run failed for {container} (exit {result.returncode}): "
+            f"{(result.stderr or result.stdout or '').strip()[-1000:]}"
+        )
 
     patch_file = capture_dir / "model.patch"
     model_patch = patch_file.read_text(encoding="utf-8") if patch_file.is_file() else ""
@@ -360,8 +375,8 @@ class SweBenchBackend:
         spec = make_test_spec(instance, namespace=namespace)
         _ensure_instance_image(spec, namespace=namespace)
 
-        capture_dir = base.bench_root(cfg) / "swe" / base.slug(task.id)
-        lines, native_dir, model_patch = _run_agent(cfg, instance, spec, layer, capture_dir)
+        capture_dir = base.bench_root(cfg) / "swe" / base.bench_stem(source, task.id)
+        lines, native_dir, model_patch = _run_agent(cfg, source, instance, spec, layer, capture_dir)
 
         entry = _grade(cfg, instance, spec, model_patch)
         rewards = _rewards_from_report(entry)

@@ -140,6 +140,15 @@ def test_auth_env_openai_only_sets_openai_key():
     assert "OPENROUTER_API_KEY" not in env
 
 
+def test_auth_env_anthropic_sets_anthropic_key_only():
+    # The anthropic key must not be shadowed under OPENAI_API_KEY (would break OpenAI agents).
+    cfg = _cfg("claude", api={"provider": "anthropic", "api_key": "sk-ant"})
+    env = _auth_env(cfg)
+    assert env["ANTHROPIC_API_KEY"] == "sk-ant"
+    assert "OPENAI_API_KEY" not in env
+    assert "OPENROUTER_API_KEY" not in env
+
+
 # --------------------------------------------------------------------------- dockerfile render
 
 
