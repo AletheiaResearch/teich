@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import re
 import sys
-from typing import Any, NamedTuple
+from typing import Any
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -210,47 +210,12 @@ class PublishConfig(BaseModel):
         return normalized
 
 
-class TasksConfig(BaseModel):
-    """Verifiable-task settings for seed-workspace bug-fix runs."""
-    seed_dataset: str | None = None
-    verifier_timeout_seconds: int = Field(default=300, ge=1)
-    restore_verifier_files: bool = True
-    route_by_result: bool = True
-    check_seed_baseline: bool = True
-
-    @field_validator("seed_dataset", mode="before")
-    @classmethod
-    def normalize_seed_dataset(cls, value: object) -> str | None:
-        if value is None:
-            return None
-        text = value if isinstance(value, str) else str(value)
-        normalized = text.strip()
-        if not normalized or normalized.lower() == "none":
-            return None
-        return normalized
-
-
-class SeedReference(NamedTuple):
-    """Resolved location of a seed repo bundle."""
-    kind: str  # "local" | "hf"
-    local_path: Path | None = None
-    repo_id: str | None = None
-    filename: str | None = None
-
-
 class PromptInput(BaseModel):
     """Structured prompt input row."""
     image: str | None = None
-    github_repo: str | None = None
     system: str | None = None
     prompt: str
     follow_up_prompts: list[str] = Field(default_factory=list)
-    seed_repo: str | None = None
-    base_commit: str | None = None
-    verifier: str | None = None
-    verifier_files: list[str] = Field(default_factory=list)
-    fail_to_pass: list[str] = Field(default_factory=list)
-    pass_to_pass: list[str] = Field(default_factory=list)
 
     @staticmethod
     def _normalize_optional_text(value: object) -> str | None:
@@ -262,23 +227,10 @@ class PromptInput(BaseModel):
             return None
         return normalized
 
-    @field_validator("image", "github_repo", "system", "seed_repo", "base_commit", "verifier", mode="before")
+    @field_validator("image", "system", mode="before")
     @classmethod
     def normalize_optional_fields(cls, value: object) -> str | None:
         return cls._normalize_optional_text(value)
-
-    @field_validator("verifier_files", "fail_to_pass", "pass_to_pass", mode="before")
-    @classmethod
-    def normalize_str_list(cls, value: object) -> list[str]:
-        if value is None:
-            return []
-        if isinstance(value, str):
-            items = re.split(r"[,\n]", value)
-        elif isinstance(value, list):
-            items = [item if isinstance(item, str) else str(item) for item in value]
-        else:
-            raise ValueError("expected a list of strings or a comma-separated string")
-        return [text for text in (item.strip() for item in items) if text]
 
     @field_validator("prompt", mode="before")
     @classmethod
@@ -310,25 +262,6 @@ class PromptInput(BaseModel):
                 raise ValueError(f"follow_up_prompts entry {index} cannot be empty")
             prompts.append(normalized)
         return prompts
-
-    @field_validator("github_repo")
-    @classmethod
-    def validate_github_repo(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        if not GITHUB_REPO_ID_PATTERN.fullmatch(value):
-            raise ValueError(
-                "github_repo must be in owner/repo format, e.g. armand0e/perplexica-mcp"
-            )
-        return value
-
-    @model_validator(mode="after")
-    def validate_seed_source(self) -> PromptInput:
-        if self.seed_repo and self.github_repo:
-            raise ValueError("Set only one of seed_repo or github_repo, not both")
-        if self.base_commit and not (self.seed_repo or self.github_repo):
-            raise ValueError("base_commit requires a seed source (seed_repo or github_repo)")
-        return self
 
     def turn_prompts(self) -> list[str]:
         """Return the initial prompt plus any configured follow-up prompts."""
@@ -369,7 +302,6 @@ class Config(BaseModel):
     prompts_file: Path | None = None
     output: OutputConfig = Field(default_factory=OutputConfig)
     publish: PublishConfig = Field(default_factory=PublishConfig)
-    tasks: TasksConfig = Field(default_factory=TasksConfig)
     bench: BenchConfig = Field(default_factory=BenchConfig)
     max_concurrency: int = Field(default=1, ge=1)
     timeout_seconds: int = 600
@@ -485,42 +417,6 @@ class Config(BaseModel):
         base = Path(codex_home).expanduser() if codex_home else Path.home() / ".codex"
         return base / "auth.json"
 
-    def resolve_seed_reference(self, seed_repo: str) -> SeedReference:
-        """Resolve a ``seed_repo`` value to a local bundle path or an HF dataset file.
-
-        - ``hf://datasets/<owner>/<name>/<path>`` -> explicit HF dataset file.
-        - a path-like value (contains ``/``, starts with ``.``/``~``, is absolute,
-          or ends with ``.bundle``) -> local bundle path.
-        - a bare key (e.g. ``widgets-bug-01``) -> ``<tasks.seed_dataset>/<key>.bundle``.
-        """
-        ref = seed_repo.strip()
-        if not ref:
-            raise ValueError("seed_repo cannot be empty")
-        if ref.startswith("hf://"):
-            rest = ref[len("hf://"):]
-            if rest.startswith("datasets/"):
-                rest = rest[len("datasets/"):]
-            parts = [part for part in rest.split("/") if part]
-            if len(parts) < 3:
-                raise ValueError(
-                    f"Invalid hf:// seed_repo '{seed_repo}'; expected "
-                    "hf://datasets/<owner>/<name>/<path-to>.bundle"
-                )
-            return SeedReference("hf", repo_id="/".join(parts[:2]), filename="/".join(parts[2:]))
-        path_like = (
-            "/" in ref
-            or ref.startswith(("~", "."))
-            or ref.endswith(".bundle")
-            or Path(ref).is_absolute()
-        )
-        if path_like:
-            return SeedReference("local", local_path=Path(ref).expanduser())
-        if not self.tasks.seed_dataset:
-            raise ValueError(
-                f"seed_repo '{seed_repo}' is a bare key but tasks.seed_dataset is not set"
-            )
-        return SeedReference("hf", repo_id=self.tasks.seed_dataset, filename=f"{ref}.bundle")
-
     def get_dataset_tags(self) -> list[str]:
         """Get auto-generated dataset tags for README frontmatter and uploads."""
         provider = self.get_agent_provider()
@@ -632,15 +528,8 @@ class Config(BaseModel):
                         prompt_inputs.append(
                             PromptInput(
                                 image=normalized_row.get("image"),
-                                github_repo=normalized_row.get("github_repo"),
                                 system=normalized_row.get("system"),
                                 prompt=prompt,
-                                seed_repo=normalized_row.get("seed_repo"),
-                                base_commit=normalized_row.get("base_commit"),
-                                verifier=normalized_row.get("verifier"),
-                                verifier_files=normalized_row.get("verifier_files"),
-                                fail_to_pass=normalized_row.get("fail_to_pass"),
-                                pass_to_pass=normalized_row.get("pass_to_pass"),
                             )
                         )
                     except ValueError as exc:
@@ -670,16 +559,9 @@ class Config(BaseModel):
         try:
             return PromptInput(
                 image=normalized_row.get("image"),
-                github_repo=normalized_row.get("github_repo"),
                 system=normalized_row.get("system"),
                 prompt=prompt,
                 follow_up_prompts=normalized_row.get("follow_up_prompts"),
-                seed_repo=normalized_row.get("seed_repo"),
-                base_commit=normalized_row.get("base_commit"),
-                verifier=normalized_row.get("verifier"),
-                verifier_files=normalized_row.get("verifier_files"),
-                fail_to_pass=normalized_row.get("fail_to_pass"),
-                pass_to_pass=normalized_row.get("pass_to_pass"),
             )
         except ValueError as exc:
             raise ValueError(f"Invalid {source}: {exc}") from exc

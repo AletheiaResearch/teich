@@ -7,14 +7,13 @@ These tests require:
 
 import json
 import os
-import shutil
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from teich.config import APIConfig, Config, ModelConfig, PromptInput
+from teich.config import APIConfig, Config, ModelConfig
 from teich.runner import CodexRunner, RUNTIME_CONTAINER_USER, RUNTIME_IMAGE_NAME
 
 
@@ -279,117 +278,6 @@ class TestEndToEnd:
                 result = runner.run_session("Create a Python hello world script", "test")
 
         assert result is not None
-
-
-@pytest.mark.integration
-@pytest.mark.usefixtures("require_docker")
-class TestSeedVerifierDocker:
-    """Real-Docker verification of the seed-workspace verifier reward path."""
-
-    @staticmethod
-    def _require_runtime_image() -> None:
-        present = subprocess.run(
-            ["docker", "images", "-q", RUNTIME_IMAGE_NAME], capture_output=True, text=True
-        ).stdout.strip()
-        if not present:
-            pytest.skip(f"{RUNTIME_IMAGE_NAME} not built")
-
-    @staticmethod
-    def _make_seed_bundle(tmp_path: Path) -> Path:
-        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e.st",
-               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e.st"}
-        repo = tmp_path / "src"
-        repo.mkdir()
-        (repo / "app.py").write_text("def add(a, b):\n    return a - b  # BUG\n", encoding="utf-8")
-        (repo / "check.py").write_text("import app\nassert app.add(2, 2) == 4\nprint('OK')\n", encoding="utf-8")
-        subprocess.run(["git", "init", "-q", str(repo)], check=True)
-        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, env=env)
-        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "seed"], check=True, env=env)
-        bundle = tmp_path / "app.bundle"
-        subprocess.run(["git", "-C", str(repo), "bundle", "create", str(bundle), "--all"], check=True, env=env)
-        return bundle
-
-    def test_verifier_reward_bug_then_fix(self, tmp_path):
-        """Seed clone -> verifier fails on the bug -> passes once fixed (real docker run)."""
-        self._require_runtime_image()
-        bundle = self._make_seed_bundle(tmp_path)
-        with patch.object(CodexRunner, "_ensure_image"):
-            runner = CodexRunner(Config(agent={"provider": "codex"}, tasks={"verifier_timeout_seconds": 120}))
-        pi = PromptInput(prompt="fix", seed_repo=str(bundle), verifier="python check.py")
-
-        root_a, ws_a = runner._prepare_workspace("seed-a", pi, "codex")
-        try:
-            assert (ws_a / "app.py").exists() and (ws_a / ".git").is_dir()  # cloned with history
-            buggy = runner._run_verifier(ws_a, pi)
-        finally:
-            shutil.rmtree(root_a, ignore_errors=True)
-        assert buggy is not None and buggy.passed is False and buggy.exit_code != 0
-
-        root_b, ws_b = runner._prepare_workspace("seed-b", pi, "codex")
-        try:
-            (ws_b / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
-            fixed = runner._run_verifier(ws_b, pi)
-        finally:
-            shutil.rmtree(root_b, ignore_errors=True)
-        assert fixed is not None and fixed.passed is True and fixed.exit_code == 0
-
-    @staticmethod
-    def _make_f2p_bundle(tmp_path: Path) -> Path:
-        """Seed where test_add (F2P) fails on the bug and test_mul (P2P) always passes."""
-        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e.st",
-               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e.st"}
-        repo = tmp_path / "src"
-        repo.mkdir()
-        (repo / "app.py").write_text("def add(a, b):\n    return a - b  # BUG\ndef mul(a, b):\n    return a * b\n", encoding="utf-8")
-        # A plain-python runner that emits pytest-style PASSED/FAILED <id> lines
-        # (keeps the test off pytest-install while exercising the F2P/P2P parser).
-        (repo / "run_tests.py").write_text(
-            "import sys, app\n"
-            "results = {\n"
-            "    'tests/test_app.py::test_add': app.add(2, 2) == 4,\n"
-            "    'tests/test_app.py::test_mul': app.mul(2, 3) == 6,\n"
-            "}\n"
-            "ok = True\n"
-            "for tid, passed in results.items():\n"
-            "    print(('PASSED ' if passed else 'FAILED ') + tid)\n"
-            "    ok = ok and passed\n"
-            "sys.exit(0 if ok else 1)\n",
-            encoding="utf-8",
-        )
-        subprocess.run(["git", "init", "-q", str(repo)], check=True)
-        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, env=env)
-        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "seed"], check=True, env=env)
-        bundle = tmp_path / "f2p.bundle"
-        subprocess.run(["git", "-C", str(repo), "bundle", "create", str(bundle), "--all"], check=True, env=env)
-        return bundle
-
-    def test_f2p_p2p_transition_over_docker(self, tmp_path):
-        """Genuine before/after F2P/P2P: bug fails F2P on the seed baseline, fix flips it to resolved."""
-        self._require_runtime_image()
-        bundle = self._make_f2p_bundle(tmp_path)
-        with patch.object(CodexRunner, "_ensure_image"):
-            runner = CodexRunner(Config(
-                agent={"provider": "codex"},
-                tasks={"verifier_timeout_seconds": 120, "check_seed_baseline": True},
-            ))
-        pi = PromptInput(
-            prompt="fix", seed_repo=str(bundle), verifier="python run_tests.py",
-            fail_to_pass=["tests/test_app.py::test_add"],
-            pass_to_pass=["tests/test_app.py::test_mul"],
-        )
-        root, ws = runner._prepare_workspace("f2p", pi, "codex")
-        try:
-            # Agent fixes the bug.
-            (ws / "app.py").write_text("def add(a, b):\n    return a + b\ndef mul(a, b):\n    return a * b\n", encoding="utf-8")
-            result = runner._run_verifier(ws, pi)
-            runner._apply_f2p_p2p_reward(result, pi)  # runs the pristine-seed baseline internally
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
-        assert result.resolved is True and result.passed is True
-        assert result.valid_task is True
-        assert result.fail_to_pass == {"tests/test_app.py::test_add": "passed"}
-        assert result.baseline["fail_to_pass"] == {"tests/test_app.py::test_add": "failed"}
-        assert result.baseline["pass_to_pass"] == {"tests/test_app.py::test_mul": "passed"}
 
 
 # Integration test markers

@@ -2881,46 +2881,9 @@ def _write_structured_trace(path: Path) -> None:
     path.write_text(json.dumps(row) + "\n", encoding="utf-8")
 
 
-def test_convert_attaches_verifier_reward_passed(tmp_path: Path):
-    out = tmp_path / "output"
-    _write_structured_trace(out / "passed" / "codex-x.jsonl")
-    (out / "verification").mkdir(parents=True, exist_ok=True)
-    (out / "verification" / "codex-x.json").write_text(
-        json.dumps({"passed": True, "exit_code": 0}), encoding="utf-8"
-    )
-    rows = convert_traces_to_training_data(out)
-    assert len(rows) == 1
-    assert rows[0]["reward"] == 1.0
-    assert rows[0]["passed"] is True
-
-
-def test_convert_attaches_verifier_reward_failed(tmp_path: Path):
-    out = tmp_path / "output"
-    _write_structured_trace(out / "failed" / "codex-y.jsonl")
-    (out / "verification").mkdir(parents=True, exist_ok=True)
-    (out / "verification" / "codex-y.json").write_text(
-        json.dumps({"passed": False, "exit_code": 1}), encoding="utf-8"
-    )
-    rows = convert_traces_to_training_data(out)
-    assert rows[0]["reward"] == 0.0
-    assert rows[0]["passed"] is False
-
-
 def test_convert_without_sidecar_has_no_reward(tmp_path: Path):
     out = tmp_path / "output"
     _write_structured_trace(out / "codex-z.jsonl")
-    rows = convert_traces_to_training_data(out)
-    assert "reward" not in rows[0]
-    assert "passed" not in rows[0]
-
-
-def test_convert_ignores_non_bool_passed(tmp_path: Path):
-    out = tmp_path / "output"
-    _write_structured_trace(out / "passed" / "codex-x.jsonl")
-    (out / "verification").mkdir(parents=True, exist_ok=True)
-    (out / "verification" / "codex-x.json").write_text(
-        json.dumps({"passed": "false", "exit_code": 1}), encoding="utf-8"
-    )
     rows = convert_traces_to_training_data(out)
     assert "reward" not in rows[0]
     assert "passed" not in rows[0]
