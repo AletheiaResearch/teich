@@ -16,6 +16,40 @@ TEICH_TRAINING_DOCS_URL = "https://github.com/TeichAI/teich/blob/main/docs/train
 TEICH_PREPARE_DOCS_URL = "https://github.com/TeichAI/teich/blob/main/docs/prepare-data.md"
 EXTRACTION_PROVIDERS = {"claude", "codex", "cursor", "hermes", "pi"}
 
+_TEMPLATE_DIR = Path(__file__).parent / "templates"
+_DEFAULT_CARD_TEMPLATE = "dataset_card.md.j2"
+# Frontmatter keys the card owns; a user's ``card_extra`` may not shadow them.
+_RESERVED_CARD_KEYS = frozenset(
+    {"pretty_name", "task_categories", "tags", "configs", "size_categories", "license"}
+)
+# Hugging Face dataset-card ``size_categories`` buckets, ascending by upper bound.
+_SIZE_BUCKETS: tuple[tuple[int, str], ...] = (
+    (1_000, "n<1K"),
+    (10_000, "1K<n<10K"),
+    (100_000, "10K<n<100K"),
+    (1_000_000, "100K<n<1M"),
+    (10_000_000, "1M<n<10M"),
+    (100_000_000, "10M<n<100M"),
+    (1_000_000_000, "100M<n<1B"),
+    (10_000_000_000, "1B<n<10B"),
+    (100_000_000_000, "10B<n<100B"),
+    (1_000_000_000_000, "100B<n<1T"),
+)
+
+
+def size_category(row_count: int) -> str | None:
+    """Map a dataset row count to its Hugging Face ``size_categories`` bucket.
+
+    Returns ``None`` for an empty/unknown dataset (``row_count <= 0``) so the card
+    omits the key rather than advertising a bogus size.
+    """
+    if row_count <= 0:
+        return None
+    for upper, label in _SIZE_BUCKETS:
+        if row_count < upper:
+            return label
+    return "n>1T"
+
 
 def normalize_extraction_provider(provider: str | None) -> str | None:
     if not isinstance(provider, str):
@@ -197,27 +231,6 @@ def _split_data_files(traces_dir: Path) -> list[tuple[str, str]]:
     return splits or [("train", "*.jsonl")]
 
 
-def _frontmatter(
-    pretty_name: str, tags: list[str], data_files: list[tuple[str, str]] | None = None
-) -> str:
-    lines = [
-        "---",
-        f'pretty_name: "{pretty_name}"',
-        "task_categories:",
-        "- text-generation",
-    ]
-    if tags:
-        lines.append("tags:")
-        for tag in tags:
-            lines.append(f'- "{tag}"')
-    lines.extend(["configs:", "- config_name: default", "  data_files:"])
-    for split, path in data_files or [("train", "**/*.jsonl")]:
-        lines.append(f"  - split: {split}")
-        lines.append(f'    path: "{path}"')
-    lines.extend(["---", ""])
-    return "\n".join(lines)
-
-
 def _truncate_text(value: str, max_chars: int) -> str:
     if len(value) <= max_chars:
         return value
@@ -380,24 +393,6 @@ def _tools_details_block(tools: list[dict[str, Any]]) -> list[str]:
     ]
 
 
-def _extraction_snippet(provider: str) -> list[str]:
-    provider = normalize_extraction_provider(provider) or provider.strip().lower().replace("_", "-") or "claude"
-    return [
-        "## Create A Similar Dataset",
-        "",
-        "This dataset was staged from existing local agent sessions with `teich extract`.",
-        "To build your own local dataset, install Teich and point it at one of the supported providers:",
-        "",
-        "```bash",
-        f"teich extract {provider} --out data",
-        "```",
-        "",
-        "Use `--sessions-dir /path/to/store` when your sessions are not in the default location,",
-        "and `--model <substring>` when you only want sessions whose model metadata matches a value.",
-        "",
-    ]
-
-
 def _reward_stats(traces_dir: Path, trace_files: Iterable[Path]) -> dict[str, int] | None:
     """Summarize verifier outcomes from the canonical ``verification/`` sidecars.
 
@@ -433,28 +428,42 @@ def _reward_stats(traces_dir: Path, trace_files: Iterable[Path]) -> dict[str, in
     return {"total": passed + failed, "passed": passed, "failed": failed, "numeric": numeric}
 
 
-def _reward_labels_section(reward_stats: dict[str, int]) -> list[str]:
-    lines = [
-        "## Reward labels",
-        "",
-        "This is a verifiable dataset: rows carry the task verifier's outcome so it can be "
-        "used for reward-based training and filtering.",
-        "",
-        "- `passed` (bool): whether the task verifier succeeded after the agent's edits",
-        "- `reward` (float): the verifier's own score when it reports one, else the binary "
-        "`1.0`/`0.0` implied by `passed`",
-        "",
-        f"Verified tasks: {reward_stats['total']} "
-        f"({reward_stats['passed']} passed / {reward_stats['failed']} failed).",
-        "Each reward comes from the task verifier run after the agent's attempt.",
-    ]
-    if reward_stats.get("numeric"):
-        lines.append(
-            f"{reward_stats['numeric']} of {reward_stats['total']} carry an explicit numeric "
-            "score (the rest are binary pass/fail)."
-        )
-    lines.append("")
-    return lines
+def _sanitize_card_extra(card_extra: dict[str, Any] | None) -> dict[str, Any]:
+    """Drop reserved frontmatter keys the card owns; keep user keys in order."""
+    if not card_extra:
+        return {}
+    return {key: value for key, value in card_extra.items() if key not in _RESERVED_CARD_KEYS}
+
+
+def _card_extra_yaml(card_extra: dict[str, Any] | None) -> str:
+    """Serialize ``card_extra`` to YAML frontmatter lines (empty dict -> "")."""
+    sanitized = _sanitize_card_extra(card_extra)
+    if not sanitized:
+        return ""
+    import yaml
+
+    return yaml.safe_dump(sanitized, sort_keys=False, default_flow_style=False)
+
+
+def _render_card(context: dict[str, Any], template_path: Path | None = None) -> str:
+    """Render the dataset card from ``context`` via Jinja2 (default or user template)."""
+    from jinja2 import Environment, FileSystemLoader, StrictUndefined
+
+    if template_path is not None:
+        loader_dir = str(template_path.parent)
+        template_name = template_path.name
+    else:
+        loader_dir = str(_TEMPLATE_DIR)
+        template_name = _DEFAULT_CARD_TEMPLATE
+    env = Environment(
+        loader=FileSystemLoader(loader_dir),
+        undefined=StrictUndefined,
+        trim_blocks=True,
+        lstrip_blocks=True,
+        keep_trailing_newline=True,
+    )
+    template = env.get_template(template_name)
+    return template.render(**context)
 
 
 def build_traces_readme(
@@ -468,6 +477,9 @@ def build_traces_readme(
     extraction_provider: str | None = None,
     reward_stats: dict[str, int] | None = None,
     data_files: list[tuple[str, str]] | None = None,
+    license: str | None = None,
+    card_extra: dict[str, Any] | None = None,
+    readme_template: Path | None = None,
 ) -> str:
     structured_dataset = _is_structured_dataset(trace_files)
     agent_trace_rows = _is_agent_trace_row_dataset(trace_files)
@@ -480,115 +492,44 @@ def build_traces_readme(
     routed = any(split != "train" for split, _ in data_files or [])
     if (reward_stats or routed) and "reward-labeled" not in effective_tags:
         effective_tags.append("reward-labeled")
-    lines = [
-        _frontmatter(pretty_name, effective_tags, data_files),
-        'This dataset was generated using [teich](https://github.com/TeichAI/teich) by [TeichAI](https://huggingface.co/TeichAI) <img src="https://cdn-avatars.huggingface.co/v1/production/uploads/6837935ac3b7ffe0d2559ce9/-AxyvV4wfUY8uo87kNKkK.png" width="20" height="20" style="display: inline-block; vertical-align: middle; margin: 0 3px;">',
-        "",
-        f"# {pretty_name}",
-        "",
-        (
+    normalized_provider = (
+        normalize_extraction_provider(extraction_provider)
+        or extraction_provider.strip().lower().replace("_", "-")
+        or "claude"
+        if extraction_provider
+        else None
+    )
+    size = size_category(row_count)
+    is_row_dataset = structured_dataset or agent_trace_rows
+    context: dict[str, Any] = {
+        "pretty_name": pretty_name,
+        "tags": effective_tags,
+        "data_files": list(data_files or [("train", "**/*.jsonl")]),
+        "license": license,
+        "size_categories": [size] if size else None,
+        "card_extra_yaml": _card_extra_yaml(card_extra),
+        "model_id": model_id,
+        "reward_stats": reward_stats,
+        "dataset_tools": dataset_tools,
+        "externalize_tools": _should_externalize_tools(dataset_tools),
+        "tools_details_block": "\n".join(_tools_details_block(dataset_tools)).rstrip("\n")
+        if dataset_tools
+        else "",
+        "extraction_provider": normalized_provider,
+        "structured_dataset": structured_dataset,
+        "agent_trace_rows": agent_trace_rows,
+        "sample_block": sample_block,
+        "dataset_reference": dataset_reference,
+        "training_docs_url": TEICH_TRAINING_DOCS_URL,
+        "prepare_docs_url": TEICH_PREPARE_DOCS_URL,
+        "intro_line": (
             "This directory contains newline-delimited JSON training examples generated by teich."
             if structured_dataset
             else "This directory contains raw agent trace files generated by teich."
         ),
-        "",
-        f"Rows: {row_count}" if structured_dataset or agent_trace_rows else f"JSONL files: {len(trace_files)}",
-        "",
-    ]
-    if model_id:
-        lines.extend([f"Model metadata: `{model_id}`", ""])
-    if reward_stats:
-        lines.extend(_reward_labels_section(reward_stats))
-    if dataset_tools:
-        lines.extend(
-            [
-                "## Training-ready tools",
-                "",
-                "Generated agent traces carry configured or recovered tool schemas so tools remain available for training even when a session did not call them.",
-                "Native Claude Code imports recover schemas for Claude Code and Claude Desktop built-ins, plus conservative name-derived MCP schemas, when the raw transcript only records tool names or calls.",
-                (
-                    "A complete dataset-level `tools` schema snapshot is embedded in the collapsed section at the bottom of this README."
-                    if not _should_externalize_tools(dataset_tools)
-                    else "A complete dataset-level `tools` schema snapshot is stored in `tools.json` to keep this dataset card upload-safe."
-                ),
-                "`load_traces` applies the dataset snapshot to each loaded example as a fallback `tools` field.",
-                "",
-            ]
-        )
-    if extraction_provider:
-        lines.extend(_extraction_snippet(extraction_provider))
-    lines.extend(
-        [
-            "## Format",
-            "",
-        ]
-    )
-    if structured_dataset:
-        lines.extend(
-            [
-                "Each file is newline-delimited JSON where every line is already a training example.",
-                "Chat-only datasets include `messages` plus convenience fields like optional `system`, `prompt`, `follow_up_prompts`, `thinking`, `response`, and `responses`.",
-                "Tool datasets can include the same normalized `messages` structure together with a `tools` field.",
-                "",
-            ]
-        )
-    elif agent_trace_rows:
-        lines.extend(
-            [
-                "Each file is newline-delimited JSON where every line is one preserved agent session.",
-                "Rows use `id`, `task`, `traces`, `tools`, and `metadata`:",
-                "",
-                "- `id`: provider session id",
-                "- `task`: first user prompt extracted from the trace",
-                "- `traces`: native conversation messages in `from` / `value` form",
-                "- `tools`: the tool schema available to that session, including tools that were not called",
-                "- `metadata`: provider, model, first-message timestamp, token, cost, parent-session, and export details",
-                "- `metadata.first_message_timestamp`: first timestamp-bearing source user message when the trace format provides one",
-                "",
-            ]
-        )
-    else:
-        lines.extend(
-            [
-                "Each file is newline-delimited JSON representing a single captured agent session.",
-                "The trace schema is designed for upload-first preservation so you can keep the original session history and convert it later for training.",
-                "Teich normalizes split assistant fragments during trace copy and conversion so the semantic order is reasoning first, optional assistant text second, and tool calls last.",
-                "Native Claude Code conversion also preserves runtime context such as skills, MCP instructions, hook context, permission state, date changes, and session recaps as masked `system` messages when the raw transcript provides them.",
-                "",
-                "Common top-level event groups:",
-                "",
-                "- `session_meta`",
-                "- `turn_context`",
-                "- `event_msg`",
-                "- `response_item`",
-                "- `session`",
-                "- `message`",
-                "- `session_info`",
-                "- `model_change`",
-                "- `thinking_level_change`",
-                "- `external_session_meta`",
-                "- `external_message`",
-                "- `external_stderr`",
-                "",
-            ]
-        )
-    if sample_block:
-        lines.extend(["## Example", "", "```json", sample_block, "```", ""])
-    lines.extend(
-        [
-            "## Training",
-            "",
-            f"Use this dataset as `{dataset_reference}` with Teich's data preparation and training utilities.",
-            "If you do not want Teich to handle chat-template formatting or masking, run `teich convert` "
-            "to write standalone OpenAI-style JSONL rows with `prompt`, `messages`, `tools`, and `metadata`.",
-            f"Training setup details evolve over time, so the maintained guide lives in the [Teich training docs]({TEICH_TRAINING_DOCS_URL}).",
-            f"For loading, mixing, converting, and validating Teich datasets, see [Preparing Data]({TEICH_PREPARE_DOCS_URL}).",
-            "",
-        ]
-    )
-    if dataset_tools:
-        lines.extend(_tools_details_block(dataset_tools))
-    return "\n".join(lines)
+        "rows_line": f"Rows: {row_count}" if is_row_dataset else f"JSONL files: {len(trace_files)}",
+    }
+    return _render_card(context, readme_template)
 
 
 def write_traces_readme(
@@ -601,6 +542,9 @@ def write_traces_readme(
     tools: list[dict[str, Any]] | None = None,
     excluded_dirs: list[Path] | None = None,
     extraction_provider: str | None = None,
+    license: str | None = None,
+    card_extra: dict[str, Any] | None = None,
+    readme_template: Path | None = None,
 ) -> Path:
     trace_files = sorted(
         path
@@ -622,6 +566,9 @@ def write_traces_readme(
             extraction_provider=extraction_provider,
             reward_stats=_reward_stats(traces_dir, trace_files),
             data_files=_split_data_files(traces_dir),
+            license=license,
+            card_extra=card_extra,
+            readme_template=readme_template,
         ),
         encoding="utf-8",
     )

@@ -238,6 +238,9 @@ def _write_output_metadata(cfg: Config) -> Path:
         repo_id=cfg.get_publish_repo_id(),
         tools=snapshot_configured_tools(cfg),
         excluded_dirs=[cfg.output.failures_dir],
+        license=cfg.output.license,
+        card_extra=cfg.output.card_extra,
+        readme_template=cfg.output.readme_template,
     )
 
 
@@ -400,6 +403,9 @@ def _write_extract_readme(
         model_id=None,
         repo_id=cfg.get_publish_repo_id(),
         extraction_provider=provider,
+        license=cfg.output.license,
+        card_extra=cfg.output.card_extra,
+        readme_template=cfg.output.readme_template,
     )
 
 
