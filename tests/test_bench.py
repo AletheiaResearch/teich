@@ -174,6 +174,62 @@ def test_harbor_classify_remote_source():
     assert hb._classify_remote_source("ds", "https://github.com/o/r", None) == ("repo", "ds")
 
 
+def test_harbor_image_names_computed_and_from_trial():
+    import types as _t
+
+    # No trial (error path): the deterministic sanitize("hb__" + task id), lowercased.
+    assert hb._harbor_image_names(None, "Adaptive-Rejection-Sampler") == ["hb__adaptive-rejection-sampler"]
+    # With a trial: prefer the actual env image name(s) AND include the computed one.
+    trial = _t.SimpleNamespace(
+        agent_environment=_t.SimpleNamespace(_main_image_name="hb__custom"),
+        verifier_environment=None,
+        task=_t.SimpleNamespace(short_name="my-task"),
+    )
+    names = hb._harbor_image_names(trial, "ignored")
+    assert "hb__custom" in names and "hb__my-task" in names
+
+
+def test_purge_images_invokes_docker_rmi(monkeypatch):
+    calls = []
+    monkeypatch.setattr(hb.subprocess, "run", lambda args, **kw: calls.append(args))
+    hb._purge_images(["hb__a", "hb__b"])
+    assert calls == [["docker", "rmi", "-f", "hb__a"], ["docker", "rmi", "-f", "hb__b"]]
+
+
+def test_purge_images_swallows_errors(monkeypatch):
+    def boom(*a, **k):
+        raise OSError("no docker")
+
+    monkeypatch.setattr(hb.subprocess, "run", boom)
+    hb._purge_images(["hb__a"])  # best-effort: must not raise
+
+
+def test_harbor_run_purges_image_unless_kept(monkeypatch, tmp_path):
+    import types as _t
+
+    fake_trial = _t.SimpleNamespace(
+        agent_environment=_t.SimpleNamespace(_main_image_name="hb__t1"),
+        verifier_environment=None,
+        task=_t.SimpleNamespace(short_name="t1"),
+    )
+    fake_result = _t.SimpleNamespace(exception_info=None, verifier_result={"rewards": {"reward": 1.0}})
+    monkeypatch.setattr(hb, "_build_trial_config", lambda *a, **k: object())
+    monkeypatch.setattr(hb, "_create_and_run", lambda config: "coro")
+    monkeypatch.setattr(hb.asyncio, "run", lambda _coro: (fake_trial, fake_result))
+    monkeypatch.setattr(hb, "_agent_dir", lambda trial: None)
+    purged: list[str] = []
+    monkeypatch.setattr(hb, "_purge_images", lambda names: purged.extend(names))
+    src = BenchSource(type="harbor", source="S")
+
+    hb.HarborBackend().run(Config(output={"traces_dir": tmp_path / "o"}), src, base.BenchTask(id="t1", raw=tmp_path))
+    assert "hb__t1" in purged
+
+    purged.clear()
+    kept = Config(output={"traces_dir": tmp_path / "o2", "keep_bench_images": True})
+    hb.HarborBackend().run(kept, src, base.BenchTask(id="t1", raw=tmp_path))
+    assert purged == []  # keep_bench_images -> no purge
+
+
 def test_harbor_resolve_task_dirs(tmp_path):
     single = tmp_path / "one"
     single.mkdir()

@@ -188,7 +188,28 @@ class OutputConfig(BaseModel):
     # Harbor bench intermediates (trials/sources/sessions). None -> a sibling ``bench``
     # dir next to traces_dir, parallel to sandbox/failures (never inside the dataset).
     bench_dir: Path | None = None
+    # Remove each task's per-task Docker image after the bench run (harbor's ``hb__<task>``
+    # image, the swe-bench agent layer) so they don't accumulate and fill the disk. Set True
+    # to keep them (e.g. for debugging, or to avoid rebuilds across runs).
+    keep_bench_images: bool = False
     pretty_name: str = "Agentic Training Traces"
+    # Dataset-card customization (all optional; the default card is unchanged when unset).
+    # ``license`` adds an SPDX id to the card frontmatter; ``card_extra`` merges arbitrary
+    # extra frontmatter keys; ``readme_template`` points at a user Jinja2 template that
+    # replaces the shipped default (rendered with the same context).
+    license: str | None = None
+    card_extra: dict[str, Any] = Field(default_factory=dict)
+    readme_template: Path | None = None
+
+    @field_validator("readme_template")
+    @classmethod
+    def validate_readme_template(cls, value: Path | None) -> Path | None:
+        if value is None:
+            return None
+        path = Path(value).expanduser()
+        if not path.is_file():
+            raise ValueError(f"output.readme_template not found: {path}")
+        return path
 
 
 class PublishConfig(BaseModel):

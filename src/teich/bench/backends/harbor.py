@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -314,6 +315,45 @@ def _rewards_from_files(base_dir: Path | None) -> dict[str, float] | None:
     return None
 
 
+def _sanitize_hb_image(name: str) -> str:
+    """Replicate harbor's docker image-name sanitizer (environments/docker/docker.py)."""
+    name = name.lower()
+    if not re.match(r"^[a-z0-9]", name):
+        name = "0" + name
+    return re.sub(r"[^a-z0-9._-]", "-", name)
+
+
+def _harbor_image_names(trial: Any, task_id: str) -> list[str]:
+    """Per-task image name(s) harbor built. harbor's teardown runs ``compose down --rmi local``,
+    which leaves the custom-tagged ``hb__<task>`` image behind, so we remove it ourselves.
+
+    Prefers the actual name off the trial's environments; always includes the deterministic
+    ``sanitize("hb__" + short_name)`` (short_name == the task dir name == task_id), which also
+    covers the error path where the trial object was never returned.
+    """
+    names: set[str] = set()
+    for attr in ("agent_environment", "verifier_environment"):
+        env = getattr(trial, attr, None) if trial is not None else None
+        try:
+            value = getattr(env, "_main_image_name", None)
+        except Exception:
+            value = None
+        if isinstance(value, str) and value:
+            names.add(value)
+    short = getattr(getattr(trial, "task", None), "short_name", None) if trial is not None else None
+    names.add(_sanitize_hb_image(f"hb__{short or task_id}"))
+    return sorted(names)
+
+
+def _purge_images(names: list[str]) -> None:
+    """Best-effort ``docker rmi -f`` of the given images (ignore not-found / in-use / no docker)."""
+    for name in names:
+        try:
+            subprocess.run(["docker", "rmi", "-f", name], capture_output=True, timeout=120)
+        except Exception:
+            pass
+
+
 class HarborBackend:
     """Runs Harbor-format tasks via the harbor package (one container per task)."""
 
@@ -338,24 +378,31 @@ class HarborBackend:
         trials_dir = base.bench_root(cfg) / "trials"
         trials_dir.mkdir(parents=True, exist_ok=True)
         config = _build_trial_config(cfg, source, task.raw, trials_dir)
-        trial, result = asyncio.run(_create_and_run(config))
+        trial: Any = None
+        try:
+            trial, result = asyncio.run(_create_and_run(config))
 
-        exc_info = getattr(result, "exception_info", None)
-        exception: str | None = None
-        if exc_info:
-            exception = (
-                exc_info.get("exception_type") if isinstance(exc_info, dict)
-                else getattr(exc_info, "exception_type", None)
-            ) or "agent error"
+            exc_info = getattr(result, "exception_info", None)
+            exception: str | None = None
+            if exc_info:
+                exception = (
+                    exc_info.get("exception_type") if isinstance(exc_info, dict)
+                    else getattr(exc_info, "exception_type", None)
+                ) or "agent error"
 
-        agent_dir = _agent_dir(trial)
-        lines: list[str] = []
-        native_dir: Path | None = None
-        if agent_dir is not None and agent_dir.exists():
-            lines, native_dir = _native_trace(cfg, source, agent_dir, task.id)
+            agent_dir = _agent_dir(trial)
+            lines: list[str] = []
+            native_dir: Path | None = None
+            if agent_dir is not None and agent_dir.exists():
+                lines, native_dir = _native_trace(cfg, source, agent_dir, task.id)
 
-        rewards = _rewards_from_result(result) or _rewards_from_files(
-            agent_dir.parent if agent_dir else None
-        )
-        metadata = {"exception": exception, **base.trace_metadata(native_dir)}
-        return base.BenchRun(native_lines=lines, rewards=rewards, metadata=metadata)
+            rewards = _rewards_from_result(result) or _rewards_from_files(
+                agent_dir.parent if agent_dir else None
+            )
+            metadata = {"exception": exception, **base.trace_metadata(native_dir)}
+            return base.BenchRun(native_lines=lines, rewards=rewards, metadata=metadata)
+        finally:
+            # harbor's `down --rmi local` leaves the `hb__<task>` image; remove it on every
+            # outcome (passed/failed/error) so per-task images don't pile up and fill the disk.
+            if not cfg.output.keep_bench_images:
+                _purge_images(_harbor_image_names(trial, task.id))
