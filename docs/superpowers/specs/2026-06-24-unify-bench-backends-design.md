@@ -44,7 +44,7 @@ PASS_TO_PASS). teich runs its **own** agent in that environment to produce the p
 
 ## Architecture
 
-```
+```text
 run_bench(cfg, console, resume, refresh):
   for source in cfg.bench.sources:                 # array of {type, source, ...}
       backend = get_backend(source.type)           # harbor | swe-bench (lazy-import its extra)
@@ -177,11 +177,13 @@ phase 3 (bench writes its own `metadata/`; it does not use `verification.py`).
 ## Optional dependencies
 
 `pyproject.toml` optional-dependencies:
+
 ```toml
 harbor = ["harbor>=0.15.0 ; python_full_version >= '3.12'"]
 swe    = ["swebench>=4.1"]          # swebench requires-python >=3.10 -> no Python marker needed
 bench  = ["teich[harbor,swe]"]      # convenience: install both backends (self-referential extra)
 ```
+
 (swebench needs no Python-version marker, unlike harbor.) Each backend's `require()` raises a
 clear "install teich[harbor]" / "teich[swe]" error.
 
@@ -194,7 +196,7 @@ clear "install teich[harbor]" / "teich[swe]" error.
 
 ## Testing
 
-- **Unit (no docker/network):** config parsing of `bench.sources` (+ back-compat single source);
+- **Unit (no docker/network):** config parsing of `bench.sources` (no single-source back-compat);
   the backend registry + `require()` errors; swe-bench reward→split mapping; the per-source
   namespacing/resume key; Jinja template renders for each agent + feature combo (string assert,
   no build); concurrency pool honors `max_concurrency` (monkeypatched backend `run`).

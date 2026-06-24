@@ -224,9 +224,17 @@ def _ensure_instance_image(spec: Any, *, namespace: str | None) -> None:
     build_instance_images(docker.from_env(), [spec], namespace=None, max_workers=1)
 
 
-def _build_image(dockerfile: str, tag: str) -> None:
-    # Build from stdin so no Dockerfile is written into the repo or a build context.
-    subprocess.run(["docker", "build", "-t", tag, "-"], input=dockerfile, text=True, check=True)
+def _build_image(dockerfile: str, tag: str, *, timeout: int | None = None) -> None:
+    # Build from stdin (no Dockerfile written into the repo/context); capture logs and bound the
+    # build by the run timeout, surfacing the tail on failure instead of flooding stdout.
+    try:
+        subprocess.run(
+            ["docker", "build", "-t", tag, "-"],
+            input=dockerfile, text=True, capture_output=True, check=True, timeout=timeout,
+        )
+    except subprocess.CalledProcessError as exc:
+        tail = (exc.stderr or exc.stdout or "")[-2000:]
+        raise RuntimeError(f"docker build for {tag} failed:\n{tail}") from exc
 
 
 def _native_trace(capture_dir: Path, session_glob: str) -> tuple[list[str], Path | None]:
@@ -251,27 +259,37 @@ def _run_agent(
     capture_dir.mkdir(parents=True, exist_ok=True)
     (capture_dir / "prompt.txt").write_text(instance.get("problem_statement") or "", encoding="utf-8")
 
+    slug = base.slug(instance["instance_id"])
     langfuse = cfg.agent.langfuse
     dockerfile = render_agent_dockerfile(spec.instance_image_key, layer, langfuse=langfuse.enabled)
-    agent_image = f"teich-swe-{base.slug(instance['instance_id'])}:latest"
-    _build_image(dockerfile, agent_image)
+    agent_image = f"teich-swe-{slug}:latest"
+    timeout = cfg.timeout_seconds if cfg.timeout_seconds and cfg.timeout_seconds > 0 else None
+    _build_image(dockerfile, agent_image, timeout=timeout)
 
-    env_args: list[str] = []
-    for key, value in {**layer.env, **_auth_env(cfg)}.items():
-        env_args += ["-e", f"{key}={value}"]
+    # Pass credentials via an env-file (host-only, outside the mounted dir) rather than
+    # `-e KEY=VALUE`, so keys aren't visible in `docker inspect` or the host process list.
+    env = {**layer.env, **_auth_env(cfg)}
+    env_file = capture_dir.parent / f"{slug}.env"
+    env_file.write_text("".join(f"{key}={value}\n" for key, value in env.items()), encoding="utf-8")
+
+    container = f"teich-swe-{slug}"
     capture = f"{CAPTURE}/model.patch"
     shell = (
         f"cd {TESTBED} && ({layer.run} || true) && git -C {TESTBED} add -A && "
         f"git -C {TESTBED} diff --cached --no-color > {capture} 2>/dev/null || true"
     )
     cmd = [
-        "docker", "run", "--rm",
+        "docker", "run", "--rm", "--name", container, "--env-file", str(env_file),
         "-v", f"{capture_dir}:{CAPTURE}",
-        *env_args,
         agent_image, "bash", "-lc", shell,
     ]
-    timeout = cfg.timeout_seconds if cfg.timeout_seconds and cfg.timeout_seconds > 0 else None
-    subprocess.run(cmd, check=False, timeout=timeout)
+    try:
+        subprocess.run(cmd, check=False, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _docker(["rm", "-f", container], check=False)  # reap the named container, then fail the task
+        raise
+    finally:
+        env_file.unlink(missing_ok=True)
 
     patch_file = capture_dir / "model.patch"
     model_patch = patch_file.read_text(encoding="utf-8") if patch_file.is_file() else ""
@@ -337,11 +355,11 @@ class SweBenchBackend:
         from swebench.harness.test_spec.test_spec import make_test_spec
 
         instance = task.raw
+        layer = _agent_layer(cfg)  # fail fast on an unsupported provider, before any Docker work
         namespace = DEFAULT_NAMESPACE
         spec = make_test_spec(instance, namespace=namespace)
         _ensure_instance_image(spec, namespace=namespace)
 
-        layer = _agent_layer(cfg)
         capture_dir = base.bench_root(cfg) / "swe" / base.slug(task.id)
         lines, native_dir, model_patch = _run_agent(cfg, instance, spec, layer, capture_dir)
 

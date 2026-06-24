@@ -195,11 +195,13 @@ def test_pi_stream_to_session_events(tmp_path):
 
 def test_native_trace_pi_stream(tmp_path):
     cfg = Config(output={"traces_dir": tmp_path / "output"})
+    source = BenchSource(type="harbor", source="S")
     agent_dir = tmp_path / "agent"
     agent_dir.mkdir()
     (agent_dir / "pi.txt").write_text("\n".join(_PI_STREAM_LINES) + "\n", encoding="utf-8")
-    lines, native_dir = hb._native_trace(cfg, agent_dir, "add-bug")
-    assert lines and native_dir == tmp_path / "bench" / "sessions" / "add-bug"
+    lines, native_dir = hb._native_trace(cfg, source, agent_dir, "add-bug")
+    # session dir is namespaced by source so concurrent same-named tasks can't race
+    assert lines and native_dir == tmp_path / "bench" / "sessions" / base.bench_stem(source, "add-bug")
     assert (native_dir / "pi.jsonl").is_file()
     types = {json.loads(line)["type"] for line in lines}
     assert "session" in types and "message" in types
@@ -329,8 +331,11 @@ def test_run_bench_unknown_type_aborts(tmp_path):
 
 def test_run_bench_honors_max_concurrency(tmp_path, monkeypatch):
     import threading
-    import time
 
+    max_workers = 3
+    # A barrier makes "the pool parallelizes up to the cap" deterministic instead of
+    # sleep-timing-dependent: exactly max_workers tasks must be in-flight to release each wave.
+    barrier = threading.Barrier(max_workers, timeout=10)
     state = {"current": 0, "peak": 0}
     lock = threading.Lock()
 
@@ -347,7 +352,10 @@ def test_run_bench_honors_max_concurrency(tmp_path, monkeypatch):
             with lock:
                 state["current"] += 1
                 state["peak"] = max(state["peak"], state["current"])
-            time.sleep(0.05)
+            try:
+                barrier.wait()  # blocks until max_workers are concurrently in-flight
+            except threading.BrokenBarrierError:
+                pass
             with lock:
                 state["current"] -= 1
             return base.BenchRun(native_lines=['{"type":"session"}'], rewards={"reward": 1.0})
@@ -357,8 +365,8 @@ def test_run_bench_honors_max_concurrency(tmp_path, monkeypatch):
         agent={"provider": "pi"},
         bench={"sources": [{"type": "fake", "source": "S"}]},
         output={"traces_dir": tmp_path / "output"},
-        max_concurrency=3,
+        max_concurrency=max_workers,
     )
     written = run_bench(cfg)
     assert len(written) == 6
-    assert 1 < state["peak"] <= 3  # tasks ran concurrently, capped at max_concurrency
+    assert state["peak"] == max_workers  # pool parallelizes exactly up to the cap

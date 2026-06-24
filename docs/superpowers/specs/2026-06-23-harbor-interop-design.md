@@ -1,6 +1,8 @@
 # Harbor interop for teich — design (A′: drive + ingest)
 
-Status: approved-in-principle · Date: 2026-06-23 · Branch: `worktree-harbor-interop` (off `origin/main`)
+> **Superseded** by [`2026-06-24-unify-bench-backends-design.md`](./2026-06-24-unify-bench-backends-design.md). This describes the single-`bench.source` harbor-only flow; the shipped design uses a pluggable `bench.sources` array with harbor + swe-bench backends. Kept for design history — do not treat its config contract as current.
+
+Status: superseded · Date: 2026-06-23 · Branch: `worktree-harbor-interop` (off `origin/main`)
 
 ## Goal
 

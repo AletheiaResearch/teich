@@ -1,6 +1,8 @@
 # Seed-workspace verifiable bug-fix tasks — design
 
-Status: approved · Date: 2026-06-21 · Branch: `worktree-seed-workspace-verifiable-tasks`
+> **Superseded** by [`2026-06-24-unify-bench-backends-design.md`](./2026-06-24-unify-bench-backends-design.md). This standalone seed/verifier feature was not shipped; its idea was folded into the swe-bench bench backend. Kept for design history — do not treat its details as current.
+
+Status: superseded · Date: 2026-06-21 · Branch: `worktree-seed-workspace-verifiable-tasks`
 
 > **Update (2026-06-23):** the "v2" items below — proper `FAIL_TO_PASS`/`PASS_TO_PASS`
 > with a real before/after seed baseline, and `base_commit` (clone a repo/bundle at a

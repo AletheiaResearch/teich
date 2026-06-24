@@ -1,5 +1,7 @@
 # Bench remote source — design
 
+> **Superseded** by [`2026-06-24-unify-bench-backends-design.md`](./2026-06-24-unify-bench-backends-design.md). This uses the single `bench.source`/`repo`/`version` config; the shipped design uses the pluggable `bench.sources` array. Kept for design history — do not treat its config surface as current.
+
 ## Context
 
 `teich generate --mode bench` runs Harbor-format benchmark tasks from `bench.source`.
@@ -56,7 +58,7 @@ bench:
 `_resolve_task_dirs(source)` keeps its current local behavior. A new resolver runs first
 in `run_bench`, before the task loop:
 
-```
+```python
 def _resolve_bench_source(cfg) -> Path:
     src = (cfg.bench.source or "").strip()
     # 1. existing local path -> return as-is (unchanged behavior)

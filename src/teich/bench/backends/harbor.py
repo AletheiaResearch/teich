@@ -53,8 +53,9 @@ def _agent_auth_env(cfg: Config) -> dict[str, str]:
 
     For an OpenRouter project the key is exported under both names because the in-container
     agent picks the var by *agent* type: pi/hermes read ``OPENROUTER_API_KEY`` while
-    codex/claude-code use ``OPENAI_API_KEY`` against the OpenRouter ``base_url``. A plain
-    ``openai`` project only sets ``OPENAI_API_KEY`` (no key leaked under the OpenRouter name).
+    codex/claude-code use ``OPENAI_API_KEY`` against the OpenRouter ``base_url``. An
+    ``anthropic`` project also exports ``ANTHROPIC_API_KEY`` for claude-code; a plain
+    ``openai`` project only sets ``OPENAI_API_KEY`` (no key leaked under another name).
     """
     env: dict[str, str] = {}
     api_key = cfg.get_api_key()
@@ -62,6 +63,8 @@ def _agent_auth_env(cfg: Config) -> dict[str, str]:
         env["OPENAI_API_KEY"] = api_key
         if cfg.api.provider == "openrouter":
             env["OPENROUTER_API_KEY"] = api_key
+        if cfg.api.provider == "anthropic":
+            env["ANTHROPIC_API_KEY"] = api_key
     base_url = cfg.get_base_url()
     if base_url:
         env["OPENAI_BASE_URL"] = base_url
@@ -247,7 +250,9 @@ def _pi_stream_to_session_events(pi_txt: Path) -> list[dict[str, Any]]:
     return events
 
 
-def _native_trace(cfg: Config, agent_dir: Path, task_id: str) -> tuple[list[str], Path | None]:
+def _native_trace(
+    cfg: Config, source: BenchSource, agent_dir: Path, task_id: str
+) -> tuple[list[str], Path | None]:
     """The agent's plain native trace as JSONL lines + an isolated dir (for metadata recovery)."""
     sessions = agent_dir / "sessions"  # codex / claude-code export a native session dir
     if sessions.is_dir() and any(sessions.glob("*.jsonl")):
@@ -262,7 +267,8 @@ def _native_trace(cfg: Config, agent_dir: Path, task_id: str) -> tuple[list[str]
     if pi_txt.is_file():
         events = _pi_stream_to_session_events(pi_txt)
         if events:
-            norm_dir = base.bench_root(cfg) / "sessions" / base.slug(task_id)
+            # Namespace by source so concurrent same-named tasks from different sources can't race.
+            norm_dir = base.bench_root(cfg) / "sessions" / base.bench_stem(source, task_id)
             norm_dir.mkdir(parents=True, exist_ok=True)
             lines = [json.dumps(event, ensure_ascii=False) for event in events]
             (norm_dir / "pi.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -346,7 +352,7 @@ class HarborBackend:
         lines: list[str] = []
         native_dir: Path | None = None
         if agent_dir is not None and agent_dir.exists():
-            lines, native_dir = _native_trace(cfg, agent_dir, task.id)
+            lines, native_dir = _native_trace(cfg, source, agent_dir, task.id)
 
         rewards = _rewards_from_result(result) or _rewards_from_files(
             agent_dir.parent if agent_dir else None

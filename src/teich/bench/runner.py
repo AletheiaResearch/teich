@@ -65,8 +65,12 @@ def run_bench(
         if not pending:
             continue
 
-        def _run(task: BenchTask, src: BenchSource = source) -> tuple[BenchTask, base.BenchRun]:
-            return task, backend.run(cfg, src, task)
+        # Bind src + the bound run method as defaults so the closure doesn't capture the
+        # loop variables by reference (ruff B023).
+        def _run(
+            task: BenchTask, src: BenchSource = source, run=backend.run
+        ) -> tuple[BenchTask, base.BenchRun]:
+            return task, run(cfg, src, task)
 
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = {pool.submit(_run, task): task for task in pending}
