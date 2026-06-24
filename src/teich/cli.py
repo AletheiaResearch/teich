@@ -673,15 +673,15 @@ def generate(
     mode: str = typer.Option(
         "prompts",
         "--mode",
-        help="Generation mode: 'prompts' (default) or 'bench' (run Harbor-format benchmark tasks from bench.source).",
+        help="Generation mode: 'prompts' (default) or 'bench' (run benchmark tasks from bench.sources).",
     ),
     refresh: bool = typer.Option(
         False,
         "--refresh",
-        help="Bench mode: re-download a remote bench.source even if it's already cached.",
+        help="Bench mode: re-download a remote bench source even if it's already cached.",
     ),
 ) -> None:
-    """Generate reward-labeled training traces from prompts (--mode prompts) or Harbor benchmark tasks (--mode bench)."""
+    """Generate agent traces: plain traces from prompts (--mode prompts), or reward-labeled benchmark traces from bench.sources (--mode bench)."""
     console.print(Panel.fit("Teich", style="bold blue"))
 
     if not config.exists():

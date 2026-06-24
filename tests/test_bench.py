@@ -314,7 +314,7 @@ def test_run_bench_resume_skips_and_failure_continues(tmp_path, monkeypatch):
         "t3": base.BenchRun(native_lines=['{"type":"session"}'], rewards={"reward": 1.0}),
     })
     monkeypatch.setattr(bench_runner, "get_backend", lambda t: fake)
-    written = run_bench(_bench_cfg(tmp_path), resume=True)
+    run_bench(_bench_cfg(tmp_path), resume=True)
     assert "t1" not in fake.ran  # skipped via resume
     assert fake.ran == ["t2", "t3"]
     assert (tmp_path / "output" / "passed" / f"{base.bench_stem(s, 't3')}.jsonl").is_file()
