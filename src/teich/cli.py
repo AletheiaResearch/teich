@@ -678,7 +678,7 @@ def generate(
     refresh: bool = typer.Option(
         False,
         "--refresh",
-        help="Bench mode: re-download a remote bench source even if it's already cached.",
+        help="Bench mode (harbor sources only): re-download a remote harbor bench source even if it's already cached. No effect on swe-bench, which uses Hugging Face's own dataset cache.",
     ),
 ) -> None:
     """Generate agent traces: plain traces from prompts (--mode prompts), or reward-labeled benchmark traces from bench.sources (--mode bench)."""
@@ -1249,7 +1249,8 @@ publish:
 # instance, harvests the plain native trace into output/{passed,failed,borderline}/, and
 # writes scores + provenance to output/metadata/<stem>.json. Intermediates live under
 # output.bench_dir (a sibling `bench` dir by default), outside the dataset/uploads.
-# `--resume` skips already-harvested tasks; `--refresh` re-downloads remote sources.
+# `--resume` skips already-harvested tasks; `--refresh` re-downloads remote harbor sources
+# (no effect on swe-bench, which uses Hugging Face's own dataset cache).
 # Keep bench its own project: dedicated output.traces_dir + publish.repo_id.
 bench:
   sources: []
