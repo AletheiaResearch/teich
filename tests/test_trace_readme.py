@@ -339,8 +339,9 @@ def test_readme_is_reward_aware_from_verification_sidecars(tmp_path: Path):
     (verification / "task-b.json").write_text(
         json.dumps({"passed": False, "reward": 0.0}), encoding="utf-8"
     )
-    # A harbor intermediate that must NOT be treated as data or pollute the card.
-    bench_sessions = tmp_path / ".bench" / "sessions" / "add-bug"
+    # A harbor intermediate that must NOT be treated as data or pollute the card (a nested
+    # `bench` dir is excluded by name; by default bench_dir is a sibling, never under output).
+    bench_sessions = tmp_path / "bench" / "sessions" / "add-bug"
     bench_sessions.mkdir(parents=True)
     (bench_sessions / "pi.jsonl").write_text('{"type":"session","id":"x"}\n', encoding="utf-8")
 
@@ -352,7 +353,7 @@ def test_readme_is_reward_aware_from_verification_sidecars(tmp_path: Path):
     assert '- "reward-labeled"' in readme
     assert "Verified tasks: 2 (1 passed / 1 failed)." in readme
     assert "1 of 2 carry an explicit numeric score" in readme  # task-b has reward 0.0
-    assert "Rows: 2" in readme  # the .bench/ session file is excluded from the row count
+    assert "Rows: 2" in readme  # the bench/ session file is excluded from the row count
 
 
 def test_readme_has_no_reward_section_without_verification(tmp_path: Path):

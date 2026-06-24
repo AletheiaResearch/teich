@@ -185,6 +185,9 @@ class OutputConfig(BaseModel):
     traces_dir: Path = Field(default=Path("./output"))
     sandbox_dir: Path = Field(default=Path("./sandbox"))
     failures_dir: Path = Field(default=Path("./failures"))
+    # Harbor bench intermediates (trials/sources/sessions). None -> a sibling ``bench``
+    # dir next to traces_dir, parallel to sandbox/failures (never inside the dataset).
+    bench_dir: Path | None = None
     pretty_name: str = "Agentic Training Traces"
 
 
@@ -339,7 +342,7 @@ class BenchConfig(BaseModel):
     registry dataset spec (``name@version`` for the legacy registry, or
     ``org/name@ref`` for the package registry), or — together with ``repo`` — a
     dataset name resolved from a git/HF registry. Remote specs are downloaded via
-    the `harbor` package into ``output/.bench/sources/`` and then run locally.
+    the `harbor` package into ``<output.bench_dir>/sources/`` and then run locally.
     ``version`` supplies the dataset version when not encoded in ``source``.
     Bench mode drives harbor (optional ``bench`` extra) to run each task in its own
     environment image, then ingests the agent's native session + the task verifier's

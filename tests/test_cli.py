@@ -102,9 +102,10 @@ def test_existing_dataset_modes_classifies_rows(tmp_path: Path):
     (tmp_path / "organic.jsonl").write_text('{"messages": []}\n', encoding="utf-8")
     (tmp_path / "passed").mkdir()
     (tmp_path / "passed" / "routed.jsonl").write_text('{"messages": []}\n', encoding="utf-8")
-    # Intermediates / empties must not count as dataset rows.
-    (tmp_path / ".bench" / "sessions").mkdir(parents=True)
-    (tmp_path / ".bench" / "sessions" / "pi.jsonl").write_text('{"type":"session"}\n', encoding="utf-8")
+    # Intermediates / empties must not count as dataset rows (a nested `bench` dir is excluded
+    # by name; normally bench_dir is a sibling of output and never under traces_dir at all).
+    (tmp_path / "bench" / "sessions").mkdir(parents=True)
+    (tmp_path / "bench" / "sessions" / "pi.jsonl").write_text('{"type":"session"}\n', encoding="utf-8")
     (tmp_path / "empty.jsonl").write_text("", encoding="utf-8")
     assert _existing_dataset_modes(tmp_path) == {"bench", "prompts"}
 
@@ -523,7 +524,7 @@ api:
             folder_path=str(output_dir),
             repo_type="dataset",
             private=True,
-            ignore_patterns=["partials/**", "failures/**", ".bench/**", "README.md", "tools.json"],
+            ignore_patterns=["partials/**", "failures/**", "bench/**", "README.md", "tools.json"],
         )
         mock_api.upload_folder.assert_called_once_with(
             folder_path=str(output_dir),
@@ -531,7 +532,7 @@ api:
             repo_type="dataset",
             commit_message="Upload teich dataset metadata",
             allow_patterns=["README.md"],
-            ignore_patterns=["partials/**", "failures/**", ".bench/**"],
+            ignore_patterns=["partials/**", "failures/**", "bench/**"],
         )
 
 
@@ -679,7 +680,7 @@ api:
             folder_path=str(output_dir),
             repo_type="dataset",
             private=False,
-            ignore_patterns=["partials/**", "failures/**", ".bench/**", "README.md", "tools.json"],
+            ignore_patterns=["partials/**", "failures/**", "bench/**", "README.md", "tools.json"],
         )
         mock_api.upload_folder.assert_called_once_with(
             folder_path=str(output_dir),
@@ -687,7 +688,7 @@ api:
             repo_type="dataset",
             commit_message="Upload teich dataset metadata",
             allow_patterns=["README.md"],
-            ignore_patterns=["partials/**", "failures/**", ".bench/**"],
+            ignore_patterns=["partials/**", "failures/**", "bench/**"],
         )
 
 

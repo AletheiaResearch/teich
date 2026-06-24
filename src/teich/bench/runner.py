@@ -37,10 +37,15 @@ HARBOR_INSTALL_HINT = (
     "`pip install 'teich[bench]'` (requires Python 3.12+)."
 )
 
-# Hidden subdir under the output dir for harbor's raw trial dirs + normalized sessions.
-# Must stay listed in converter.NON_DATA_TRACE_DIR_NAMES so these never leak into the
-# dataset card or a publish.
-BENCH_WORK_DIR = ".bench"
+def _bench_root(cfg: Config) -> Path:
+    """Working dir for harbor's raw trials, downloaded sources, and normalized sessions.
+
+    Defaults to a ``bench`` directory beside ``traces_dir`` (parallel to sandbox/failures,
+    never inside the dataset); overridable via ``output.bench_dir``.
+    """
+    if cfg.output.bench_dir is not None:
+        return Path(cfg.output.bench_dir)
+    return cfg.output.traces_dir.parent / "bench"
 
 # teich agent provider -> harbor AgentName value.
 _PROVIDER_TO_AGENT: dict[str, str] = {
@@ -201,7 +206,7 @@ def _resolve_bench_source(cfg: Config, *, refresh: bool = False) -> Path:
     local = Path(source).expanduser()
     if local.exists():
         return local
-    cache_dir = cfg.output.traces_dir / BENCH_WORK_DIR / "sources" / _bench_source_slug(source, cfg.bench.version)
+    cache_dir = _bench_root(cfg) / "sources" / _bench_source_slug(source, cfg.bench.version)
     root = None if refresh else _task_root(cache_dir)
     if root is None:
         if refresh and cache_dir.exists():
@@ -215,6 +220,23 @@ def _resolve_bench_source(cfg: Config, *, refresh: bool = False) -> Path:
     return root
 
 
+def _bench_model_name(cfg: Config) -> str | None:
+    """Model name for the in-container agent, with harbor's provider prefix when needed.
+
+    harbor's pi agent requires ``<provider>/<model>`` and splits on the first ``/`` to
+    pick the credential env var. A config like ``model: z-ai/glm-5.2`` with
+    ``api.provider: openrouter`` would otherwise be read as provider ``z-ai`` (no key,
+    no call), so we prefix the api provider when it isn't already there.
+    """
+    model = cfg.get_effective_model()
+    if not model:
+        return model
+    api_provider = (cfg.api.provider or "").strip()
+    if cfg.get_agent_provider() == "pi" and api_provider and not model.startswith(f"{api_provider}/"):
+        return f"{api_provider}/{model}"
+    return model
+
+
 def _build_trial_config(cfg: Config, task_dir: Path, trials_dir: Path) -> Any:
     """Build a harbor TrialConfig from teich config (agent provider, model, api auth, backend)."""
     from harbor.models.agent.name import AgentName
@@ -223,7 +245,7 @@ def _build_trial_config(cfg: Config, task_dir: Path, trials_dir: Path) -> Any:
 
     config = TrialConfig(task=TaskConfig(path=task_dir), trials_dir=trials_dir)
     config.agent.name = AgentName(_agent_name_for(cfg.get_agent_provider()))
-    model = cfg.get_effective_model()
+    model = _bench_model_name(cfg)
     if model:
         config.agent.model_name = model
     config.agent.env.update(_agent_auth_env(cfg))
@@ -382,7 +404,7 @@ def _harvest_trace(
     if pi_txt.is_file():
         events = _pi_stream_to_session_events(pi_txt)
         if events:
-            norm_dir = cfg.output.traces_dir / BENCH_WORK_DIR / "sessions" / task_name
+            norm_dir = _bench_root(cfg) / "sessions" / task_name
             norm_dir.mkdir(parents=True, exist_ok=True)
             (norm_dir / "pi.jsonl").write_text(
                 "\n".join(json.dumps(event, ensure_ascii=False) for event in events) + "\n",
@@ -452,7 +474,7 @@ def run_bench(
     if console is not None and source_dir != Path(source).expanduser():
         console.print(f"[blue]bench: resolved {source} -> {source_dir}[/blue]")
     task_dirs = _resolve_task_dirs(source_dir)
-    trials_dir = cfg.output.traces_dir / BENCH_WORK_DIR / "trials"
+    trials_dir = _bench_root(cfg) / "trials"
     trials_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     for task_dir in task_dirs:

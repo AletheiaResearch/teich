@@ -22,10 +22,11 @@ _INLINE_THINKING_BLOCK_PATTERN = re.compile(r"<(think|thinking)>(.*?)</\1>", re.
 # Output subdirectories that hold non-dataset artifacts (partial/failed runs, verifier
 # sidecars, sandbox checkouts, harbor bench intermediates). Dataset scanners, the README
 # builder, and the mode guard skip these so the dataset view stays clean. (Publish keeps
-# its own UPLOAD_IGNORE_PATTERNS in cli.py, which drops partials/failures/.bench but still
-# uploads verifier sidecars as dataset provenance.)
+# its own UPLOAD_IGNORE_PATTERNS in cli.py, which drops partials/failures/bench but still
+# uploads verifier sidecars as dataset provenance.) The bench intermediates normally live
+# in a sibling ``bench`` dir; the name is listed here only to defend a nested override.
 NON_DATA_TRACE_DIR_NAMES = frozenset(
-    {"partials", "failures", "verification", "sandbox", "__pycache__", ".bench"}
+    {"partials", "failures", "verification", "sandbox", "__pycache__", "bench"}
 )
 FIRST_MESSAGE_TIMESTAMP_METADATA_KEY = "first_message_timestamp"
 PI_SYSTEM_PROMPT_CUSTOM_TYPE = "teich-system-prompt"

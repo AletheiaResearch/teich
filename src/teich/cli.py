@@ -177,7 +177,7 @@ pool_app = typer.Typer(
     cls=_help_group("PoolHelpGroup", POOL_EXTRA_HELP),
 )
 app.add_typer(pool_app, name="pool")
-UPLOAD_IGNORE_PATTERNS = ["partials/**", "failures/**", ".bench/**"]
+UPLOAD_IGNORE_PATTERNS = ["partials/**", "failures/**", "bench/**"]
 UPLOAD_METADATA_PATTERNS = ["README.md", "tools.json"]
 
 
@@ -1244,6 +1244,11 @@ output:
   # These files are excluded from resume detection, conversion, README generation, and uploads.
   failures_dir: ./failures
 
+  # Harbor bench-mode intermediates (downloaded sources, raw trials, normalized sessions).
+  # Defaults to a `bench` dir beside traces_dir (parallel to sandbox/failures), never inside
+  # the dataset. Set a path to override.
+  bench_dir: null
+
   # Used in the generated trace README.
   pretty_name: "My Agent Traces"
 
@@ -1277,16 +1282,16 @@ tasks:
 # over Harbor-format tasks: harbor builds each task's image, runs its built-in agent for
 # `agent.provider`, runs the task verifier, and teich ingests the native trace + reward as
 # reward-labeled rows (output/bench-<task>.jsonl + an output/verification/ sidecar).
-# Harbor's raw trial dirs live under output/.bench/ and are excluded from the card/uploads.
-# `--resume` skips tasks already harvested. Bench runs tasks sequentially (max_concurrency
-# does not apply). Keep bench its own project: give it a dedicated output.traces_dir +
-# publish.repo_id so it's a standalone dataset (teich refuses to mix bench and prompts rows
-# in one output dir).
+# Harbor's raw trial dirs live under output.bench_dir (a sibling `bench` dir by default) and
+# never enter the dataset/uploads. `--resume` skips tasks already harvested. Bench runs tasks
+# sequentially (max_concurrency does not apply). Keep bench its own project: give it a
+# dedicated output.traces_dir + publish.repo_id so it's a standalone dataset (teich refuses to
+# mix bench and prompts rows in one output dir).
 #
 # `source` may be: a local task dir / dir of task dirs; a registry spec
 # ('terminal-bench@2.0' or 'org/name@ref'); or a dataset name when `repo` is a git/HF
-# registry URL. Remote sources are downloaded into output/.bench/sources/ and reused on
-# later runs (`--refresh` forces a re-download). HF/private registries may need HF_TOKEN.
+# registry URL. Remote sources are downloaded into <bench_dir>/sources/ and reused on later
+# runs (`--refresh` forces a re-download). HF/private registries may need HF_TOKEN.
 bench:
   source: null                  # local path | name@version | org/name@ref | dataset name (with repo)
   repo: null                    # optional git/HF registry URL; then `source` is a dataset name in it

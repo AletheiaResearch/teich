@@ -81,7 +81,8 @@ def test_resolve_bench_source_downloads_then_reuses(tmp_path, monkeypatch):
     monkeypatch.setattr(bench_runner, "_fetch_remote_source", fake_fetch)
 
     root = bench_runner._resolve_bench_source(cfg)
-    assert root == out / ".bench" / "sources" / "terminal-bench-2.0" / "terminal-bench"
+    # bench intermediates default to a sibling `bench` dir next to traces_dir (out).
+    assert root == out.parent / "bench" / "sources" / "terminal-bench-2.0" / "terminal-bench"
     assert sorted(d.name for d in bench_runner._resolve_task_dirs(root)) == ["task-a", "task-b"]
     assert len(calls) == 1
 
@@ -343,9 +344,9 @@ def test_harvest_trace_pi_stream_produces_rewarded_rows(tmp_path):
     assert rows and rows[0]["reward"] == 1.0 and rows[0]["passed"] is True
     roles = [m["role"] for m in rows[0]["messages"]]
     assert "user" in roles and "assistant" in roles and "tool" in roles
-    # The normalized session file is kept under the hidden output/.bench dir (excluded
-    # from the dataset card / publish) for inspection.
-    assert (tmp_path / "output" / ".bench" / "sessions" / "add-bug" / "pi.jsonl").is_file()
+    # The normalized session file is kept under the sibling `bench` dir (next to output,
+    # excluded from the dataset card / publish) for inspection.
+    assert (tmp_path / "bench" / "sessions" / "add-bug" / "pi.jsonl").is_file()
 
 
 def test_harvest_trace_prefers_native_session_dir(tmp_path):

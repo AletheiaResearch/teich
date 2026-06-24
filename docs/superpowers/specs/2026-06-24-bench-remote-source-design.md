@@ -82,9 +82,9 @@ existing `_resolve_task_dirs` so the rest of the pipeline is unchanged.
 
 ## Caching & lifecycle
 
-- Export into `cfg.output.traces_dir / BENCH_WORK_DIR / "sources" / <slug>` (i.e. under the
-  already-excluded hidden `output/.bench/`), where `<slug>` is derived from the spec
-  (e.g. `terminal-bench@2.0` → `terminal-bench-2.0`).
+- Export into `<bench_dir>/sources/<slug>`, where `bench_dir` defaults to a `bench/` dir
+  beside `traces_dir` (a sibling of the dataset, parallel to sandbox/failures, never inside
+  output) and `<slug>` is derived from the spec (e.g. `terminal-bench@2.0` → `terminal-bench-2.0`).
 - If the cache dir already has resolvable tasks, **reuse it** (no re-download) so runs are
   idempotent and `--resume` doesn't re-fetch.
 - Add a `--refresh` flag to `generate` (passed through to `run_bench`) that forces a
