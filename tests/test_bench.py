@@ -184,96 +184,57 @@ def _write_codex_session(sessions_dir):
     )
 
 
-def test_ingest_session_dir_attaches_reward_and_writes(tmp_path):
-    cfg = Config(output={"traces_dir": tmp_path / "output"})
-    sessions = tmp_path / "logs" / "sessions"
-    _write_codex_session(sessions)
-    reward = {"passed": True, "exit_code": 0, "fail_to_pass": {"t::a": "passed"}}
-    written = bench_runner._ingest_session_dir(cfg, sessions, reward, "widgets-bug-01")
-    assert written == [tmp_path / "output" / "bench-widgets-bug-01.jsonl"]
-    rows = [json.loads(line) for line in written[0].read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert rows and rows[0]["passed"] is True and rows[0]["reward"] == 1.0
-    sidecar = tmp_path / "output" / "verification" / "bench-widgets-bug-01.json"
-    assert json.loads(sidecar.read_text(encoding="utf-8"))["passed"] is True
-
-
-def test_ingest_session_dir_without_reward(tmp_path):
-    cfg = Config(output={"traces_dir": tmp_path / "output"})
-    sessions = tmp_path / "logs" / "sessions"
-    _write_codex_session(sessions)
-    written = bench_runner._ingest_session_dir(cfg, sessions, None, "no-reward")
-    rows = [json.loads(line) for line in written[0].read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert rows and "reward" not in rows[0] and "passed" not in rows[0]
-    assert not (tmp_path / "output" / "verification" / "bench-no-reward.json").exists()
-
-
-def test_ingest_session_dir_empty_returns_nothing(tmp_path):
-    cfg = Config(output={"traces_dir": tmp_path / "output"})
-    empty = tmp_path / "logs" / "sessions"
-    empty.mkdir(parents=True)
-    assert bench_runner._ingest_session_dir(cfg, empty, {"reward": 1.0, "passed": True}, "x") == []
-    assert not (tmp_path / "output" / "bench-x.jsonl").exists()
-
-
 class _FakeResult:
     def __init__(self, verifier_result=None, exception_info=None):
         self.verifier_result = verifier_result
         self.exception_info = exception_info
 
 
-def test_reward_from_result_reads_verifier_rewards():
-    result = _FakeResult(verifier_result={"rewards": {"reward": 1.0}})
-    assert bench_runner._reward_from_result(result) == {"reward": 1.0, "passed": True}
-    zero = _FakeResult(verifier_result={"rewards": {"reward": 0.0}})
-    assert bench_runner._reward_from_result(zero) == {"reward": 0.0, "passed": False}
+class _FakeTrial:
+    def __init__(self, agent_dir):
+        self.paths = type("P", (), {"agent_dir": agent_dir})()
 
 
-def test_reward_from_result_falls_back_and_handles_missing():
-    # No "reward" key -> first numeric value wins.
-    assert bench_runner._reward_from_result(
-        _FakeResult(verifier_result={"rewards": {"score": 0.5}})
-    ) == {"reward": 0.5, "passed": True}
-    # No usable reward -> None (so the caller can fall back to on-disk files).
-    assert bench_runner._reward_from_result(_FakeResult(verifier_result=None)) is None
-    assert bench_runner._reward_from_result(_FakeResult(verifier_result={"rewards": {}})) is None
+def test_rewards_from_result_preserves_full_dict():
+    # The full multi-component rewards dict is kept (no clamping to a single scalar).
+    r = _FakeResult(verifier_result={"rewards": {"reward": 1.0, "sub": 0.5}})
+    assert bench_runner._rewards_from_result(r) == {"reward": 1.0, "sub": 0.5}
+    assert bench_runner._rewards_from_result(_FakeResult(verifier_result=None)) is None
+    assert bench_runner._rewards_from_result(_FakeResult(verifier_result={"rewards": {}})) is None
+    # non-numeric / bool components are dropped; the numeric ones survive.
+    assert bench_runner._rewards_from_result(
+        _FakeResult(verifier_result={"rewards": {"reward": 0.0, "ok": True, "note": "x"}})
+    ) == {"reward": 0.0}
 
 
-def test_reward_from_result_multi_key_precedence():
-    # A "reward" key wins over other numeric components...
-    assert bench_runner._reward_from_result(
-        _FakeResult(verifier_result={"rewards": {"penalty": 1.0, "reward": 0.0}})
-    ) == {"reward": 0.0, "passed": False}
-    # ...otherwise the first numeric value (insertion order) is taken.
-    assert bench_runner._reward_from_result(
-        _FakeResult(verifier_result={"rewards": {"a": 0.0, "b": 0.5}})
-    ) == {"reward": 0.0, "passed": False}
-
-
-def test_reward_from_files_normalizes_each_sidecar_shape(tmp_path):
-    # reward.txt single value
-    txt = tmp_path / "txt"
-    txt.mkdir()
-    (txt / "reward.txt").write_text("1.0\n", encoding="utf-8")
-    assert bench_runner._reward_from_files(txt) == {"reward": 1.0, "passed": True}
-    # rewards.json with the {"rewards": {...}} wrapper
-    wrapped = tmp_path / "wrapped"
+def test_rewards_from_files_dict_and_text(tmp_path):
+    wrapped = tmp_path / "w"
     wrapped.mkdir()
-    (wrapped / "rewards.json").write_text(json.dumps({"rewards": {"reward": 0.0}}), encoding="utf-8")
-    assert bench_runner._reward_from_files(wrapped) == {"reward": 0.0, "passed": False}
-    # reward.json as a flat multi-key map with no "reward" key -> first numeric
-    flat = tmp_path / "flat"
+    (wrapped / "rewards.json").write_text(json.dumps({"rewards": {"reward": 1.0, "sub": 0.5}}), encoding="utf-8")
+    assert bench_runner._rewards_from_files(wrapped) == {"reward": 1.0, "sub": 0.5}
+    flat = tmp_path / "f"
     flat.mkdir()
-    (flat / "reward.json").write_text(json.dumps({"score": 0.5}), encoding="utf-8")
-    assert bench_runner._reward_from_files(flat) == {"reward": 0.5, "passed": True}
+    (flat / "reward.json").write_text(json.dumps({"score": 0.6}), encoding="utf-8")
+    assert bench_runner._rewards_from_files(flat) == {"score": 0.6}
+    txt = tmp_path / "t"
+    txt.mkdir()
+    (txt / "reward.txt").write_text("0.0\n", encoding="utf-8")
+    assert bench_runner._rewards_from_files(txt) == {"reward": 0.0}
+    bad = tmp_path / "b"
+    bad.mkdir()
+    (bad / "reward.txt").write_text("not-a-number\n", encoding="utf-8")
+    assert bench_runner._rewards_from_files(bad) is None
 
 
-def test_reward_parsers_reject_non_numeric(tmp_path):
-    (tmp_path / "reward.txt").write_text("not-a-number\n", encoding="utf-8")
-    assert bench_runner._reward_from_text(tmp_path / "reward.txt") is None
-    (tmp_path / "reward.json").write_text(json.dumps({"reward": True}), encoding="utf-8")  # bool != numeric
-    assert bench_runner._reward_from_sidecar(tmp_path / "reward.json") is None
-    (tmp_path / "empty.json").write_text(json.dumps({}), encoding="utf-8")
-    assert bench_runner._reward_from_sidecar(tmp_path / "empty.json") is None
+def test_primary_score_and_route_split():
+    assert bench_runner._primary_score({"reward": 1.0, "sub": 0.5}) == 1.0  # 'reward' key preferred
+    assert bench_runner._primary_score({"score": 0.6}) == 0.6               # else first numeric
+    assert bench_runner._primary_score(None) is None
+    assert bench_runner._route_split(1.0) == "passed"
+    assert bench_runner._route_split(0.0) == "failed"
+    assert bench_runner._route_split(None) == "failed"      # unscored -> failed
+    assert bench_runner._route_split(0.6) == "borderline"
+    assert bench_runner._route_split(2.0) == "borderline"
 
 
 # A minimal pi `--mode json` stream (as harbor's --no-session pi run emits to pi.txt).
@@ -326,63 +287,83 @@ def test_pi_stream_without_provider_model_omits_model_change(tmp_path):
     assert not any(e["type"] == "model_change" for e in events)
 
 
-class _FakeTrial:
-    def __init__(self, agent_dir):
-        self.paths = type("P", (), {"agent_dir": agent_dir})()
-
-
-def test_harvest_trace_pi_stream_produces_rewarded_rows(tmp_path):
-    cfg = Config(output={"traces_dir": tmp_path / "output"})
+def test_harvest_trace_pi_stream_writes_native_and_metadata(tmp_path):
+    cfg = Config(agent={"provider": "pi"}, output={"traces_dir": tmp_path / "output"})
     agent_dir = tmp_path / "trial" / "agent"
     agent_dir.mkdir(parents=True)
     (agent_dir / "pi.txt").write_text("\n".join(_PI_STREAM_LINES) + "\n", encoding="utf-8")
-    written = bench_runner._harvest_trace(
-        cfg, _FakeTrial(agent_dir), {"reward": 1.0, "passed": True}, "add-bug"
+    paths, split = bench_runner._harvest_trace(
+        cfg, _FakeTrial(agent_dir), {"reward": 1.0, "sub": 0.5}, "add-bug"
     )
-    assert written == [tmp_path / "output" / "bench-add-bug.jsonl"]
-    rows = [json.loads(line) for line in written[0].read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert rows and rows[0]["reward"] == 1.0 and rows[0]["passed"] is True
-    roles = [m["role"] for m in rows[0]["messages"]]
-    assert "user" in roles and "assistant" in roles and "tool" in roles
-    # The normalized session file is kept under the sibling `bench` dir (next to output,
-    # excluded from the dataset card / publish) for inspection.
-    assert (tmp_path / "bench" / "sessions" / "add-bug" / "pi.jsonl").is_file()
+    assert split == "passed"
+    assert paths == [tmp_path / "output" / "passed" / "bench-add-bug.jsonl"]
+    # output is the PLAIN native trace (pi session events), NOT pre-converted training rows.
+    rows = [json.loads(line) for line in paths[0].read_text(encoding="utf-8").splitlines() if line.strip()]
+    types = {row.get("type") for row in rows}
+    assert "session" in types and "message" in types
+    assert all("messages" not in row and "prompt" not in row for row in rows)
+    # per-task metadata sidecar: full rewards dict (no clamping) + recovered trace metadata.
+    meta = json.loads((tmp_path / "output" / "metadata" / "bench-add-bug.json").read_text(encoding="utf-8"))
+    assert meta["split"] == "passed" and meta["reward"] == 1.0
+    assert meta["rewards"] == {"reward": 1.0, "sub": 0.5}
+    assert meta["agent"] == "pi" and meta["model"] == "z-ai/glm-5.2"
+    # the normalized native session is kept under the sibling bench/ dir.
+    assert (tmp_path / "bench" / "sessions" / "add-bug" / "bench-add-bug.jsonl").is_file()
 
 
-def test_harvest_trace_prefers_native_session_dir(tmp_path):
-    cfg = Config(output={"traces_dir": tmp_path / "output"})
+def test_harvest_trace_routes_by_primary_score(tmp_path):
+    cfg = Config(agent={"provider": "pi"}, output={"traces_dir": tmp_path / "output"})
+    for task, rewards, expected in [
+        ("zero", {"reward": 0.0}, "failed"),
+        ("unscored", None, "failed"),
+        ("frac", {"reward": 0.6}, "borderline"),
+    ]:
+        agent_dir = tmp_path / task / "agent"
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "pi.txt").write_text("\n".join(_PI_STREAM_LINES) + "\n", encoding="utf-8")
+        paths, split = bench_runner._harvest_trace(cfg, _FakeTrial(agent_dir), rewards, task)
+        assert split == expected
+        assert paths == [tmp_path / "output" / expected / f"bench-{task}.jsonl"]
+
+
+def test_harvest_trace_native_session_dir(tmp_path):
+    cfg = Config(agent={"provider": "codex"}, output={"traces_dir": tmp_path / "output"})
     agent_dir = tmp_path / "trial" / "agent"
     _write_codex_session(agent_dir / "sessions")
-    written = bench_runner._harvest_trace(
-        cfg, _FakeTrial(agent_dir), {"reward": 0.0, "passed": False}, "codex-task"
-    )
-    rows = [json.loads(line) for line in written[0].read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert rows and rows[0]["reward"] == 0.0 and rows[0]["passed"] is False
+    paths, split = bench_runner._harvest_trace(cfg, _FakeTrial(agent_dir), {"reward": 0.0}, "codex-task")
+    assert split == "failed"
+    rows = [json.loads(line) for line in paths[0].read_text(encoding="utf-8").splitlines() if line.strip()]
+    # native codex events preserved verbatim (not converted to training rows).
+    assert any(row.get("type") in ("session_meta", "response_item") for row in rows)
 
 
 def test_harvest_trace_no_trace_returns_empty(tmp_path):
     cfg = Config(output={"traces_dir": tmp_path / "output"})
     agent_dir = tmp_path / "trial" / "agent"
     agent_dir.mkdir(parents=True)
-    assert bench_runner._harvest_trace(cfg, _FakeTrial(agent_dir), None, "empty") == []
+    assert bench_runner._harvest_trace(cfg, _FakeTrial(agent_dir), None, "empty") == ([], None)
 
 
-def test_bench_output_path_uses_stem(tmp_path):
+def test_bench_existing_output_finds_across_splits(tmp_path):
     cfg = Config(output={"traces_dir": tmp_path / "output"})
-    assert bench_runner._bench_output_path(cfg, "add-bug") == tmp_path / "output" / "bench-add-bug.jsonl"
+    assert bench_runner._bench_existing_output(cfg, "x") is None
+    routed = tmp_path / "output" / "borderline" / "bench-x.jsonl"
+    routed.parent.mkdir(parents=True)
+    routed.write_text("{}\n", encoding="utf-8")
+    assert bench_runner._bench_existing_output(cfg, "x") == routed
 
 
 def test_run_bench_resume_skips_already_harvested(tmp_path):
     pytest.importorskip("harbor")
-    # A task whose output already exists -> resume skips it without invoking harbor.
+    # A task already harvested into a split -> resume skips it without invoking harbor.
     tasks_dir = tmp_path / "tasks"
     task = tasks_dir / "add-bug"
     task.mkdir(parents=True)
     (task / "task.toml").write_text("", encoding="utf-8")
     out = tmp_path / "output"
-    out.mkdir()
-    existing = out / "bench-add-bug.jsonl"
-    existing.write_text('{"messages": [], "reward": 1.0, "passed": true}\n', encoding="utf-8")
+    existing = out / "passed" / "bench-add-bug.jsonl"
+    existing.parent.mkdir(parents=True)
+    existing.write_text('{"type": "session"}\n', encoding="utf-8")
 
     cfg = Config(
         agent={"provider": "pi"},

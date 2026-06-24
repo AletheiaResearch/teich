@@ -362,3 +362,26 @@ def test_readme_has_no_reward_section_without_verification(tmp_path: Path):
     readme = readme_path.read_text(encoding="utf-8")
     assert "## Reward labels" not in readme
     assert "reward-labeled" not in readme
+    # No routing folders -> single train split over everything.
+    assert "- split: train" in readme and 'path: "**/*.jsonl"' in readme
+
+
+def test_card_splits_reflect_routing_folders(tmp_path: Path):
+    for split in ("passed", "failed", "borderline"):
+        (tmp_path / split).mkdir()
+        _write_structured_row(tmp_path / split / f"bench-{split}.jsonl")
+    readme = write_traces_readme(tmp_path, pretty_name="Bench", tags=["agent-traces"]).read_text(encoding="utf-8")
+    for split in ("passed", "failed", "borderline"):
+        assert f"- split: {split}" in readme
+        assert f'path: "{split}/*.jsonl"' in readme
+    assert "split: train" not in readme
+    assert '- "reward-labeled"' in readme  # routed datasets are reward-labeled
+
+
+def test_card_omits_empty_routing_splits(tmp_path: Path):
+    # Only passed/ has files -> only a passed split is declared (no empty failed/borderline).
+    (tmp_path / "passed").mkdir()
+    _write_structured_row(tmp_path / "passed" / "bench-a.jsonl")
+    readme = write_traces_readme(tmp_path, pretty_name="Bench", tags=["x"]).read_text(encoding="utf-8")
+    assert "- split: passed" in readme
+    assert "- split: failed" not in readme and "- split: borderline" not in readme

@@ -27,7 +27,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..converter import convert_traces_to_training_data
-from ..verification import apply_reward_to_row, write_verification_sidecar
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -259,88 +258,81 @@ def _build_trial_config(cfg: Config, task_dir: Path, trials_dir: Path) -> Any:
     return config
 
 
-def _reward_dict_from_value(value: Any) -> dict[str, Any] | None:
-    """Wrap a single numeric reward into our ``{reward, passed}`` shape.
-
-    ``passed`` is ``reward > 0``: any positive score (including partial credit)
-    counts as passed, which is looser than prompts mode, where ``passed`` is the
-    verifier exit code / a full fail-to-pass-pass-to-pass transition.
-    """
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
-        return None
-    return {"reward": float(value), "passed": float(value) > 0}
+BENCH_SPLITS = ("passed", "failed", "borderline")
 
 
-def _reward_from_mapping(data: Any) -> dict[str, Any] | None:
-    """Normalize any of harbor's reward-dict shapes into our ``{reward, passed}``.
+def _numeric(value: Any) -> float | None:
+    """A real number (bools excluded) as float, else None."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return None
 
-    Accepts ``{"reward": <num>}``, the verifier's ``{"rewards": {...}}`` wrapper, or
-    a flat ``{name: <num>}`` map; prefers a ``reward`` key, else the first numeric
-    value. Returns None when no numeric reward is present. Normalizing here keeps
-    every reward source on the same contract, so callers never see a raw harbor
-    dict that lacks a ``reward``/``passed``.
+
+def _rewards_from_mapping(data: Any) -> dict[str, float] | None:
+    """The full dict of numeric scores from harbor (no clamping, every component kept).
+
+    Accepts the verifier's ``{"rewards": {...}}`` wrapper or a flat ``{name: num}``
+    map; returns the numeric scores, or None when there are none.
     """
     if not isinstance(data, dict):
         return None
     rewards = data.get("rewards") if isinstance(data.get("rewards"), dict) else data
-    reward = _reward_dict_from_value(rewards.get("reward"))
-    if reward is not None:
-        return reward
-    for value in rewards.values():
-        reward = _reward_dict_from_value(value)
-        if reward is not None:
-            return reward
-    return None
+    scores = {key: _numeric(val) for key, val in rewards.items() if _numeric(val) is not None}
+    return scores or None
 
 
-def _reward_from_sidecar(reward_path: Path) -> dict[str, Any] | None:
-    """Parse harbor's reward.json/rewards.json sidecar into our ``{reward, passed}``."""
-    try:
-        data = json.loads(reward_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return _reward_from_mapping(data)
-
-
-def _reward_from_text(reward_path: Path) -> dict[str, Any] | None:
-    """Parse harbor's single-value reward.txt into our reward dict."""
-    try:
-        raw = reward_path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    try:
-        value = float(raw)
-    except ValueError:
-        return None
-    return _reward_dict_from_value(value)
-
-
-def _reward_from_result(result: Any) -> dict[str, Any] | None:
-    """Read the reward from harbor's ``TrialResult.verifier_result`` (the canonical source).
-
-    harbor reports ``verifier_result = {"rewards": {"reward": <float>, ...}}``; we
-    take ``reward`` when present, else the first numeric reward value.
-    """
+def _rewards_from_result(result: Any) -> dict[str, float] | None:
+    """Harbor's full rewards dict from ``TrialResult.verifier_result`` (the canonical source)."""
     verifier = getattr(result, "verifier_result", None)
     if isinstance(verifier, dict):
-        return _reward_from_mapping(verifier)
-    return _reward_from_mapping(getattr(verifier, "rewards", None))
+        return _rewards_from_mapping(verifier)
+    return _rewards_from_mapping(getattr(verifier, "rewards", None))
 
 
-def _reward_from_files(base: Path | None) -> dict[str, Any] | None:
-    """Fallback: scan a finished trial dir for harbor's reward sidecar/text file."""
+def _rewards_from_files(base: Path | None) -> dict[str, float] | None:
+    """Fallback: harbor's rewards.json/reward.json (dict) or reward.txt (single value)."""
     if base is None:
         return None
     for name in ("rewards.json", "reward.json"):
-        for reward_path in sorted(base.rglob(name)):
-            reward = _reward_from_sidecar(reward_path)
-            if reward is not None:
-                return reward
-    for reward_path in sorted(base.rglob("reward.txt")):
-        reward = _reward_from_text(reward_path)
-        if reward is not None:
-            return reward
+        for path in sorted(base.rglob(name)):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            scores = _rewards_from_mapping(data)
+            if scores is not None:
+                return scores
+    for path in sorted(base.rglob("reward.txt")):
+        try:
+            value = _numeric(float(path.read_text(encoding="utf-8").strip()))
+        except (OSError, ValueError):
+            continue
+        if value is not None:
+            return {"reward": value}
     return None
+
+
+def _primary_score(rewards: dict[str, float] | None) -> float | None:
+    """The scalar used for routing: the ``reward`` key, else the first numeric value."""
+    if not rewards:
+        return None
+    primary = _numeric(rewards.get("reward"))
+    if primary is not None:
+        return primary
+    for value in rewards.values():
+        primary = _numeric(value)
+        if primary is not None:
+            return primary
+    return None
+
+
+def _route_split(primary: float | None) -> str:
+    """passed = score 1, failed = score 0 or unscored, borderline = any other value."""
+    if primary is None or primary == 0:
+        return "failed"
+    if primary == 1:
+        return "passed"
+    return "borderline"
 
 
 def _agent_dir(trial: Any) -> Path | None:
@@ -388,66 +380,111 @@ def _pi_stream_to_session_events(pi_txt: Path) -> list[dict[str, Any]]:
     return events
 
 
-def _harvest_trace(
-    cfg: Config, trial: Any, reward: dict[str, Any] | None, task_name: str
-) -> list[Path]:
-    """Convert a finished trial's native agent trace to reward-labeled teich rows."""
-    agent_dir = _agent_dir(trial)
-    if agent_dir is None or not agent_dir.exists():
-        return []
-    # codex / claude-code export a native session dir the converter reads directly.
-    sessions = agent_dir / "sessions"
-    if sessions.is_dir() and any(sessions.glob("*.jsonl")):
-        return _ingest_session_dir(cfg, sessions, reward, task_name)
-    # pi runs with --no-session: normalize its --mode json stream into a session file.
-    pi_txt = agent_dir / "pi.txt"
-    if pi_txt.is_file():
-        events = _pi_stream_to_session_events(pi_txt)
-        if events:
-            norm_dir = _bench_root(cfg) / "sessions" / task_name
-            norm_dir.mkdir(parents=True, exist_ok=True)
-            (norm_dir / "pi.jsonl").write_text(
-                "\n".join(json.dumps(event, ensure_ascii=False) for event in events) + "\n",
-                encoding="utf-8",
-            )
-            return _ingest_session_dir(cfg, norm_dir, reward, task_name)
-    # last resort: any *.jsonl the agent left behind.
-    if any(agent_dir.rglob("*.jsonl")):
-        return _ingest_session_dir(cfg, agent_dir, reward, task_name)
-    return []
-
-
 def _bench_stem(task_name: str) -> str:
     """Dataset filename stem for a bench task (``bench-<task>`` -> ``bench-<task>.jsonl``)."""
     return f"bench-{task_name}"
 
 
-def _bench_output_path(cfg: Config, task_name: str) -> Path:
-    return cfg.output.traces_dir / f"{_bench_stem(task_name)}.jsonl"
+def _bench_existing_output(cfg: Config, task_name: str) -> Path | None:
+    """The harvested trace for a task (in any split), or None — used for ``--resume``."""
+    stem = _bench_stem(task_name)
+    for split in BENCH_SPLITS:
+        path = cfg.output.traces_dir / split / f"{stem}.jsonl"
+        if path.is_file() and path.stat().st_size > 0:
+            return path
+    return None
 
 
-def _ingest_session_dir(
+def _native_trace(cfg: Config, agent_dir: Path, task_name: str) -> tuple[list[str], Path | None]:
+    """The agent's plain native trace as JSONL lines + an isolated dir holding them.
+
+    The dir is only used to recover trace metadata via the converter; the lines are
+    written verbatim to the dataset so output stays raw agent-trace data.
+    """
+    sessions = agent_dir / "sessions"  # codex / claude-code export a native session dir
+    if sessions.is_dir() and any(sessions.glob("*.jsonl")):
+        lines = [
+            line
+            for path in sorted(sessions.glob("*.jsonl"))
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        return lines, sessions
+    pi_txt = agent_dir / "pi.txt"  # pi runs --no-session: normalize its --mode json stream
+    if pi_txt.is_file():
+        events = _pi_stream_to_session_events(pi_txt)
+        if events:
+            norm_dir = _bench_root(cfg) / "sessions" / task_name
+            norm_dir.mkdir(parents=True, exist_ok=True)
+            lines = [json.dumps(event, ensure_ascii=False) for event in events]
+            (norm_dir / f"{_bench_stem(task_name)}.jsonl").write_text(
+                "\n".join(lines) + "\n", encoding="utf-8"
+            )
+            return lines, norm_dir
+    jsonls = sorted(agent_dir.rglob("*.jsonl"))  # last resort: anything the agent left
+    if jsonls:
+        lines = [
+            line
+            for path in jsonls
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        return lines, agent_dir
+    return [], None
+
+
+def _trace_metadata(native_dir: Path | None) -> dict[str, Any]:
+    """Metadata teich's converter recovers from the native trace (model, session, cwd, ...)."""
+    if native_dir is None:
+        return {}
+    try:
+        rows = convert_traces_to_training_data(native_dir)
+    except Exception:  # metadata is best-effort; never fail the harvest over it
+        return {}
+    return rows[0].get("metadata", {}) if rows else {}
+
+
+def _harvest_trace(
     cfg: Config,
-    sessions_dir: Path,
-    reward: dict[str, Any] | None,
+    trial: Any,
+    rewards: dict[str, float] | None,
     task_name: str,
-) -> list[Path]:
-    """Convert a native session dir to teich rows, attach reward, and write to output."""
-    rows = convert_traces_to_training_data(sessions_dir)
-    if not rows:
-        return []
-    passed = reward.get("passed") if isinstance(reward, dict) else None
-    reward_value = reward.get("reward") if isinstance(reward, dict) else None
-    for row in rows:
-        apply_reward_to_row(row, passed=passed, reward=reward_value)
-    out_path = _bench_output_path(cfg, task_name)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-    if reward is not None:
-        write_verification_sidecar(cfg.output.traces_dir, _bench_stem(task_name), reward)
-    return [out_path]
+    *,
+    extra: dict[str, Any] | None = None,
+) -> tuple[list[Path], str | None]:
+    """Write the native trace (routed by score) + a per-task metadata sidecar.
+
+    Returns (written paths, split) so the caller can report the routing.
+    """
+    agent_dir = _agent_dir(trial)
+    if agent_dir is None or not agent_dir.exists():
+        return [], None
+    lines, native_dir = _native_trace(cfg, agent_dir, task_name)
+    if not lines:
+        return [], None
+
+    primary = _primary_score(rewards)
+    split = _route_split(primary)
+    stem = _bench_stem(task_name)
+
+    trace_path = cfg.output.traces_dir / split / f"{stem}.jsonl"
+    trace_path.parent.mkdir(parents=True, exist_ok=True)
+    trace_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    metadata: dict[str, Any] = {
+        "task": task_name,
+        "split": split,
+        "reward": primary,
+        "rewards": rewards or {},
+        "agent": cfg.get_agent_provider(),
+        "trace_file": f"{split}/{stem}.jsonl",
+        **(extra or {}),
+        **_trace_metadata(native_dir),
+    }
+    meta_path = cfg.output.traces_dir / "metadata" / f"{stem}.json"
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    meta_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    return [trace_path], split
 
 
 async def _create_and_run(config: Any) -> tuple[Any, Any]:
@@ -478,8 +515,8 @@ def run_bench(
     trials_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     for task_dir in task_dirs:
-        existing = _bench_output_path(cfg, task_dir.name)
-        if resume and existing.is_file() and existing.stat().st_size > 0:
+        existing = _bench_existing_output(cfg, task_dir.name)
+        if resume and existing is not None:
             if console is not None:
                 console.print(f"[yellow]bench: skipping {task_dir.name} (already harvested)[/yellow]")
             written.append(existing)
@@ -496,22 +533,27 @@ def run_bench(
                 console.print(f"[red]bench: {task_dir.name}: failed ({type(exc).__name__}: {exc})[/red]")
             continue
         exc_info = getattr(result, "exception_info", None)
-        if console is not None and exc_info:
-            exc_type = (
+        exception: str | None = None
+        if exc_info:
+            exception = (
                 exc_info.get("exception_type") if isinstance(exc_info, dict)
                 else getattr(exc_info, "exception_type", None)
             ) or "agent error"
-            console.print(f"[yellow]bench: {task_dir.name}: agent did not finish cleanly ({exc_type})[/yellow]")
-        reward = _reward_from_result(result) or _reward_from_files(
+            if console is not None:
+                console.print(f"[yellow]bench: {task_dir.name}: agent did not finish cleanly ({exception})[/yellow]")
+        rewards = _rewards_from_result(result) or _rewards_from_files(
             _agent_dir(trial).parent if _agent_dir(trial) else None
         )
-        paths = _harvest_trace(cfg, trial, reward, task_dir.name)
+        paths, split = _harvest_trace(
+            cfg, trial, rewards, task_dir.name, extra={"exception": exception}
+        )
         if not paths:
             if console is not None:
                 console.print(f"[yellow]bench: no trace harvested for {task_dir.name}[/yellow]")
             continue
         if console is not None:
-            label = f"reward={reward.get('reward'):g}" if reward else "no reward"
-            console.print(f"[green]bench: {task_dir.name}: wrote {len(paths)} file(s) ({label})[/green]")
+            primary = _primary_score(rewards)
+            score = f"reward={primary:g}" if primary is not None else "unscored"
+            console.print(f"[green]bench: {task_dir.name}: {split} ({score})[/green]")
         written.extend(paths)
     return written
