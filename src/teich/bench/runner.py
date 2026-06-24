@@ -19,6 +19,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
+import shutil
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -98,20 +101,118 @@ def _agent_auth_env(cfg: Config) -> dict[str, str]:
     return env
 
 
-def _resolve_task_dirs(source: str) -> list[Path]:
-    """Resolve bench.source to one or more Harbor task directories (local only for now)."""
+def _resolve_task_dirs(source: str | Path) -> list[Path]:
+    """Resolve a local Harbor task root to one or more task directories.
+
+    Accepts a single-task dir (has ``task.toml``) or a dir of task dirs. Remote
+    specs are turned into a local dir by ``_resolve_bench_source`` before this runs.
+    """
     path = Path(source).expanduser()
     if not path.exists():
-        raise RuntimeError(
-            f"bench.source not found: {source}. "
-            "Local task directories are supported; git/HF sources are not wired yet."
-        )
+        raise RuntimeError(f"bench task directory not found: {path}.")
     if (path / "task.toml").is_file():
         return [path]
     tasks = sorted(d for d in path.iterdir() if d.is_dir() and (d / "task.toml").is_file())
     if not tasks:
-        raise RuntimeError(f"No Harbor tasks (a task.toml) found under {source}.")
+        raise RuntimeError(f"No Harbor tasks (a task.toml) found under {path}.")
     return tasks
+
+
+def _classify_remote_source(source: str, repo: str | None, version: str | None) -> tuple[str, str]:
+    """Map a remote ``bench.source`` to (client kind, harbor dataset ref).
+
+    Mirrors harbor's ``download`` resolution: an explicit ``repo`` (git/HF registry)
+    wins, else ``org/name`` is a package-registry dataset, else a legacy-registry name.
+    A version already encoded in ``source`` as ``name@version`` takes precedence over
+    the ``bench.version`` field.
+    """
+    has_version = "@" in source
+    name = source.split("@", 1)[0]
+
+    def _ref(default_version: str | None = None) -> str:
+        if has_version:
+            return source
+        if version:
+            return f"{source}@{version}"
+        return f"{source}@{default_version}" if default_version else source
+
+    if repo:
+        return "repo", _ref()
+    if "/" in name:
+        return "package", _ref(default_version="latest")
+    return "registry", _ref()
+
+
+def _bench_source_slug(source: str, version: str | None) -> str:
+    """Filesystem-safe cache slug for a remote spec (e.g. ``terminal-bench@2.0`` -> ``terminal-bench-2.0``)."""
+    raw = source if "@" in source else (f"{source}@{version}" if version else source)
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", raw).strip("-") or "source"
+
+
+def _task_root(cache_dir: Path) -> Path | None:
+    """The local dir to hand to ``_resolve_task_dirs`` for a downloaded source.
+
+    harbor exports tasks as ``<cache>/<dataset>/<task>/task.toml``; return the common
+    parent of every ``task.toml`` (the dataset dir, or the single task dir). None if empty.
+    """
+    parents = sorted({toml.parent for toml in cache_dir.rglob("task.toml")})
+    if not parents:
+        return None
+    if len(parents) == 1:
+        return parents[0]
+    return Path(os.path.commonpath([str(p) for p in parents]))
+
+
+async def _download_remote_source_async(cfg: Config, cache_dir: Path) -> None:
+    """Download a remote ``bench.source`` into ``cache_dir`` via harbor's registry client."""
+    kind, ref = _classify_remote_source(
+        (cfg.bench.source or "").strip(), cfg.bench.repo, cfg.bench.version
+    )
+    if kind == "repo":
+        from harbor.registry.client.factory import RegistryClientFactory
+
+        client = RegistryClientFactory.create(repo=cfg.bench.repo)
+    elif kind == "package":
+        from harbor.registry.client.package import PackageDatasetClient
+
+        client = PackageDatasetClient()
+    else:
+        from harbor.registry.client.factory import RegistryClientFactory
+
+        client = RegistryClientFactory.create()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    await client.download_dataset(ref, overwrite=True, output_dir=cache_dir, export=True)
+
+
+def _fetch_remote_source(cfg: Config, cache_dir: Path) -> None:
+    """Sync wrapper around the async harbor download (its own asyncio.run)."""
+    try:
+        asyncio.run(_download_remote_source_async(cfg, cache_dir))
+    except Exception as exc:  # network / unknown dataset / auth -> a clean bench error
+        raise RuntimeError(
+            f"Failed to download bench.source {cfg.bench.source!r}: {type(exc).__name__}: {exc}. "
+            "Check the spec/version, network, and (for HF/private registries) HF_TOKEN."
+        ) from exc
+
+
+def _resolve_bench_source(cfg: Config, *, refresh: bool = False) -> Path:
+    """Return a local task root for ``bench.source``: a local path as-is, else download it."""
+    source = (cfg.bench.source or "").strip()
+    local = Path(source).expanduser()
+    if local.exists():
+        return local
+    cache_dir = cfg.output.traces_dir / BENCH_WORK_DIR / "sources" / _bench_source_slug(source, cfg.bench.version)
+    root = None if refresh else _task_root(cache_dir)
+    if root is None:
+        if refresh and cache_dir.exists():
+            shutil.rmtree(cache_dir, ignore_errors=True)
+        _fetch_remote_source(cfg, cache_dir)
+        root = _task_root(cache_dir)
+    if root is None:
+        raise RuntimeError(
+            f"bench.source {source!r}: no Harbor tasks found after downloading into {cache_dir}."
+        )
+    return root
 
 
 def _build_trial_config(cfg: Config, task_dir: Path, trials_dir: Path) -> Any:
@@ -335,17 +436,22 @@ async def _create_and_run(config: Any) -> tuple[Any, Any]:
     return trial, result
 
 
-def run_bench(cfg: Config, *, console: Any = None, resume: bool = False) -> list[Path]:
+def run_bench(
+    cfg: Config, *, console: Any = None, resume: bool = False, refresh: bool = False
+) -> list[Path]:
     """Run benchmark tasks from ``cfg.bench.source`` and write reward-labeled traces."""
     source = (cfg.bench.source or "").strip()
     if not source:
         raise RuntimeError(
-            "--mode bench requires bench.source in config "
-            "(a local Harbor task directory, or a directory of task dirs; "
-            "git/HF sources are planned but not yet wired)."
+            "--mode bench requires bench.source in config (a local Harbor task directory or "
+            "dir of task dirs, a registry spec like 'terminal-bench@2.0' or 'org/name@ref', "
+            "or a git/HF registry via bench.repo)."
         )
     _require_harbor()
-    task_dirs = _resolve_task_dirs(source)
+    source_dir = _resolve_bench_source(cfg, refresh=refresh)
+    if console is not None and source_dir != Path(source).expanduser():
+        console.print(f"[blue]bench: resolved {source} -> {source_dir}[/blue]")
+    task_dirs = _resolve_task_dirs(source_dir)
     trials_dir = cfg.output.traces_dir / BENCH_WORK_DIR / "trials"
     trials_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []

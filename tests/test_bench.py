@@ -17,15 +17,87 @@ from teich.config import Config
 def test_bench_config_defaults():
     bench = Config().bench
     assert bench.source is None
+    assert bench.repo is None
+    assert bench.version is None
     assert bench.backend == "docker"
 
 
 def test_bench_config_from_yaml(tmp_path):
     config_file = tmp_path / "config.yaml"
-    config_file.write_text("bench:\n  source: ./tasks\n  backend: docker\n", encoding="utf-8")
+    config_file.write_text(
+        "bench:\n  source: org/set\n  repo: https://github.com/o/r\n  version: '2.0'\n  backend: docker\n",
+        encoding="utf-8",
+    )
     cfg = Config.from_yaml(config_file)
-    assert cfg.bench.source == "./tasks"
+    assert cfg.bench.source == "org/set"
+    assert cfg.bench.repo == "https://github.com/o/r"
+    assert cfg.bench.version == "2.0"
     assert cfg.bench.backend == "docker"
+
+
+def test_classify_remote_source():
+    c = bench_runner._classify_remote_source
+    assert c("terminal-bench@2.0", None, None) == ("registry", "terminal-bench@2.0")
+    assert c("terminal-bench", None, "2.0") == ("registry", "terminal-bench@2.0")
+    assert c("terminal-bench", None, None) == ("registry", "terminal-bench")
+    assert c("org/name", None, None) == ("package", "org/name@latest")
+    assert c("org/name@ref", None, None) == ("package", "org/name@ref")
+    assert c("dataset", "https://github.com/o/r", None) == ("repo", "dataset")
+    # version encoded in source wins over the version field
+    assert c("terminal-bench@2.0", None, "9.9") == ("registry", "terminal-bench@2.0")
+
+
+def test_bench_source_slug():
+    assert bench_runner._bench_source_slug("terminal-bench@2.0", None) == "terminal-bench-2.0"
+    assert bench_runner._bench_source_slug("org/name@ref", None) == "org-name-ref"
+    assert bench_runner._bench_source_slug("terminal-bench", "2.0") == "terminal-bench-2.0"
+
+
+def test_resolve_bench_source_local_passthrough(tmp_path, monkeypatch):
+    # An existing local path is returned as-is and never triggers a download.
+    local = tmp_path / "tasks"
+    local.mkdir()
+    monkeypatch.setattr(
+        bench_runner, "_fetch_remote_source",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not download a local source")),
+    )
+    cfg = Config(bench={"source": str(local)}, output={"traces_dir": tmp_path / "out"})
+    assert bench_runner._resolve_bench_source(cfg) == local
+
+
+def test_resolve_bench_source_downloads_then_reuses(tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    cfg = Config(bench={"source": "terminal-bench@2.0"}, output={"traces_dir": out})
+    calls = []
+
+    def fake_fetch(cfg_arg, cache_dir):
+        calls.append(cache_dir)
+        # mimic harbor's export layout: <cache>/<dataset>/<task>/task.toml
+        for task in ("task-a", "task-b"):
+            d = cache_dir / "terminal-bench" / task
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "task.toml").write_text("version='1.0'\n", encoding="utf-8")
+
+    monkeypatch.setattr(bench_runner, "_fetch_remote_source", fake_fetch)
+
+    root = bench_runner._resolve_bench_source(cfg)
+    assert root == out / ".bench" / "sources" / "terminal-bench-2.0" / "terminal-bench"
+    assert sorted(d.name for d in bench_runner._resolve_task_dirs(root)) == ["task-a", "task-b"]
+    assert len(calls) == 1
+
+    # Second call reuses the cache (no re-download)...
+    bench_runner._resolve_bench_source(cfg)
+    assert len(calls) == 1
+    # ...but --refresh forces a re-download.
+    bench_runner._resolve_bench_source(cfg, refresh=True)
+    assert len(calls) == 2
+
+
+def test_resolve_bench_source_errors_when_download_yields_no_tasks(tmp_path, monkeypatch):
+    cfg = Config(bench={"source": "bogus@1.0"}, output={"traces_dir": tmp_path / "out"})
+    monkeypatch.setattr(bench_runner, "_fetch_remote_source", lambda *a, **k: None)  # writes nothing
+    with pytest.raises(RuntimeError, match="no Harbor tasks found"):
+        bench_runner._resolve_bench_source(cfg)
 
 
 def test_run_bench_requires_source():

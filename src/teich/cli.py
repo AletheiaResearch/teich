@@ -675,6 +675,11 @@ def generate(
         "--mode",
         help="Generation mode: 'prompts' (default) or 'bench' (run Harbor-format benchmark tasks from bench.source).",
     ),
+    refresh: bool = typer.Option(
+        False,
+        "--refresh",
+        help="Bench mode: re-download a remote bench.source even if it's already cached.",
+    ),
 ) -> None:
     """Generate reward-labeled training traces from prompts (--mode prompts) or Harbor benchmark tasks (--mode bench)."""
     console.print(Panel.fit("Teich", style="bold blue"))
@@ -709,7 +714,7 @@ def generate(
         from .bench import run_bench  # lazy: harbor is an optional extra
 
         try:
-            written = run_bench(cfg, console=console, resume=resume)
+            written = run_bench(cfg, console=console, resume=resume, refresh=refresh)
         except RuntimeError as exc:
             console.print(f"[red]{exc}[/red]")
             raise typer.Exit(1) from exc
@@ -1277,8 +1282,15 @@ tasks:
 # does not apply). Keep bench its own project: give it a dedicated output.traces_dir +
 # publish.repo_id so it's a standalone dataset (teich refuses to mix bench and prompts rows
 # in one output dir).
+#
+# `source` may be: a local task dir / dir of task dirs; a registry spec
+# ('terminal-bench@2.0' or 'org/name@ref'); or a dataset name when `repo` is a git/HF
+# registry URL. Remote sources are downloaded into output/.bench/sources/ and reused on
+# later runs (`--refresh` forces a re-download). HF/private registries may need HF_TOKEN.
 bench:
-  source: null                  # local Harbor task dir, or a dir of task dirs (git/HF: TBD)
+  source: null                  # local path | name@version | org/name@ref | dataset name (with repo)
+  repo: null                    # optional git/HF registry URL; then `source` is a dataset name in it
+  version: null                 # optional dataset version (or encode it in source as name@version)
   backend: docker               # harbor environment backend
 
 # Number of prompts to run in parallel.

@@ -198,8 +198,15 @@ tasks:
 # does not apply). Keep bench its own project: give it a dedicated output.traces_dir +
 # publish.repo_id so it's a standalone dataset (teich refuses to mix bench and prompts rows
 # in one output dir).
+#
+# `source` may be: a local task dir / dir of task dirs; a registry spec
+# ('terminal-bench@2.0' or 'org/name@ref'); or a dataset name when `repo` is a git/HF
+# registry URL. Remote sources are downloaded into output/.bench/sources/ and reused on
+# later runs (`--refresh` forces a re-download). HF/private registries may need HF_TOKEN.
 bench:
-  source: null                  # local Harbor task dir, or a dir of task dirs (git/HF: TBD)
+  source: null                  # local path | name@version | org/name@ref | dataset name (with repo)
+  repo: null                    # optional git/HF registry URL; then `source` is a dataset name in it
+  version: null                 # optional dataset version (or encode it in source as name@version)
   backend: docker               # harbor environment backend
 
 # Number of prompts to run in parallel.
