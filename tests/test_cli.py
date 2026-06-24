@@ -61,10 +61,10 @@ def test_generate_rejects_unknown_mode(tmp_path: Path):
 
 def test_generate_bench_mode_requires_source(tmp_path: Path):
     config_file = tmp_path / "config.yaml"
-    config_file.write_text("agent:\n  provider: codex\n", encoding="utf-8")  # no bench.source
+    config_file.write_text("agent:\n  provider: codex\n", encoding="utf-8")  # no bench.sources
     result = runner.invoke(app, ["generate", "-c", str(config_file), "--mode", "bench"])
     assert result.exit_code == 1
-    assert "bench.source" in result.output
+    assert "bench.sources" in result.output
 
 
 def test_generate_bench_refuses_to_mix_with_prompts_output(tmp_path: Path):
@@ -73,7 +73,7 @@ def test_generate_bench_refuses_to_mix_with_prompts_output(tmp_path: Path):
     (output / "some-trace.jsonl").write_text('{"messages": []}\n', encoding="utf-8")  # prompts data
     config_file = tmp_path / "config.yaml"
     config_file.write_text(
-        f"agent:\n  provider: pi\nbench:\n  source: {tmp_path}/tasks\noutput:\n  traces_dir: {output}\n",
+        f"agent:\n  provider: pi\nbench:\n  sources:\n    - {{type: harbor, source: {tmp_path}/tasks}}\noutput:\n  traces_dir: {output}\n",
         encoding="utf-8",
     )
     result = runner.invoke(app, ["generate", "-c", str(config_file), "--mode", "bench"])

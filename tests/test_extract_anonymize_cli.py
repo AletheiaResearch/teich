@@ -1524,7 +1524,7 @@ def test_extract_can_upload_staged_anonymized_output_to_huggingface(tmp_path: Pa
     )
     readme = (output_dir / "README.md").read_text(encoding="utf-8")
     assert "armand0e/fable-traces" in readme
-    assert 'path: "**/*.jsonl"' in readme
+    assert 'path: "*.jsonl"' in readme  # top-level glob (excludes non-data subdirs)
     assert '- "codex"' in readme
     assert '- "pi"' not in readme
     assert '- "fable-5"' not in readme

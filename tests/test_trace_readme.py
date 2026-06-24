@@ -354,6 +354,11 @@ def test_readme_is_reward_aware_from_verification_sidecars(tmp_path: Path):
     assert "Verified tasks: 2 (1 passed / 1 failed)." in readme
     assert "1 of 2 carry an explicit numeric score" in readme  # task-b has reward 0.0
     assert "Rows: 2" in readme  # the bench/ session file is excluded from the row count
+    # The train split is a top-level glob that excludes the nested bench/ session.
+    assert "- split: train" in readme
+    assert 'path: "*.jsonl"' in readme
+    assert "**/*.jsonl" not in readme  # top-level glob, not recursive
+    assert "bench/sessions/add-bug/pi.jsonl" not in readme
 
 
 def test_readme_has_no_reward_section_without_verification(tmp_path: Path):
@@ -362,8 +367,9 @@ def test_readme_has_no_reward_section_without_verification(tmp_path: Path):
     readme = readme_path.read_text(encoding="utf-8")
     assert "## Reward labels" not in readme
     assert "reward-labeled" not in readme
-    # No routing folders -> single train split over everything.
-    assert "- split: train" in readme and 'path: "**/*.jsonl"' in readme
+    # No routing folders -> single top-level train glob (not the recursive **/*.jsonl).
+    assert "- split: train" in readme and 'path: "*.jsonl"' in readme
+    assert "**/*.jsonl" not in readme
 
 
 def test_card_splits_reflect_routing_folders(tmp_path: Path):

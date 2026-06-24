@@ -77,6 +77,16 @@ def test_bench_stem_namespaced_by_source():
     )
 
 
+def test_source_id_distinguishes_by_knobs():
+    # Same `source` but a differing knob (split) must yield distinct ids/stems so the two
+    # sources can't overwrite each other or wrongly resume-skip; the plain case is unchanged.
+    a = BenchSource(type="swe-bench", source="ds", split="train")
+    b = BenchSource(type="swe-bench", source="ds", split="test")
+    assert base.source_id(a) != base.source_id(b)
+    assert base.bench_stem(a, "t") != base.bench_stem(b, "t")
+    assert base.source_id(BenchSource(type="swe-bench", source="ds")) == "ds"
+
+
 def test_existing_output_across_splits(tmp_path):
     cfg = Config(output={"traces_dir": tmp_path / "output"})
     assert base.existing_output(cfg, "bench-x") is None
@@ -91,6 +101,14 @@ def test_bench_root_sibling_of_output(tmp_path):
     assert base.bench_root(cfg) == tmp_path / "bench"
     cfg2 = Config(output={"traces_dir": tmp_path / "out", "bench_dir": tmp_path / "custom"})
     assert base.bench_root(cfg2) == tmp_path / "custom"
+
+
+def test_bench_root_rejects_in_tree_bench_dir(tmp_path):
+    # A bench_dir inside traces_dir would get uploaded + misclassified as dataset rows.
+    with pytest.raises(RuntimeError, match="must be outside"):
+        base.bench_root(Config(output={"traces_dir": tmp_path / "out", "bench_dir": tmp_path / "out" / "bench"}))
+    with pytest.raises(RuntimeError, match="must be outside"):
+        base.bench_root(Config(output={"traces_dir": tmp_path / "out", "bench_dir": tmp_path / "out"}))
 
 
 # ------------------------------------------------------------------- base: harvest

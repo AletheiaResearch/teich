@@ -18,7 +18,9 @@ from teich.bench.backends.swebench import (
     _agent_layer,
     _auth_env,
     _load_instances,
+    _model_name,
     _rewards_from_report,
+    _run_command,
     render_agent_dockerfile,
 )
 from teich.config import BenchSource, Config
@@ -158,6 +160,49 @@ def test_auth_env_anthropic_sets_anthropic_key_only():
     assert env["ANTHROPIC_API_KEY"] == "sk-ant"
     assert "OPENAI_API_KEY" not in env
     assert "OPENROUTER_API_KEY" not in env
+
+
+# --------------------------------------------------------------------------- run command (model)
+
+
+def test_run_command_pins_configured_model():
+    cfg = Config(agent={"provider": "codex"}, model={"model": "gpt-5-codex"},
+                 api={"provider": "openai", "api_key": "sk"})
+    assert _run_command(cfg, _agent_layer(cfg)).endswith("--model gpt-5-codex")
+
+
+def test_run_command_pi_prefixes_provider():
+    cfg = Config(agent={"provider": "pi"}, model={"model": "z-ai/glm-5.2"},
+                 api={"provider": "openrouter"})
+    assert _run_command(cfg, _agent_layer(cfg)).endswith("--model openrouter/z-ai/glm-5.2")
+
+
+def test_run_command_no_model_is_unchanged():
+    # model.model defaults to a non-empty value, so the no-flag path needs an explicit empty model.
+    cfg = Config(agent={"provider": "codex"}, model={"model": ""})
+    layer = _agent_layer(cfg)
+    assert _model_name(cfg) == ""
+    assert _run_command(cfg, layer) == layer.run
+
+
+def test_ensure_instance_image_pull_bounds_timeout(monkeypatch):
+    # The remote-image pull must be bounded by the run timeout, not block forever.
+    import teich.bench.backends.swebench as mod
+
+    calls = []
+
+    class _CP:
+        stdout = ""  # empty -> the image isn't present locally -> take the pull path
+
+    def fake_docker(args, *, timeout=None, check=True):
+        calls.append((args, timeout))
+        return _CP()
+
+    monkeypatch.setattr(mod, "_docker", fake_docker)
+    spec = types.SimpleNamespace(instance_image_key="swebench/x:latest")
+    mod._ensure_instance_image(spec, namespace="swebench", timeout=42)
+    pull_timeout = next(t for a, t in calls if a[0] == "pull")
+    assert pull_timeout == 42
 
 
 # --------------------------------------------------------------------------- dockerfile render

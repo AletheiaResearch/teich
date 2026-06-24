@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -61,6 +63,9 @@ class AgentLayer:
     ``run`` is the in-container command; it reads the task prompt from ``CAPTURE/prompt.txt``
     and runs non-interactively in ``/testbed``. ``env`` points the agent's session/home at
     ``CAPTURE`` so the native trace lands on the mounted host dir; ``session_glob`` finds it.
+    ``model_flag`` is the CLI flag used to pin teich's configured model (all current agents
+    use ``--model``); ``_run_command`` appends ``<model_flag> <model>`` so the container runs
+    teich's model rather than each CLI's own default.
     """
 
     provider: str
@@ -69,6 +74,7 @@ class AgentLayer:
     env: dict[str, str] = field(default_factory=dict)
     session_glob: str = "**/*.jsonl"
     run: str = ""
+    model_flag: str = "--model"
 
 
 _PROMPT = f"$(cat {CAPTURE}/prompt.txt)"
@@ -116,6 +122,30 @@ def _agent_layer(cfg: Config) -> AgentLayer:
             f"use one of: {', '.join(sorted(_LAYERS))}."
         )
     return layer
+
+
+def _model_name(cfg: Config) -> str:
+    """Model for the in-container agent, with the pi ``<provider>/<model>`` prefix when needed.
+
+    Mirrors the harbor backend's prefix rule: pi splits ``<provider>/<model>`` to pick the
+    credential env var, so ``model: z-ai/glm-5.2`` + ``api.provider: openrouter`` becomes
+    ``openrouter/z-ai/glm-5.2``.
+    """
+    model = cfg.get_effective_model().strip()
+    if not model:
+        return model
+    api_provider = (cfg.api.provider or "").strip()
+    if cfg.get_agent_provider() == "pi" and api_provider and not model.startswith(f"{api_provider}/"):
+        return f"{api_provider}/{model}"
+    return model
+
+
+def _run_command(cfg: Config, layer: AgentLayer) -> str:
+    """The agent's in-container command, with teich's configured model pinned when set."""
+    model = _model_name(cfg)
+    if not model:
+        return layer.run
+    return f"{layer.run} {layer.model_flag} {shlex.quote(model)}"
 
 
 def _auth_env(cfg: Config) -> dict[str, str]:
@@ -213,13 +243,13 @@ def _docker(args: list[str], *, timeout: int | None = None, check: bool = True) 
     )
 
 
-def _ensure_instance_image(spec: Any, *, namespace: str | None) -> None:
+def _ensure_instance_image(spec: Any, *, namespace: str | None, timeout: int | None = None) -> None:
     """Make the swebench instance image available locally (pull remote, else build)."""
     image = spec.instance_image_key
     if _docker(["images", "-q", image], check=False).stdout.strip():
         return
     if namespace:  # remote (published) image -> pull it
-        _docker(["pull", image])
+        _docker(["pull", image], timeout=timeout)
         return
     import docker  # local build path
     from swebench.harness.docker_build import build_instance_images
@@ -260,6 +290,11 @@ def _run_agent(
     layer: AgentLayer, capture_dir: Path,
 ) -> tuple[list[str], Path | None, str]:
     """Build the agent layer, run the agent on the problem, return (trace, dir, model_patch)."""
+    # Reset the per-task capture dir: it's a stable path (keyed by source+task.id), so a rerun
+    # that aborts before writing a fresh session/model.patch would otherwise harvest and grade
+    # the previous attempt's stale artifacts.
+    if capture_dir.exists():
+        shutil.rmtree(capture_dir)
     capture_dir.mkdir(parents=True, exist_ok=True)
     (capture_dir / "prompt.txt").write_text(instance.get("problem_statement") or "", encoding="utf-8")
 
@@ -286,8 +321,9 @@ def _run_agent(
 
     container = f"teich-swe-{key}"
     capture = f"{CAPTURE}/model.patch"
+    run = _run_command(cfg, layer)
     shell = (
-        f"cd {TESTBED} && ({layer.run} || true) && git -C {TESTBED} add -A && "
+        f"cd {TESTBED} && ({run} || true) && git -C {TESTBED} add -A && "
         f"git -C {TESTBED} diff --cached --no-color > {capture} 2>/dev/null || true"
     )
     cmd = [
@@ -331,12 +367,15 @@ def _grade(cfg: Config, instance: dict[str, Any], spec: Any, model_patch: str) -
         "model_patch": model_patch,
     }
     timeout = cfg.timeout_seconds if cfg.timeout_seconds and cfg.timeout_seconds > 0 else None
+    report_path = (
+        Path(RUN_EVALUATION_LOG_DIR) / run_id / model_name / instance_id / "report.json"
+    )
+    # run_id is deterministic, so drop any prior report first: if this rerun fails before
+    # writing a fresh one, we must not grade off a stale verdict from a previous attempt.
+    report_path.unlink(missing_ok=True)
     run_instance(
         spec, prediction, rm_image=False, force_rebuild=False,
         client=docker.from_env(), run_id=run_id, timeout=timeout,
-    )
-    report_path = (
-        Path(RUN_EVALUATION_LOG_DIR) / run_id / model_name / instance_id / "report.json"
     )
     if not report_path.is_file():
         return {"resolved": False, "patch_successfully_applied": bool(model_patch)}
@@ -385,7 +424,8 @@ class SweBenchBackend:
         layer = _agent_layer(cfg)  # fail fast on an unsupported provider, before any Docker work
         namespace = DEFAULT_NAMESPACE
         spec = make_test_spec(instance, namespace=namespace)
-        _ensure_instance_image(spec, namespace=namespace)
+        timeout = cfg.timeout_seconds if cfg.timeout_seconds and cfg.timeout_seconds > 0 else None
+        _ensure_instance_image(spec, namespace=namespace, timeout=timeout)
 
         capture_dir = base.bench_root(cfg) / "swe" / base.bench_stem(source, task.id)
         lines, native_dir, model_patch = _run_agent(cfg, source, instance, spec, layer, capture_dir)

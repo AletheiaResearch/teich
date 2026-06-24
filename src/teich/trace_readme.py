@@ -185,14 +185,16 @@ def _split_data_files(traces_dir: Path) -> list[tuple[str, str]]:
     """Dataset-card split -> file glob, reflecting the actual routing folders.
 
     When routed split folders (passed/failed/borderline) hold data, expose them as
-    HF splits; otherwise everything is a single ``train`` split.
+    HF splits; otherwise a single ``train`` split over the top-level files only —
+    ``*.jsonl`` (not ``**/*.jsonl``), so the non-data subdirs the body excludes
+    (partials/failures/bench/verification) are never advertised in the card.
     """
     splits = [
         (name, f"{name}/*.jsonl")
         for name in ("passed", "failed", "borderline")
         if (traces_dir / name).is_dir() and any((traces_dir / name).glob("*.jsonl"))
     ]
-    return splits or [("train", "**/*.jsonl")]
+    return splits or [("train", "*.jsonl")]
 
 
 def _frontmatter(
@@ -475,7 +477,7 @@ def build_traces_readme(
     sample_lines = _sample_lines(trace_files)
     sample_block = "\n".join(sample_lines)
     effective_tags = list(tags)
-    routed = bool(data_files) and [split for split, _ in data_files] != ["train"]
+    routed = any(split != "train" for split, _ in data_files or [])
     if (reward_stats or routed) and "reward-labeled" not in effective_tags:
         effective_tags.append("reward-labeled")
     lines = [

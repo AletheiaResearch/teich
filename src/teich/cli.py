@@ -721,6 +721,9 @@ def generate(
         if written:
             readme_path = _write_output_metadata(cfg)
             console.print(f"[green]Wrote README: {readme_path}[/green]")
+            if cfg.get_publish_repo_id():
+                repo_url = _publish_dataset_to_hub(cfg)
+                console.print(f"[green]Published dataset: {repo_url}[/green]")
         else:
             console.print("[yellow]bench: no rows written; skipping dataset card.[/yellow]")
         return

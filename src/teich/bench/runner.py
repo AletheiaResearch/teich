@@ -52,12 +52,13 @@ def run_bench(
 
         pending: list[BenchTask] = []
         for task in tasks:
-            existing = base.existing_output(cfg, base.bench_stem(source, task.id))
-            if resume and existing is not None:
-                out(f"[yellow]bench: skipping {task.id} (already harvested)[/yellow]")
-                written.append(existing)
-            else:
-                pending.append(task)
+            if resume:
+                existing = base.existing_output(cfg, base.bench_stem(source, task.id))
+                if existing is not None:
+                    out(f"[yellow]bench: skipping {task.id} (already harvested)[/yellow]")
+                    written.append(existing)
+                    continue
+            pending.append(task)
         out(
             f"[blue]bench[{source.type}]: {source.source} -> {len(pending)} task(s) "
             f"(concurrency {max_workers})[/blue]"

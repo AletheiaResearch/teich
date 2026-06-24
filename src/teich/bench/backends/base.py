@@ -61,10 +61,19 @@ def bench_root(cfg: Config) -> Path:
     """Working dir for backends' intermediates (downloads, sessions, trials).
 
     A ``bench`` dir beside ``traces_dir`` (parallel to sandbox/failures, outside the
-    dataset); overridable via ``output.bench_dir``.
+    dataset); overridable via ``output.bench_dir``. Re-checked here (not just at config
+    load) so a ``--output`` override can't leave ``bench_dir`` inside the dataset.
     """
     if cfg.output.bench_dir is not None:
-        return Path(cfg.output.bench_dir)
+        root = Path(cfg.output.bench_dir)
+        traces = cfg.output.traces_dir.resolve()
+        if traces == root.resolve() or traces in root.resolve().parents:
+            raise RuntimeError(
+                f"output.bench_dir ({root}) must be outside output.traces_dir "
+                f"({cfg.output.traces_dir}); raw trials/sessions there would be uploaded "
+                "and misclassified as dataset rows."
+            )
+        return root
     return cfg.output.traces_dir.parent / "bench"
 
 
@@ -74,8 +83,28 @@ def slug(value: str) -> str:
 
 
 def source_id(source: BenchSource) -> str:
-    """Stable identifier for a source, used to namespace its output files."""
-    return slug(source.source)
+    """Stable identifier for a source, used to namespace its output files.
+
+    Keyed on the discriminating knobs (not just ``source``): two sources that share a spec
+    but differ in ``repo``/``version``/``split``/``instances``/``backend`` get distinct ids,
+    so they can't overwrite each other's traces or wrongly resume-skip. A suffix is appended
+    only when a field diverges from its default, so the common single-field source keeps a
+    clean, stable id. ``type`` is intentionally excluded (it is recorded in ``metadata`` and
+    the existing namespacing contract is type-independent).
+    """
+    extras = [
+        slug(part)
+        for part in (
+            source.repo,
+            source.version,
+            source.split,
+            (",".join(source.instances) if source.instances else None),
+            source.backend if source.backend != "docker" else None,
+        )
+        if part
+    ]
+    base_id = slug(source.source)
+    return base_id if not extras else f"{base_id}-{slug('-'.join(extras))}"
 
 
 def bench_stem(source: BenchSource, task_id: str) -> str:
