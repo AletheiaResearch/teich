@@ -16,7 +16,6 @@ from .tool_schema import (
     OPENCLAW_BUILTIN_TOOLS,
     PI_BUILTIN_TOOLS,
 )
-from .verification import apply_reward_to_row, reward_from_sidecar_data, verification_sidecar_path
 
 _INLINE_THINKING_BLOCK_PATTERN = re.compile(r"<(think|thinking)>(.*?)</\1>", re.DOTALL)
 # Output subdirectories that hold non-dataset artifacts (partial/failed runs, verifier
@@ -3948,36 +3947,6 @@ def _jsonl_files(source: Path) -> list[Path]:
     )
 
 
-def _verification_reward_for_trace(trace_path: Path) -> dict[str, Any] | None:
-    """Load a verifier reward for a trace from a sibling ``verification/<stem>.json`` sidecar.
-
-    Handles both flat traces (``output/<name>.jsonl``) and routed traces
-    (``output/passed|failed/<name>.jsonl``) by checking the trace's directory and
-    its parent for the ``verification`` folder.
-    """
-    candidates: list[Path] = []
-    if trace_path.parent.name in {"passed", "failed"}:
-        # Routed trace: prefer the canonical <output_root>/verification sidecar.
-        candidates.append(verification_sidecar_path(trace_path.parent.parent, trace_path.stem))
-    candidates.append(verification_sidecar_path(trace_path.parent, trace_path.stem))
-    seen: set[Path] = set()
-    for candidate in candidates:
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        if candidate.is_file():
-            try:
-                data = json.loads(candidate.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                return None
-            # Require a real boolean so a corrupt sidecar (e.g. "passed": "false")
-            # can't be coerced to a truthy reward.
-            if isinstance(data, dict) and isinstance(data.get("passed"), bool):
-                return data
-            return None
-    return None
-
-
 def _convert_jsonl_file_to_training_rows(jsonl_file: Path, *, skip_invalid_lines: bool = False) -> list[dict[str, Any]]:
     rows = _load_trace_file(jsonl_file, skip_invalid_lines=skip_invalid_lines)
     if not rows:
@@ -4021,12 +3990,5 @@ def convert_traces_to_training_data(traces_dir: Path | str, *, skip_invalid_line
     rows: list[dict[str, Any]] = []
     for path in trace_files:
         file_rows = _convert_jsonl_file_to_training_rows(path, skip_invalid_lines=skip_invalid_lines)
-        reward_data = _verification_reward_for_trace(path)
-        if reward_data is not None:
-            # passed is a guaranteed bool here; reward is the explicit numeric value
-            # when the sidecar carries one (e.g. a fractional Harbor reward), else binary.
-            passed, reward = reward_from_sidecar_data(reward_data)
-            for row in file_rows:
-                apply_reward_to_row(row, passed=passed, reward=reward)
         rows.extend(file_rows)
     return rows

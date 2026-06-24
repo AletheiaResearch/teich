@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import json
 import os
 import queue
@@ -25,7 +25,7 @@ from urllib.request import Request, urlopen
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from .config import Config, SeedReference
+    from .config import Config
 
 from .config import PromptInput
 
@@ -41,7 +41,6 @@ from .converter import (
     normalize_codex_trace_events,
 )
 from .tool_schema import snapshot_configured_tools
-from .verification import write_verification_sidecar
 
 RUNTIME_IMAGE_NAME = "teich-runtime:v3"
 RUNTIME_DOCKERFILE_NAME = "codex-runtime.Dockerfile"
@@ -556,48 +555,6 @@ class SessionProgressUpdate:
 
 
 SessionProgressCallback = Callable[[SessionProgressUpdate], None]
-
-
-@dataclass(slots=True)
-class VerificationResult:
-    """Outcome of running a task's verifier over the post-edit workspace."""
-    verifier: str
-    passed: bool
-    exit_code: int | None
-    duration_s: float
-    timed_out: bool = False
-    error: str | None = None
-    tests: dict[str, str] = field(default_factory=dict)
-    stdout_tail: str = ""
-    stderr_tail: str = ""
-    seed_repo: str | None = None
-    # SWE-bench-style per-test reward (populated only when fail_to_pass/pass_to_pass set).
-    fail_to_pass: dict[str, str] = field(default_factory=dict)
-    pass_to_pass: dict[str, str] = field(default_factory=dict)
-    baseline: dict[str, Any] | None = None
-    resolved: bool | None = None
-    valid_task: bool | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        data = {
-            "verifier": self.verifier,
-            "passed": self.passed,
-            "exit_code": self.exit_code,
-            "duration_s": round(self.duration_s, 3),
-            "timed_out": self.timed_out,
-            "error": self.error,
-            "seed_repo": self.seed_repo,
-            "tests": self.tests,
-            "stdout_tail": self.stdout_tail,
-            "stderr_tail": self.stderr_tail,
-        }
-        if self.fail_to_pass or self.pass_to_pass:
-            data["fail_to_pass"] = self.fail_to_pass
-            data["pass_to_pass"] = self.pass_to_pass
-            data["resolved"] = self.resolved
-            data["valid_task"] = self.valid_task
-            data["baseline"] = self.baseline
-        return data
 
 
 def _prompt_text_completion_key(prompt: str) -> str:
@@ -1306,306 +1263,6 @@ class DockerRuntimeRunner:
             ignore_dangling_symlinks=True,
         )
 
-    @staticmethod
-    def _github_repo_checkout_name(github_repo: str) -> str:
-        return github_repo.rsplit("/", maxsplit=1)[-1]
-
-    @staticmethod
-    def _clone_github_repo(github_repo: str, destination: Path, base_commit: str | None = None) -> None:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        repo_url = f"https://github.com/{github_repo}.git"
-        # A pinned base_commit needs the full history (a shallow clone won't contain
-        # it); --filter=blob:none keeps that lean. Otherwise a depth-1 clone is enough.
-        clone_cmd = (
-            ["git", "clone", "--filter=blob:none", repo_url, str(destination)]
-            if base_commit
-            else ["git", "clone", "--depth", "1", repo_url, str(destination)]
-        )
-        try:
-            subprocess.run(clone_cmd, capture_output=True, check=True, **TEXT_SUBPROCESS_KWARGS)
-        except subprocess.CalledProcessError as exc:
-            stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or "")
-            stdout = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or "")
-            details = stderr.strip() or stdout.strip() or str(exc)
-            raise RuntimeError(f"Failed to clone github repo {github_repo}: {details}") from exc
-
-    @staticmethod
-    def _seed_checkout_name(reference: SeedReference, seed_repo: str) -> str:
-        if reference.kind == "local" and reference.local_path is not None:
-            name = reference.local_path.name
-        elif reference.filename:
-            name = reference.filename.rsplit("/", maxsplit=1)[-1]
-        else:
-            name = seed_repo
-        if name.endswith(".bundle"):
-            name = name[: -len(".bundle")]
-        name = re.sub(r"[^A-Za-z0-9_.-]+", "-", name).strip("-")
-        return name or "seed-repo"
-
-    def _fetch_seed_bundle(self, reference: SeedReference, seed_repo: str) -> Path:
-        """Return a local path to the seed bundle, downloading from HF if needed."""
-        if reference.kind == "local":
-            bundle = reference.local_path
-            if bundle is None or not bundle.is_file():
-                raise RuntimeError(f"Seed bundle not found: {bundle}")
-            return bundle
-        from huggingface_hub import hf_hub_download
-
-        try:
-            local = hf_hub_download(
-                repo_id=reference.repo_id,
-                filename=reference.filename,
-                repo_type="dataset",
-                token=self.config.get_hf_token(),
-            )
-        except Exception as exc:  # noqa: BLE001 - surface any hub/network error uniformly
-            raise RuntimeError(
-                f"Failed to fetch seed bundle '{seed_repo}' from Hugging Face dataset "
-                f"{reference.repo_id} ({reference.filename}): {exc}"
-            ) from exc
-        return Path(local)
-
-    @staticmethod
-    def _clone_seed_bundle(bundle: Path, destination: Path) -> None:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        verify = subprocess.run(
-            ["git", "bundle", "verify", str(bundle)],
-            capture_output=True,
-            check=False,
-            **TEXT_SUBPROCESS_KWARGS,
-        )
-        if verify.returncode != 0:
-            details = (verify.stderr or verify.stdout or "").strip()
-            raise RuntimeError(f"Invalid seed bundle {bundle}: {details}")
-        try:
-            subprocess.run(
-                ["git", "clone", str(bundle), str(destination)],
-                capture_output=True,
-                check=True,
-                **TEXT_SUBPROCESS_KWARGS,
-            )
-        except subprocess.CalledProcessError as exc:
-            stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or "")
-            stdout = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or "")
-            details = stderr.strip() or stdout.strip() or str(exc)
-            raise RuntimeError(f"Failed to clone seed bundle {bundle}: {details}") from exc
-
-    @staticmethod
-    def _tail(text: str | None, limit: int = 4000) -> str:
-        text = text or ""
-        return text if len(text) <= limit else text[-limit:]
-
-    @staticmethod
-    def _parse_pytest_results(output: str) -> dict[str, str]:
-        """Best-effort per-test pass/fail map from pytest output (metadata only)."""
-        results: dict[str, str] = {}
-        outcomes = "PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS"
-        leading = re.compile(rf"^({outcomes})\s+(\S+)")
-        trailing = re.compile(rf"^(\S+::\S+)\s+({outcomes})\b")
-        for raw_line in (output or "").splitlines():
-            line = raw_line.strip()
-            match = leading.match(line)
-            if match:
-                results[match.group(2)] = match.group(1).lower()
-                continue
-            match = trailing.match(line)
-            if match:
-                results[match.group(1)] = match.group(2).lower()
-        return results
-
-    @staticmethod
-    def _restore_verifier_files(workspace: Path, files: list[str]) -> None:
-        """Make each verifier file match the seed ``HEAD`` so the agent can't tamper the oracle.
-
-        Tracked files are restored from ``HEAD`` (a failure there is a real error and is
-        raised); files absent from ``HEAD`` are agent-added and removed. The caller
-        treats a raised failure as a failed verification rather than a silent pass.
-        """
-        head_present = subprocess.run(
-            ["git", "-C", str(workspace), "rev-parse", "--verify", "--quiet", "HEAD"],
-            capture_output=True,
-            check=False,
-            **TEXT_SUBPROCESS_KWARGS,
-        ).returncode == 0
-        if not head_present:
-            # No seed HEAD to restore from (the workspace isn't a git checkout, e.g. a task
-            # with no seed_repo/github_repo). Without HEAD every file looks "untracked", so
-            # the delete branch below would wipe the verifier oracle right before it runs.
-            return
-        workspace_root = workspace.resolve()
-        for rel in files:
-            # verifier_files / test ids are task-supplied (incl. untrusted datasets) and may
-            # contain ``..`` or absolute paths; never restore/delete outside the workspace.
-            target = (workspace / rel).resolve()
-            if not target.is_relative_to(workspace_root):
-                raise ValueError(
-                    f"verifier file {rel!r} escapes the workspace; refusing to touch {target}"
-                )
-            tracked = subprocess.run(
-                ["git", "-C", str(workspace), "cat-file", "-e", f"HEAD:{rel}"],
-                capture_output=True,
-                check=False,
-                **TEXT_SUBPROCESS_KWARGS,
-            ).returncode == 0
-            if tracked:
-                subprocess.run(
-                    ["git", "-C", str(workspace), "checkout", "HEAD", "--", rel],
-                    capture_output=True,
-                    check=True,
-                    **TEXT_SUBPROCESS_KWARGS,
-                )
-            elif target.is_file():
-                target.unlink()
-
-    def _build_verifier_command(self, workspace: Path, verifier: str) -> list[str]:
-        return [
-            "docker",
-            "run",
-            "--rm",
-            "--user",
-            RUNTIME_CONTAINER_USER,
-            "-e",
-            "HOME=/home/codex",
-            "-v",
-            f"{workspace}:{WORKSPACE_IN_CONTAINER}",
-            "-w",
-            WORKSPACE_IN_CONTAINER,
-            self.image_name,
-            "bash",
-            "-lc",
-            verifier,
-        ]
-
-    @staticmethod
-    def _was_failing(outcome: str) -> bool:
-        """An observed failure on the baseline (not 'missing'/skipped/passed)."""
-        return outcome in {"failed", "error"}
-
-    @staticmethod
-    def _verifier_restore_files(prompt_input: PromptInput) -> list[str]:
-        """Files to restore from HEAD before verifying: verifier_files plus the test
-        files backing each fail_to_pass/pass_to_pass id, so the agent can't edit the
-        oracle even when it isn't hand-listed."""
-        files = list(prompt_input.verifier_files)
-        for test_id in (*prompt_input.fail_to_pass, *prompt_input.pass_to_pass):
-            head = test_id.split("::", 1)[0].strip()
-            if head and head not in files:
-                files.append(head)
-        return files
-
-    def _run_verifier(
-        self,
-        workspace: Path,
-        prompt_input: PromptInput | None,
-    ) -> VerificationResult | None:
-        """Run the task verifier over the post-edit workspace; reward = exit code 0."""
-        if prompt_input is None or not prompt_input.verifier:
-            return None
-        verifier = prompt_input.verifier
-        # The snapshot is host-owned; the container runs as the unprivileged
-        # `codex` user, so make the tree writable or git checkout / pytest caches
-        # fail with permission errors.
-        _make_tree_world_writable(workspace)
-        restore_files = self._verifier_restore_files(prompt_input)
-        if self.config.tasks.restore_verifier_files and restore_files:
-            try:
-                self._restore_verifier_files(workspace, restore_files)
-            except (subprocess.CalledProcessError, OSError, ValueError) as exc:
-                # ValueError = the path-traversal guard rejected a crafted verifier_files
-                # entry; treat it as a failed verification, not a crashed task.
-                return VerificationResult(
-                    verifier=verifier,
-                    passed=False,
-                    exit_code=None,
-                    duration_s=0.0,
-                    error=f"failed to restore verifier files: {exc}",
-                    seed_repo=prompt_input.seed_repo,
-                )
-        command = self._build_verifier_command(workspace, verifier)
-        timeout = self.config.tasks.verifier_timeout_seconds
-        started = time.monotonic()
-        try:
-            completed = subprocess.run(
-                command,
-                capture_output=True,
-                timeout=timeout,
-                check=False,
-                **TEXT_SUBPROCESS_KWARGS,
-            )
-        except subprocess.TimeoutExpired as exc:
-            # text=True so stdout/stderr are str | None.
-            stdout = exc.stdout if isinstance(exc.stdout, str) else ""
-            stderr = exc.stderr if isinstance(exc.stderr, str) else ""
-            return VerificationResult(
-                verifier=verifier,
-                passed=False,
-                exit_code=None,
-                duration_s=time.monotonic() - started,
-                timed_out=True,
-                error=f"verifier timed out after {timeout}s",
-                tests=self._parse_pytest_results(stdout),
-                stdout_tail=self._tail(stdout),
-                stderr_tail=self._tail(stderr),
-                seed_repo=prompt_input.seed_repo,
-            )
-        except (FileNotFoundError, OSError) as exc:
-            return VerificationResult(
-                verifier=verifier,
-                passed=False,
-                exit_code=None,
-                duration_s=time.monotonic() - started,
-                error=f"failed to launch verifier: {exc}",
-                seed_repo=prompt_input.seed_repo,
-            )
-        stdout = completed.stdout or ""
-        stderr = completed.stderr or ""
-        return VerificationResult(
-            verifier=verifier,
-            passed=completed.returncode == 0,
-            exit_code=completed.returncode,
-            duration_s=time.monotonic() - started,
-            tests=self._parse_pytest_results(stdout),
-            stdout_tail=self._tail(stdout),
-            stderr_tail=self._tail(stderr),
-            seed_repo=prompt_input.seed_repo,
-        )
-
-    @staticmethod
-    def _checkout_base_commit(workspace: Path, base_commit: str) -> None:
-        try:
-            subprocess.run(
-                ["git", "-C", str(workspace), "checkout", "--quiet", base_commit],
-                capture_output=True,
-                check=True,
-                **TEXT_SUBPROCESS_KWARGS,
-            )
-        except subprocess.CalledProcessError as exc:
-            stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or "")
-            stdout = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or "")
-            details = stderr.strip() or stdout.strip() or str(exc)
-            raise RuntimeError(f"Failed to checkout base_commit {base_commit}: {details}") from exc
-
-    def _materialize_seed(self, prompt_input: PromptInput, workspace_root: Path) -> Path:
-        """Clone the prompt's seed source into ``workspace_root`` and return the workspace dir.
-
-        Supports a seed bundle (``seed_repo``) or a GitHub clone (``github_repo``),
-        then checks out ``base_commit`` on either source so a SWE-bench instance
-        (repo + base_commit) maps directly.
-        """
-        if prompt_input.seed_repo:
-            reference = self.config.resolve_seed_reference(prompt_input.seed_repo)
-            bundle = self._fetch_seed_bundle(reference, prompt_input.seed_repo)
-            workspace = workspace_root / self._seed_checkout_name(reference, prompt_input.seed_repo)
-            self._clone_seed_bundle(bundle, workspace)
-        elif prompt_input.github_repo:
-            workspace = workspace_root / self._github_repo_checkout_name(prompt_input.github_repo)
-            self._clone_github_repo(prompt_input.github_repo, workspace, base_commit=prompt_input.base_commit)
-        else:
-            return workspace_root
-        if prompt_input.base_commit:
-            self._checkout_base_commit(workspace, prompt_input.base_commit)
-        return workspace
-
     def _prepare_workspace(
         self,
         session_id: str,
@@ -1621,11 +1278,6 @@ class DockerRuntimeRunner:
             raise RuntimeError(
                 "Prompt image inputs are not supported yet. Leave the image column blank or set it to None."
             )
-        try:
-            workspace = self._materialize_seed(prompt_input, workspace_root)
-        except BaseException:
-            shutil.rmtree(workspace_root, ignore_errors=True)
-            raise
         return workspace_root, workspace
 
     def _sandbox_destination(self, trace_path: Path) -> Path:
@@ -2148,112 +1800,6 @@ class DockerRuntimeRunner:
             metrics.finalize()
         return metrics
 
-    def _route_destination(self, trace_path: Path, passed: bool) -> Path:
-        subdir = "passed" if passed else "failed"
-        return self.config.output.traces_dir / subdir / trace_path.name
-
-    @staticmethod
-    def _verification_detail(result: VerificationResult | None) -> str | None:
-        if result is None:
-            return None
-        if result.timed_out:
-            return "verifier: timed out"
-        if result.error:
-            return f"verifier: error ({result.error})"
-        return f"verifier: {'passed' if result.passed else 'failed'} (exit {result.exit_code})"
-
-    def _run_seed_baseline(self, prompt_input: PromptInput) -> VerificationResult | None:
-        """Run the verifier on a pristine re-clone of the seed (the pre-agent state)."""
-        if not (prompt_input.seed_repo or prompt_input.github_repo):
-            return None
-        root = Path(tempfile.mkdtemp(prefix="seed-baseline-"))
-        root.chmod(0o777)
-        try:
-            workspace = self._materialize_seed(prompt_input, root)
-            return self._run_verifier(workspace, prompt_input)
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
-
-    def _apply_f2p_p2p_reward(self, result: VerificationResult, prompt_input: PromptInput) -> None:
-        """Turn the verifier's per-test results into a SWE-bench-style reward.
-
-        With ``fail_to_pass``/``pass_to_pass`` set, the reward is the genuine
-        transition: every FAIL_TO_PASS goes fail->pass and every PASS_TO_PASS stays
-        passing. A pristine-seed baseline run (``tasks.check_seed_baseline``) supplies
-        the before-state and flags invalid tasks; without it we fall back to the
-        after-only check (exact SWE-bench scoring). No lists -> exit-code reward stays.
-        """
-        f2p_ids = prompt_input.fail_to_pass
-        p2p_ids = prompt_input.pass_to_pass
-        if not f2p_ids and not p2p_ids:
-            return
-        result.fail_to_pass = {t: result.tests.get(t, "missing") for t in f2p_ids}
-        result.pass_to_pass = {t: result.tests.get(t, "missing") for t in p2p_ids}
-        if result.error:
-            # After-run failed to execute (restore/launch/timeout): not resolved.
-            result.resolved = False
-            result.passed = False
-            return
-        after_f2p = result.fail_to_pass
-        after_p2p = result.pass_to_pass
-        if self.config.tasks.check_seed_baseline:
-            baseline = self._run_seed_baseline(prompt_input)
-            if baseline is not None:
-                base_f2p = {t: baseline.tests.get(t, "missing") for t in f2p_ids}
-                base_p2p = {t: baseline.tests.get(t, "missing") for t in p2p_ids}
-                result.baseline = {
-                    "fail_to_pass": base_f2p,
-                    "pass_to_pass": base_p2p,
-                    "exit_code": baseline.exit_code,
-                    "error": baseline.error,
-                }
-                # "Was failing" must be an OBSERVED failure on the seed — a test that
-                # never ran (missing / collection error / exit-5) is not a transition.
-                result.valid_task = (
-                    all(self._was_failing(base_f2p[t]) for t in f2p_ids)
-                    and all(base_p2p[t] == "passed" for t in p2p_ids)
-                )
-                result.resolved = (
-                    all(self._was_failing(base_f2p[t]) and after_f2p[t] == "passed" for t in f2p_ids)
-                    and all(base_p2p[t] == "passed" and after_p2p[t] == "passed" for t in p2p_ids)
-                )
-                result.passed = result.resolved
-                return
-        # After-only (SWE-bench parity / trusted labels).
-        result.resolved = (
-            all(after_f2p[t] == "passed" for t in f2p_ids)
-            and all(after_p2p[t] == "passed" for t in p2p_ids)
-        )
-        result.passed = result.resolved
-
-    def _verify_and_record(
-        self,
-        trace_path: Path,
-        prompt_input: PromptInput | None,
-    ) -> tuple[Path, VerificationResult | None]:
-        """Run the verifier over the sandbox snapshot, write the sidecar, and route the trace."""
-        if prompt_input is None or not prompt_input.verifier:
-            return trace_path, None
-        snapshot = self._sandbox_destination(trace_path)
-        if not snapshot.exists():
-            return trace_path, None
-        result = self._run_verifier(snapshot, prompt_input)
-        if result is None:
-            return trace_path, None
-        self._apply_f2p_p2p_reward(result, prompt_input)
-        write_verification_sidecar(self.config.output.traces_dir, trace_path.stem, result.to_dict())
-        if not self.config.tasks.route_by_result:
-            return trace_path, result
-        destination = self._route_destination(trace_path, result.passed)
-        if destination.resolve() == trace_path.resolve():
-            return trace_path, result
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(trace_path), str(destination))
-        metadata_src = self._hermes_metadata_path(trace_path)
-        if metadata_src.exists():
-            shutil.move(str(metadata_src), str(self._hermes_metadata_path(destination)))
-        return destination, result
-
     def _run_prompt_task(
         self,
         prompt_id: str,
@@ -2285,7 +1831,6 @@ class DockerRuntimeRunner:
                 progress_base=progress_base,
                 prompt_input=prompt_input,
             )
-            result, verification = self._verify_and_record(result, prompt_input)
             metrics = self._summarize_trace_file(result)
             sandbox_path = self._sandbox_destination(result)
             if progress_callback:
@@ -2303,7 +1848,6 @@ class DockerRuntimeRunner:
                         trace_path=result,
                         sandbox_path=sandbox_path,
                         metrics=metrics,
-                        details=self._verification_detail(verification),
                     )
                 )
             return result
@@ -5477,8 +5021,6 @@ class ChatRunner(DockerRuntimeRunner):
             session_id = str(uuid.uuid4())
         if self.config.mcp_servers:
             raise RuntimeError("Chat runner does not support mcp_servers.")
-        if prompt_input and prompt_input.github_repo:
-            raise RuntimeError("Chat runner does not support github_repo prompt inputs.")
         destination = self._resolve_output_path(f"{session_id}.jsonl")
         destination.parent.mkdir(parents=True, exist_ok=True)
         training_row = self._request_chat_conversation(prompt_input or PromptInput(prompt=prompt))
@@ -5528,8 +5070,6 @@ class ChatRunner(DockerRuntimeRunner):
         try:
             if self.config.mcp_servers:
                 raise RuntimeError("Chat runner does not support mcp_servers.")
-            if prompt_input.github_repo:
-                raise RuntimeError("Chat runner does not support github_repo prompt inputs.")
             training_row = self._request_or_extend_chat_conversation(prompt_input, destination, append_lock)
             if progress_callback:
                 progress_callback(

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from teich.config import Config, MCPConfig, ModelConfig, PromptInput
+from teich.config import Config, MCPConfig, ModelConfig
 
 
 def test_default_config():
@@ -166,9 +166,9 @@ def test_config_prompts_file(tmp_path: Path):
     """Test loading structured prompts from CSV file."""
     prompts_file = tmp_path / "prompts.csv"
     prompts_file.write_text(
-        "image,github_repo,prompt\n"
-        'None,None,"Build a todo app"\n'
-        'None,armand0e/perplexica-mcp,"Improve the search flow"\n',
+        "image,prompt\n"
+        'None,"Build a todo app"\n'
+        'None,"Improve the search flow"\n',
         encoding="utf-8",
     )
 
@@ -187,20 +187,19 @@ prompts:
     assert "Extra prompt" in prompts
     assert "Build a todo app" in prompts
     assert "Improve the search flow" in prompts
-    assert prompt_inputs[2].github_repo == "armand0e/perplexica-mcp"
     assert prompt_inputs[2].image is None
 
 
 def test_config_prompts_file_supports_multiline_csv_prompts(tmp_path: Path):
     prompts_file = tmp_path / "prompts.csv"
     prompts_file.write_text(
-        '"image","github_repo","prompt"\n'
-        '"None","None","Premise:\n'
+        '"image","prompt"\n'
+        '"None","Premise:\n'
         '""Apparently Thorn thought the same thing.""\n'
         'Available choices:\n'
         ' - yes\n'
         ' - no"\n'
-        '"None","None","Solve 1148583*a = 1148360*a - 5352 for a.\n'
+        '"None","Solve 1148583*a = 1148360*a - 5352 for a.\n'
         'Solve this problem."\n',
         encoding="utf-8",
     )
@@ -222,7 +221,7 @@ def test_config_prompts_file_supports_multiline_csv_prompts(tmp_path: Path):
 def test_config_prompts_file_rejects_csv_rows_with_extra_columns(tmp_path: Path):
     prompts_file = tmp_path / "prompts.csv"
     prompts_file.write_text(
-        "prompt,github_repo\n"
+        "prompt,system\n"
         "Build a dashboard,with an unquoted comma,None\n",
         encoding="utf-8",
     )
@@ -238,7 +237,6 @@ def test_config_prompts_file_supports_jsonl_prompts(tmp_path: Path):
         {
             "system": "Answer as a senior frontend reviewer.",
             "prompt": "Premise:\nUse a safer long prompt format.\nAvailable choices:\n - yes\n - no",
-            "github_repo": "armand0e/perplexica-mcp",
             "follow_up_prompts": ["Now add tests.", "Now update the README."],
         },
         {"prompt": "Build a todo app"},
@@ -254,7 +252,6 @@ def test_config_prompts_file_supports_jsonl_prompts(tmp_path: Path):
     assert len(prompt_inputs) == 2
     assert prompt_inputs[0].prompt == rows[0]["prompt"]
     assert prompt_inputs[0].system == "Answer as a senior frontend reviewer."
-    assert prompt_inputs[0].github_repo == "armand0e/perplexica-mcp"
     assert prompt_inputs[0].follow_up_prompts == ["Now add tests.", "Now update the README."]
     assert prompt_inputs[1].prompt == "Build a todo app"
 
@@ -316,8 +313,8 @@ def test_config_prompts_file_resolves_relative_to_yaml(tmp_path: Path):
     """Test loading prompts_file relative to the config file location."""
     prompts_file = tmp_path / "prompts.csv"
     prompts_file.write_text(
-        "image,github_repo,prompt\n"
-        'None,None,"Build a dashboard"\n',
+        "image,prompt\n"
+        'None,"Build a dashboard"\n',
         encoding="utf-8",
     )
 
@@ -332,24 +329,11 @@ def test_config_prompts_file_resolves_relative_to_yaml(tmp_path: Path):
     assert config.get_prompts() == ["Build a dashboard"]
 
 
-def test_config_prompts_file_rejects_invalid_github_repo(tmp_path: Path):
-    prompts_file = tmp_path / "prompts.csv"
-    prompts_file.write_text(
-        "image,github_repo,prompt\n"
-        'None,not a repo,"Build a dashboard"\n',
-        encoding="utf-8",
-    )
-    config = Config(prompts_file=prompts_file)
-
-    with pytest.raises(ValueError, match="github_repo must be in owner/repo format"):
-        config.get_prompt_inputs()
-
-
 def test_config_prompts_file_rejects_non_none_images(tmp_path: Path):
     prompts_file = tmp_path / "prompts.csv"
     prompts_file.write_text(
-        "image,github_repo,prompt\n"
-        'diagram.png,None,"Build a dashboard"\n',
+        "image,prompt\n"
+        'diagram.png,"Build a dashboard"\n',
         encoding="utf-8",
     )
     config = Config(prompts_file=prompts_file)
@@ -474,98 +458,6 @@ def test_codex_host_auth_source_defaults_to_home(monkeypatch):
     monkeypatch.delenv("CODEX_HOME", raising=False)
     config = Config(agent={"provider": "codex"})
     assert config.get_codex_host_auth_source() == Path.home() / ".codex" / "auth.json"
-
-
-def test_tasks_config_defaults():
-    tasks = Config().tasks
-    assert tasks.seed_dataset is None
-    assert tasks.verifier_timeout_seconds == 300
-    assert tasks.restore_verifier_files is True
-    assert tasks.route_by_result is True
-    assert tasks.check_seed_baseline is True
-
-
-def test_prompt_input_f2p_p2p_and_base_commit():
-    pi = PromptInput(
-        prompt="x", github_repo="owner/repo", base_commit="abc123",
-        fail_to_pass=["tests/t.py::test_bug"], pass_to_pass="tests/t.py::test_b, tests/t.py::test_c",
-    )
-    assert pi.base_commit == "abc123"
-    assert pi.fail_to_pass == ["tests/t.py::test_bug"]
-    assert pi.pass_to_pass == ["tests/t.py::test_b", "tests/t.py::test_c"]
-
-
-def test_base_commit_requires_seed_source():
-    with pytest.raises(ValueError, match="base_commit requires a seed source"):
-        PromptInput(prompt="x", base_commit="abc123")
-
-
-def test_base_commit_ok_with_seed_repo():
-    assert PromptInput(prompt="x", seed_repo="widgets", base_commit="abc").base_commit == "abc"
-
-
-def test_prompt_input_seed_and_verifier_fields():
-    pi = PromptInput(
-        prompt="fix the bug",
-        seed_repo="widgets-bug-01",
-        verifier="pytest -q",
-        verifier_files=["tests/test_widgets.py"],
-    )
-    assert pi.seed_repo == "widgets-bug-01"
-    assert pi.verifier == "pytest -q"
-    assert pi.verifier_files == ["tests/test_widgets.py"]
-
-
-def test_prompt_input_normalizes_blank_seed_and_verifier():
-    pi = PromptInput(prompt="x", seed_repo="none", verifier="  ", verifier_files=None)
-    assert pi.seed_repo is None
-    assert pi.verifier is None
-    assert pi.verifier_files == []
-
-
-def test_prompt_input_verifier_files_from_comma_string():
-    pi = PromptInput(prompt="x", verifier_files="a.py, b.py ,\nc.py")
-    assert pi.verifier_files == ["a.py", "b.py", "c.py"]
-
-
-def test_prompt_input_rejects_seed_repo_and_github_repo():
-    with pytest.raises(ValueError, match="only one of seed_repo or github_repo"):
-        PromptInput(prompt="x", seed_repo="widgets-bug-01", github_repo="owner/repo")
-
-
-def test_resolve_seed_reference_hf_uri():
-    ref = Config().resolve_seed_reference("hf://datasets/me/seeds/path/widgets.bundle")
-    assert ref.kind == "hf"
-    assert ref.repo_id == "me/seeds"
-    assert ref.filename == "path/widgets.bundle"
-
-
-def test_resolve_seed_reference_bare_key_uses_dataset():
-    config = Config(tasks={"seed_dataset": "me/seeds"})
-    ref = config.resolve_seed_reference("widgets-bug-01")
-    assert ref.kind == "hf"
-    assert ref.repo_id == "me/seeds"
-    assert ref.filename == "widgets-bug-01.bundle"
-
-
-def test_resolve_seed_reference_bare_key_without_dataset_errors():
-    with pytest.raises(ValueError, match="seed_dataset is not set"):
-        Config().resolve_seed_reference("widgets-bug-01")
-
-
-def test_seed_dataset_blank_treated_as_unset():
-    config = Config(tasks={"seed_dataset": "   "})
-    assert config.tasks.seed_dataset is None
-    with pytest.raises(ValueError, match="seed_dataset is not set"):
-        config.resolve_seed_reference("widgets-bug-01")
-
-
-def test_resolve_seed_reference_local_paths():
-    config = Config()
-    for value in ("./x.bundle", "sub/x.bundle", "/abs/x.bundle", "x.bundle"):
-        ref = config.resolve_seed_reference(value)
-        assert ref.kind == "local", value
-        assert ref.local_path == Path(value).expanduser()
 
 
 def test_mcp_config():
