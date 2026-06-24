@@ -266,17 +266,21 @@ def _run_agent(
     # Namespace all scratch (image tag, container, env-file) by source so two sources that
     # contain the same instance can't collide under concurrency; lowercased for Docker.
     key = base.slug(f"{base.source_id(source)}-{instance['instance_id']}").lower()
-    langfuse = cfg.agent.langfuse
-    dockerfile = render_agent_dockerfile(spec.instance_image_key, layer, langfuse=langfuse.enabled)
+    # Langfuse is intentionally not wired here (guarded against in tasks()); render it off so
+    # the image never carries a phantom tracing block.
+    dockerfile = render_agent_dockerfile(spec.instance_image_key, layer)
     agent_image = f"teich-swe-{key}:latest"
     timeout = cfg.timeout_seconds if cfg.timeout_seconds and cfg.timeout_seconds > 0 else None
     _build_image(dockerfile, agent_image, timeout=timeout)
 
     # Pass credentials via an env-file (host-only, outside the mounted dir, mode 0600) rather
-    # than `-e KEY=VALUE`, so keys aren't visible in `docker inspect` or the host process list.
+    # than `-e KEY=VALUE`, so keys aren't visible in the host process list. Note: they still
+    # become container env vars (readable via `docker inspect` / inside the container), so this
+    # guards the host's `ps`, not a hostile Docker-socket user.
     env = {**layer.env, **_auth_env(cfg)}
     env_file = capture_dir.parent / f"{key}.env"
     fd = os.open(env_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)  # O_CREAT's mode only applies on create (and is umask-masked); enforce 0600 either way
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write("".join(f"{name}={value}\n" for name, value in env.items()))
 
@@ -292,7 +296,7 @@ def _run_agent(
         agent_image, "bash", "-lc", shell,
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
     except subprocess.TimeoutExpired:
         _docker(["rm", "-f", container], check=False)  # reap the named container, then fail the task
         raise
@@ -361,6 +365,14 @@ class SweBenchBackend:
 
     def tasks(self, cfg: Config, source: BenchSource, *, refresh: bool = False) -> list[base.BenchTask]:
         # refresh is a no-op here: HF datasets handle their own cache.
+        if cfg.agent.langfuse.enabled:
+            # The swe-bench backend does not wire Langfuse into the agent container (no
+            # creds in the env-file, no install layer), so tracing would silently no-op.
+            # Fail loudly rather than pretend support.
+            raise RuntimeError(
+                "The swe-bench bench backend does not support Langfuse tracing; "
+                "set agent.langfuse.enabled = false for swe-bench sources."
+            )
         return [
             base.BenchTask(id=instance["instance_id"], raw=instance)
             for instance in _load_instances(source)

@@ -110,6 +110,17 @@ def test_tasks_maps_instances_to_bench_tasks(monkeypatch):
     assert tasks[0].raw is instances[0]
 
 
+def test_tasks_rejects_langfuse_enabled():
+    # swe-bench doesn't wire Langfuse into the agent container, so it fails loudly rather than
+    # silently no-op. The guard fires before any dataset/Docker work, so no mocks are needed.
+    cfg = Config(agent={
+        "provider": "pi",
+        "langfuse": {"enabled": True, "public_key": "pk", "secret_key": "sk", "base_url": "https://lf"},
+    })
+    with pytest.raises(RuntimeError, match="does not support Langfuse"):
+        SweBenchBackend().tasks(cfg, BenchSource(type="swe-bench", source="ds"))
+
+
 # --------------------------------------------------------------------------- agent layer
 
 
