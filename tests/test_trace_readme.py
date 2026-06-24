@@ -322,3 +322,72 @@ def test_write_traces_readme_uses_configured_tools_and_repo_id(tmp_path: Path):
     assert not (tmp_path / "tools.json").exists()
     assert '"name": "unobserved"' in readme
     assert '"description": "Available but not called"' in readme
+
+
+def _write_structured_row(path: Path, **extra) -> None:
+    row = {"prompt": "hi", "messages": [{"role": "assistant", "content": "ok"}], **extra}
+    path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+
+def test_readme_is_reward_aware_from_verification_sidecars(tmp_path: Path):
+    # Two verified rows with sidecars; the card summarizes their pass/fail counts.
+    _write_structured_row(tmp_path / "task-a.jsonl", passed=True, reward=1.0)
+    _write_structured_row(tmp_path / "task-b.jsonl", passed=False, reward=0.0)
+    verification = tmp_path / "verification"
+    verification.mkdir()
+    (verification / "task-a.json").write_text(json.dumps({"passed": True}), encoding="utf-8")
+    (verification / "task-b.json").write_text(
+        json.dumps({"passed": False, "reward": 0.0}), encoding="utf-8"
+    )
+    # A harbor intermediate that must NOT be treated as data or pollute the card (a nested
+    # `bench` dir is excluded by name; by default bench_dir is a sibling, never under output).
+    bench_sessions = tmp_path / "bench" / "sessions" / "add-bug"
+    bench_sessions.mkdir(parents=True)
+    (bench_sessions / "pi.jsonl").write_text('{"type":"session","id":"x"}\n', encoding="utf-8")
+
+    readme_path = write_traces_readme(
+        tmp_path, pretty_name="Verifiable Traces", tags=["agent-traces"]
+    )
+    readme = readme_path.read_text(encoding="utf-8")
+    assert "## Reward labels" in readme
+    assert '- "reward-labeled"' in readme
+    assert "Verified tasks: 2 (1 passed / 1 failed)." in readme
+    assert "1 of 2 carry an explicit numeric score" in readme  # task-b has reward 0.0
+    assert "Rows: 2" in readme  # the bench/ session file is excluded from the row count
+    # The train split is a top-level glob that excludes the nested bench/ session.
+    assert "- split: train" in readme
+    assert 'path: "*.jsonl"' in readme
+    assert "**/*.jsonl" not in readme  # top-level glob, not recursive
+    assert "bench/sessions/add-bug/pi.jsonl" not in readme
+
+
+def test_readme_has_no_reward_section_without_verification(tmp_path: Path):
+    _write_structured_row(tmp_path / "plain.jsonl")
+    readme_path = write_traces_readme(tmp_path, pretty_name="Plain Traces", tags=["agent-traces"])
+    readme = readme_path.read_text(encoding="utf-8")
+    assert "## Reward labels" not in readme
+    assert "reward-labeled" not in readme
+    # No routing folders -> single top-level train glob (not the recursive **/*.jsonl).
+    assert "- split: train" in readme and 'path: "*.jsonl"' in readme
+    assert "**/*.jsonl" not in readme
+
+
+def test_card_splits_reflect_routing_folders(tmp_path: Path):
+    for split in ("passed", "failed", "borderline"):
+        (tmp_path / split).mkdir()
+        _write_structured_row(tmp_path / split / f"bench-{split}.jsonl")
+    readme = write_traces_readme(tmp_path, pretty_name="Bench", tags=["agent-traces"]).read_text(encoding="utf-8")
+    for split in ("passed", "failed", "borderline"):
+        assert f"- split: {split}" in readme
+        assert f'path: "{split}/*.jsonl"' in readme
+    assert "split: train" not in readme
+    assert '- "reward-labeled"' in readme  # routed datasets are reward-labeled
+
+
+def test_card_omits_empty_routing_splits(tmp_path: Path):
+    # Only passed/ has files -> only a passed split is declared (no empty failed/borderline).
+    (tmp_path / "passed").mkdir()
+    _write_structured_row(tmp_path / "passed" / "bench-a.jsonl")
+    readme = write_traces_readme(tmp_path, pretty_name="Bench", tags=["x"]).read_text(encoding="utf-8")
+    assert "- split: passed" in readme
+    assert "- split: failed" not in readme and "- split: borderline" not in readme

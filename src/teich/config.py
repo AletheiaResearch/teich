@@ -185,6 +185,9 @@ class OutputConfig(BaseModel):
     traces_dir: Path = Field(default=Path("./output"))
     sandbox_dir: Path = Field(default=Path("./sandbox"))
     failures_dir: Path = Field(default=Path("./failures"))
+    # Harbor bench intermediates (trials/sources/sessions). None -> a sibling ``bench``
+    # dir next to traces_dir, parallel to sandbox/failures (never inside the dataset).
+    bench_dir: Path | None = None
     pretty_name: str = "Agentic Training Traces"
 
 
@@ -277,6 +280,30 @@ class PromptInput(BaseModel):
         return [self.prompt, *self.follow_up_prompts]
 
 
+class BenchSource(BaseModel):
+    """One benchmark source for ``generate --mode bench``.
+
+    ``type`` selects the backend (``harbor`` | ``swe-bench``). ``source`` is the dataset
+    spec for that backend: harbor → a local task dir, a registry spec (``name@version`` or
+    ``org/name@ref``), or (with ``repo``) a dataset name in a git/HF registry; swe-bench →
+    a Hugging Face dataset id (or a local json/jsonl path). ``version``/``repo`` are harbor
+    knobs; ``split``/``instances`` select swe-bench rows; ``backend`` is harbor's
+    EnvironmentType. Remote data is fetched into ``<output.bench_dir>/`` and run locally.
+    """
+    type: str = "harbor"
+    source: str
+    repo: str | None = None
+    version: str | None = None
+    split: str | None = None
+    instances: list[str] | None = None
+    backend: str = "docker"
+
+
+class BenchConfig(BaseModel):
+    """Bench-mode settings: an array of benchmark sources, each run by its backend."""
+    sources: list[BenchSource] = Field(default_factory=list)
+
+
 class Config(BaseModel):
     """Main configuration."""
     agent: AgentConfig = Field(default_factory=AgentConfig)
@@ -287,6 +314,7 @@ class Config(BaseModel):
     prompts_file: Path | None = None
     output: OutputConfig = Field(default_factory=OutputConfig)
     publish: PublishConfig = Field(default_factory=PublishConfig)
+    bench: BenchConfig = Field(default_factory=BenchConfig)
     max_concurrency: int = Field(default=1, ge=1)
     timeout_seconds: int = 600
     openai_api_key: str | None = None

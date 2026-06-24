@@ -19,7 +19,7 @@ from typer.core import TyperCommand, TyperGroup
 
 from .anonymize import anonymize_path
 from .config import Config
-from .converter import convert_traces_to_training_data
+from .converter import NON_DATA_TRACE_DIR_NAMES, convert_traces_to_training_data
 from .extract import CURSOR_EXTRACTION_NOTICE, ExtractProvider, extract_local_sessions
 from .runner import (
     ChatRunner,
@@ -177,8 +177,7 @@ pool_app = typer.Typer(
     cls=_help_group("PoolHelpGroup", POOL_EXTRA_HELP),
 )
 app.add_typer(pool_app, name="pool")
-NON_DATA_TRACE_DIR_NAMES = {"partials", "failures"}
-UPLOAD_IGNORE_PATTERNS = ["partials/**", "failures/**"]
+UPLOAD_IGNORE_PATTERNS = ["partials/**", "failures/**", "bench/**"]
 UPLOAD_METADATA_PATTERNS = ["README.md", "tools.json"]
 
 
@@ -209,6 +208,25 @@ def _has_non_empty_trace_outputs(traces_dir: Path) -> bool:
         if path.stat().st_size > 0:
             return True
     return False
+
+
+def _existing_dataset_modes(traces_dir: Path) -> set[str]:
+    """Which generation modes already wrote dataset rows into ``traces_dir``.
+
+    bench rows are ``bench-<task>.jsonl``; anything else (incl. routed
+    ``passed/``|``failed/`` traces) is prompts. Used to keep bench and prompts as
+    separate, homogeneous datasets — a mixed dir is unpleasant to consume.
+    """
+    modes: set[str] = set()
+    if not traces_dir.exists():
+        return modes
+    for path in traces_dir.rglob("*.jsonl"):
+        if not path.is_file() or path.stat().st_size == 0:
+            continue
+        if NON_DATA_TRACE_DIR_NAMES.intersection(path.relative_to(traces_dir).parts):
+            continue
+        modes.add("bench" if path.name.startswith("bench-") else "prompts")
+    return modes
 
 
 def _write_output_metadata(cfg: Config) -> Path:
@@ -652,8 +670,18 @@ def generate(
         "--resume",
         help="Skip prompts that already have completed answers in the output directory",
     ),
+    mode: str = typer.Option(
+        "prompts",
+        "--mode",
+        help="Generation mode: 'prompts' (default) or 'bench' (run benchmark tasks from bench.sources).",
+    ),
+    refresh: bool = typer.Option(
+        False,
+        "--refresh",
+        help="Bench mode (harbor sources only): re-download a remote harbor bench source even if it's already cached. No effect on swe-bench, which uses Hugging Face's own dataset cache.",
+    ),
 ) -> None:
-    """Generate training traces from prompts."""
+    """Generate agent traces: plain traces from prompts (--mode prompts), or reward-labeled benchmark traces from bench.sources (--mode bench)."""
     console.print(Panel.fit("Teich", style="bold blue"))
 
     if not config.exists():
@@ -665,6 +693,40 @@ def generate(
         cfg.output.traces_dir = output
     if concurrency is not None:
         cfg.max_concurrency = concurrency
+
+    if mode not in {"prompts", "bench"}:
+        console.print(f"[red]Unknown --mode '{mode}'. Use 'prompts' or 'bench'.[/red]")
+        raise typer.Exit(1)
+    conflicting_modes = _existing_dataset_modes(cfg.output.traces_dir) - {mode}
+    if conflicting_modes:
+        other = ", ".join(sorted(conflicting_modes))
+        console.print(
+            f"[red]{cfg.output.traces_dir} already contains {other}-mode data; "
+            f"refusing to mix it with {mode}-mode output.[/red]"
+        )
+        console.print(
+            "[yellow]Keep bench and prompts as separate datasets (a mixed dataset is unpleasant "
+            "to consume). Point --output at a fresh directory, or use a separate config/project "
+            "with its own output.traces_dir and publish.repo_id.[/yellow]"
+        )
+        raise typer.Exit(1)
+    if mode == "bench":
+        from .bench import run_bench  # lazy: harbor is an optional extra
+
+        try:
+            written = run_bench(cfg, console=console, resume=resume, refresh=refresh)
+        except RuntimeError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1) from exc
+        if written:
+            readme_path = _write_output_metadata(cfg)
+            console.print(f"[green]Wrote README: {readme_path}[/green]")
+            if cfg.get_publish_repo_id():
+                repo_url = _publish_dataset_to_hub(cfg)
+                console.print(f"[green]Published dataset: {repo_url}[/green]")
+        else:
+            console.print("[yellow]bench: no rows written; skipping dataset card.[/yellow]")
+        return
 
     prompt_inputs = unique_prompt_inputs_by_completion_key(cfg.get_prompt_inputs())
     if not prompt_inputs:
@@ -1169,6 +1231,11 @@ output:
   # These files are excluded from resume detection, conversion, README generation, and uploads.
   failures_dir: ./failures
 
+  # Harbor bench-mode intermediates (downloaded sources, raw trials, normalized sessions).
+  # Defaults to a `bench` dir beside traces_dir (parallel to sandbox/failures), never inside
+  # the dataset. Set a path to override.
+  bench_dir: null
+
   # Used in the generated trace README.
   pretty_name: "My Agent Traces"
 
@@ -1178,6 +1245,23 @@ publish:
   repo_id: null
   hf_token: null
   private: false
+
+# Benchmark mode (`teich generate --mode bench`). Each source is run by a backend selected
+# by `type`: `harbor` (the harbor package; needs teich[harbor], Python 3.12+) or `swe-bench`
+# (the swebench package; needs teich[swe]). teich runs the configured agent on each task/
+# instance, harvests the plain native trace into output/{passed,failed,borderline}/, and
+# writes scores + provenance to output/metadata/<stem>.json. Intermediates live under
+# output.bench_dir (a sibling `bench` dir by default), outside the dataset/uploads.
+# `--resume` skips already-harvested tasks; `--refresh` re-downloads remote harbor sources
+# (no effect on swe-bench, which uses Hugging Face's own dataset cache).
+# Keep bench its own project: dedicated output.traces_dir + publish.repo_id.
+bench:
+  sources: []
+    # - { type: harbor,    source: terminal-bench@2.0 }          # registry spec
+    # - { type: harbor,    source: ./local-tasks }               # local task dir / dir of task dirs
+    # - { type: swe-bench, source: SWE-bench/SWE-bench_Verified, split: test }
+    # - { type: swe-bench, source: SWE-bench/SWE-bench_Lite, instances: [django__django-12345] }
+    #   # optional per-source: repo (git/HF registry), version, instances [..], backend (harbor)
 
 # Number of prompts to run in parallel.
 max_concurrency: 1
