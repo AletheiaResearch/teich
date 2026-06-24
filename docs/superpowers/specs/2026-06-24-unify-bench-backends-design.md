@@ -176,10 +176,14 @@ phase 3 (bench writes its own `metadata/`; it does not use `verification.py`).
 
 ## Optional dependencies
 
-`pyproject.toml`: `harbor = ["harbor>=0.15.0 ; python_full_version>='3.12'"]`,
-`swe = ["swebench>=4.1"]` (swebench requires-python is >=3.10, so — unlike harbor — the swe
-extra needs no Python-version marker), and `bench` kept as an alias for `harbor` (back-compat)
-or dropped. Each backend's `require()` raises a clear "install teich[harbor]" / "teich[swe]" error.
+`pyproject.toml` optional-dependencies:
+```toml
+harbor = ["harbor>=0.15.0 ; python_full_version >= '3.12'"]
+swe    = ["swebench>=4.1"]          # swebench requires-python >=3.10 -> no Python marker needed
+bench  = ["teich[harbor,swe]"]      # convenience: install both backends (self-referential extra)
+```
+(swebench needs no Python-version marker, unlike harbor.) Each backend's `require()` raises a
+clear "install teich[harbor]" / "teich[swe]" error.
 
 ## Error handling
 
