@@ -339,9 +339,14 @@ def _run_agent(
     finally:
         env_file.unlink(missing_ok=True)
         # Remove the per-task agent-layer image so it doesn't accumulate (the shared swebench
-        # instance image is left in place — it's reused and expensive to re-pull).
+        # instance image is left in place — it's reused and expensive to re-pull). Best-effort:
+        # check=False only swallows non-zero exits, so a missing docker / hang must not mask the
+        # real task result during this finally.
         if not cfg.output.keep_bench_images:
-            _docker(["rmi", "-f", agent_image], check=False)
+            try:
+                _docker(["rmi", "-f", agent_image], timeout=30, check=False)
+            except Exception:
+                pass
     if result.returncode != 0:
         # The shell masks the *agent's* exit with `|| true`, so a non-zero exit here is a Docker/
         # infra failure — fail the task rather than grade an empty patch as a real result.

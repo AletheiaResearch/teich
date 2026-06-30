@@ -213,12 +213,12 @@ def test_harbor_run_purges_image_unless_kept(monkeypatch, tmp_path):
         task=_t.SimpleNamespace(short_name="t1"),
     )
     fake_result = _t.SimpleNamespace(exception_info=None, verifier_result={"rewards": {"reward": 1.0}})
-    monkeypatch.setattr(hb, "_build_trial_config", lambda *a, **k: object())
-    monkeypatch.setattr(hb, "_create_and_run", lambda config: "coro")
+    monkeypatch.setattr(hb, "_build_trial_config", lambda *_a, **_k: object())
+    monkeypatch.setattr(hb, "_create_and_run", lambda _config: "coro")
     monkeypatch.setattr(hb.asyncio, "run", lambda _coro: (fake_trial, fake_result))
-    monkeypatch.setattr(hb, "_agent_dir", lambda trial: None)
+    monkeypatch.setattr(hb, "_agent_dir", lambda _trial: None)
     purged: list[str] = []
-    monkeypatch.setattr(hb, "_purge_images", lambda names: purged.extend(names))
+    monkeypatch.setattr(hb, "_purge_images", purged.extend)
     src = BenchSource(type="harbor", source="S")
 
     hb.HarborBackend().run(Config(output={"traces_dir": tmp_path / "o"}), src, base.BenchTask(id="t1", raw=tmp_path))
@@ -228,6 +228,27 @@ def test_harbor_run_purges_image_unless_kept(monkeypatch, tmp_path):
     kept = Config(output={"traces_dir": tmp_path / "o2", "keep_bench_images": True})
     hb.HarborBackend().run(kept, src, base.BenchTask(id="t1", raw=tmp_path))
     assert purged == []  # keep_bench_images -> no purge
+
+
+def test_harbor_run_purges_fallback_image_when_trial_fails(monkeypatch, tmp_path):
+    """When _create_and_run blows up before returning a trial, the finally still purges the
+    deterministic sanitize("hb__" + task_id) fallback so a failed setup can't leak its image."""
+    monkeypatch.setattr(hb, "_build_trial_config", lambda *_a, **_k: object())
+
+    def _explode(_config):
+        raise RuntimeError("setup failed before any trial")
+
+    # _create_and_run(config) raises while building asyncio.run's argument, so trial stays None.
+    monkeypatch.setattr(hb, "_create_and_run", _explode)
+    purged: list[str] = []
+    monkeypatch.setattr(hb, "_purge_images", purged.extend)
+    src = BenchSource(type="harbor", source="S")
+
+    with pytest.raises(RuntimeError, match="setup failed"):
+        hb.HarborBackend().run(
+            Config(output={"traces_dir": tmp_path / "o"}), src, base.BenchTask(id="my_task", raw=tmp_path)
+        )
+    assert purged == ["hb__my_task"]  # trial=None -> deterministic fallback (underscore preserved)
 
 
 def test_harbor_resolve_task_dirs(tmp_path):

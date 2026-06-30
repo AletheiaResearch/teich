@@ -349,7 +349,9 @@ def _purge_images(names: list[str]) -> None:
     """Best-effort ``docker rmi -f`` of the given images (ignore not-found / in-use / no docker)."""
     for name in names:
         try:
-            subprocess.run(["docker", "rmi", "-f", name], capture_output=True, timeout=120)
+            # Short timeout: this also runs in the finally after a Ctrl-C, so a slow/unhappy
+            # docker must not stall the exit for 2 minutes per image.
+            subprocess.run(["docker", "rmi", "-f", name], capture_output=True, timeout=30)
         except Exception:
             pass
 
