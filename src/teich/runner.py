@@ -32,6 +32,7 @@ from .config import PromptInput
 from .codex_auth_broker import CodexTokenBroker
 
 from .converter import (
+    NON_DATA_TRACE_DIR_NAMES,
     TEICH_AVAILABLE_TOOLS_CUSTOM_TYPE,
     convert_trace_to_training_example,
     convert_traces_to_training_data,
@@ -69,7 +70,6 @@ HERMES_DEFAULT_TOOLSETS = "safe,terminal,file,skills,memory,session_search,deleg
 HERMES_TRACE_WRITE_LOCK = threading.Lock()
 CHAT_REQUEST_MAX_ATTEMPTS = 3
 AGENT_TURN_RETRY_LIMIT = 3
-NON_DATA_TRACE_DIR_NAMES = {"partials", "failures"}
 
 
 def _make_tree_world_writable(path: Path) -> None:

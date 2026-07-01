@@ -1,7 +1,14 @@
 from pathlib import Path
 import json
 
-from teich.trace_readme import README_INLINE_TOOLS_MAX_CHARS, build_traces_readme, write_traces_readme
+import pytest
+
+from teich.trace_readme import (
+    README_INLINE_TOOLS_MAX_CHARS,
+    build_traces_readme,
+    size_category,
+    write_traces_readme,
+)
 
 
 def test_build_traces_readme_includes_model_and_references_tools(tmp_path: Path):
@@ -322,3 +329,223 @@ def test_write_traces_readme_uses_configured_tools_and_repo_id(tmp_path: Path):
     assert not (tmp_path / "tools.json").exists()
     assert '"name": "unobserved"' in readme
     assert '"description": "Available but not called"' in readme
+
+
+def _write_structured_row(path: Path, **extra) -> None:
+    row = {"prompt": "hi", "messages": [{"role": "assistant", "content": "ok"}], **extra}
+    path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+
+def test_readme_is_reward_aware_from_verification_sidecars(tmp_path: Path):
+    # Two verified rows with sidecars; the card summarizes their pass/fail counts.
+    _write_structured_row(tmp_path / "task-a.jsonl", passed=True, reward=1.0)
+    _write_structured_row(tmp_path / "task-b.jsonl", passed=False, reward=0.0)
+    verification = tmp_path / "verification"
+    verification.mkdir()
+    (verification / "task-a.json").write_text(json.dumps({"passed": True}), encoding="utf-8")
+    (verification / "task-b.json").write_text(
+        json.dumps({"passed": False, "reward": 0.0}), encoding="utf-8"
+    )
+    # A harbor intermediate that must NOT be treated as data or pollute the card (a nested
+    # `bench` dir is excluded by name; by default bench_dir is a sibling, never under output).
+    bench_sessions = tmp_path / "bench" / "sessions" / "add-bug"
+    bench_sessions.mkdir(parents=True)
+    (bench_sessions / "pi.jsonl").write_text('{"type":"session","id":"x"}\n', encoding="utf-8")
+
+    readme_path = write_traces_readme(
+        tmp_path, pretty_name="Verifiable Traces", tags=["agent-traces"]
+    )
+    readme = readme_path.read_text(encoding="utf-8")
+    assert "## Reward labels" in readme
+    assert '- "reward-labeled"' in readme
+    assert "Verified tasks: 2 (1 passed / 1 failed)." in readme
+    assert "1 of 2 carry an explicit numeric score" in readme  # task-b has reward 0.0
+    assert "Rows: 2" in readme  # the bench/ session file is excluded from the row count
+    # The train split is a top-level glob that excludes the nested bench/ session.
+    assert "- split: train" in readme
+    assert 'path: "*.jsonl"' in readme
+    assert "**/*.jsonl" not in readme  # top-level glob, not recursive
+    assert "bench/sessions/add-bug/pi.jsonl" not in readme
+
+
+def test_readme_has_no_reward_section_without_verification(tmp_path: Path):
+    _write_structured_row(tmp_path / "plain.jsonl")
+    readme_path = write_traces_readme(tmp_path, pretty_name="Plain Traces", tags=["agent-traces"])
+    readme = readme_path.read_text(encoding="utf-8")
+    assert "## Reward labels" not in readme
+    assert "reward-labeled" not in readme
+    # No routing folders -> single top-level train glob (not the recursive **/*.jsonl).
+    assert "- split: train" in readme and 'path: "*.jsonl"' in readme
+    assert "**/*.jsonl" not in readme
+
+
+def test_card_splits_reflect_routing_folders(tmp_path: Path):
+    for split in ("passed", "failed", "borderline"):
+        (tmp_path / split).mkdir()
+        _write_structured_row(tmp_path / split / f"bench-{split}.jsonl")
+    readme = write_traces_readme(tmp_path, pretty_name="Bench", tags=["agent-traces"]).read_text(encoding="utf-8")
+    for split in ("passed", "failed", "borderline"):
+        assert f"- split: {split}" in readme
+        assert f'path: "{split}/*.jsonl"' in readme
+    assert "split: train" not in readme
+    assert '- "reward-labeled"' in readme  # routed datasets are reward-labeled
+
+
+def test_card_omits_empty_routing_splits(tmp_path: Path):
+    # Only passed/ has files -> only a passed split is declared (no empty failed/borderline).
+    (tmp_path / "passed").mkdir()
+    _write_structured_row(tmp_path / "passed" / "bench-a.jsonl")
+    readme = write_traces_readme(tmp_path, pretty_name="Bench", tags=["x"]).read_text(encoding="utf-8")
+    assert "- split: passed" in readme
+    assert "- split: failed" not in readme and "- split: borderline" not in readme
+
+
+# Golden byte-for-byte lock for the Jinja-rendered card. The body below is identical to the
+# pre-refactor (hand-assembled) build_traces_readme output; the only structural addition is the
+# auto-populated ``size_categories`` block (always-on now). Any unintended drift in the template
+# or context wiring will fail this exact-equality check.
+_GOLDEN_CHAT_CARD = '''---
+pretty_name: "Chat Dataset"
+task_categories:
+- text-generation
+tags:
+- "chat"
+configs:
+- config_name: default
+  data_files:
+  - split: train
+    path: "*.jsonl"
+size_categories:
+- n<1K
+---
+
+This dataset was generated using [teich](https://github.com/TeichAI/teich) by [TeichAI](https://huggingface.co/TeichAI) <img src="https://cdn-avatars.huggingface.co/v1/production/uploads/6837935ac3b7ffe0d2559ce9/-AxyvV4wfUY8uo87kNKkK.png" width="20" height="20" style="display: inline-block; vertical-align: middle; margin: 0 3px;">
+
+# Chat Dataset
+
+This directory contains newline-delimited JSON training examples generated by teich.
+
+Rows: 1
+
+Model metadata: `gpt-4.1-mini`
+
+## Format
+
+Each file is newline-delimited JSON where every line is already a training example.
+Chat-only datasets include `messages` plus convenience fields like optional `system`, `prompt`, `follow_up_prompts`, `thinking`, `response`, and `responses`.
+Tool datasets can include the same normalized `messages` structure together with a `tools` field.
+
+## Example
+
+```json
+{"messages": [{"role": "system", "content": "You are a helpful assistant", "thinking": null}, {"role": "user", "content": "Hello", "thinking": null}, {"role": "assistant", "content": "Hi!", "thinking": "I should greet the user."}], "system": "You are a helpful assistant", "prompt": "Hello", "thinking": "I should greet the user.", "response": "Hi!", "model": "gpt-4.1-mini"}
+```
+
+## Training
+
+Use this dataset as `username/repo` with Teich's data preparation and training utilities.
+If you do not want Teich to handle chat-template formatting or masking, run `teich convert` to write standalone OpenAI-style JSONL rows with `prompt`, `messages`, `tools`, and `metadata`.
+Training setup details evolve over time, so the maintained guide lives in the [Teich training docs](https://github.com/TeichAI/teich/blob/main/docs/training.md).
+For loading, mixing, converting, and validating Teich datasets, see [Preparing Data](https://github.com/TeichAI/teich/blob/main/docs/prepare-data.md).
+'''
+
+
+def test_rendered_card_matches_golden_byte_for_byte(tmp_path: Path):
+    trace_file = tmp_path / "chat.jsonl"
+    trace_file.write_text(
+        '{"messages":[{"role":"system","content":"You are a helpful assistant","thinking":null},'
+        '{"role":"user","content":"Hello","thinking":null},'
+        '{"role":"assistant","content":"Hi!","thinking":"I should greet the user."}],'
+        '"system":"You are a helpful assistant","prompt":"Hello",'
+        '"thinking":"I should greet the user.","response":"Hi!","model":"gpt-4.1-mini"}\n',
+        encoding="utf-8",
+    )
+    readme = write_traces_readme(
+        tmp_path, pretty_name="Chat Dataset", tags=["chat"], model_id="gpt-4.1-mini"
+    ).read_text(encoding="utf-8")
+    assert readme == _GOLDEN_CHAT_CARD
+
+
+@pytest.mark.parametrize(
+    "row_count, expected",
+    [
+        (0, None),
+        (-5, None),
+        (999, "n<1K"),
+        (1000, "1K<n<10K"),
+        (9999, "1K<n<10K"),
+        (10_000, "10K<n<100K"),
+        (999_999, "100K<n<1M"),
+        (1_000_000, "1M<n<10M"),
+        (1_000_000_000_000, "n>1T"),
+        (5_000_000_000_000, "n>1T"),
+    ],
+)
+def test_size_category_bucket_boundaries(row_count, expected):
+    assert size_category(row_count) == expected
+
+
+def test_card_includes_license_when_set(tmp_path: Path):
+    _write_structured_row(tmp_path / "row.jsonl")
+    readme = write_traces_readme(
+        tmp_path, pretty_name="Licensed", tags=["x"], license="apache-2.0"
+    ).read_text(encoding="utf-8")
+    assert "license: apache-2.0\n" in readme
+    # Placed inside the frontmatter block, before the closing fence.
+    frontmatter = readme.split("---", 2)[1]
+    assert "license: apache-2.0" in frontmatter
+
+
+def test_card_omits_license_when_unset(tmp_path: Path):
+    _write_structured_row(tmp_path / "row.jsonl")
+    readme = write_traces_readme(tmp_path, pretty_name="Unlicensed", tags=["x"]).read_text(
+        encoding="utf-8"
+    )
+    assert "license:" not in readme
+
+
+def test_card_extra_keys_appear_and_reserved_keys_dropped(tmp_path: Path):
+    _write_structured_row(tmp_path / "row.jsonl")
+    readme = write_traces_readme(
+        tmp_path,
+        pretty_name="Extra",
+        tags=["x"],
+        card_extra={
+            "annotations_creators": ["machine-generated"],
+            "language": ["en"],
+            # Reserved keys the card owns must be dropped, not allowed to shadow.
+            "tags": ["should-not-appear"],
+            "pretty_name": "should-not-appear",
+            "size_categories": ["should-not-appear"],
+            "license": "should-not-appear",
+        },
+    ).read_text(encoding="utf-8")
+    frontmatter = readme.split("---", 2)[1]
+    assert "annotations_creators:" in frontmatter
+    assert "machine-generated" in frontmatter
+    assert "language:" in frontmatter
+    assert "should-not-appear" not in readme
+
+
+def test_card_extra_empty_dict_adds_no_lines(tmp_path: Path):
+    _write_structured_row(tmp_path / "row.jsonl")
+    baseline = write_traces_readme(tmp_path, pretty_name="Plain", tags=["x"]).read_text(
+        encoding="utf-8"
+    )
+    with_empty = write_traces_readme(
+        tmp_path, pretty_name="Plain", tags=["x"], card_extra={}
+    ).read_text(encoding="utf-8")
+    assert baseline == with_empty
+
+
+def test_custom_readme_template_override_renders(tmp_path: Path):
+    template = tmp_path / "card.md.j2"
+    template.write_text(
+        "---\npretty_name: \"{{ pretty_name }}\"\n---\nCustom card for {{ pretty_name }}, rows {{ rows_line }}.\n",
+        encoding="utf-8",
+    )
+    _write_structured_row(tmp_path / "row.jsonl")
+    readme = write_traces_readme(
+        tmp_path, pretty_name="Override", tags=["x"], readme_template=template
+    ).read_text(encoding="utf-8")
+    assert readme == '---\npretty_name: "Override"\n---\nCustom card for Override, rows Rows: 1.\n'
