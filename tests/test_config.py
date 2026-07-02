@@ -180,6 +180,28 @@ def test_config_readme_template_resolves_relative_to_config_dir(tmp_path: Path, 
     assert config.output.readme_template == template.resolve()
 
 
+def test_config_bench_source_resolves_relative_to_config_dir(tmp_path: Path, monkeypatch):
+    """A relative *local* bench source (./local-tasks) resolves against the config file, not CWD;
+    a registry spec (name@version) is left untouched."""
+    project = tmp_path / "project"
+    (project / "local-tasks").mkdir(parents=True)
+    config_file = project / "config.yaml"
+    config_file.write_text(
+        "bench:\n  sources:\n    - { type: harbor, source: ./local-tasks }\n", encoding="utf-8"
+    )
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)  # load from a different working directory
+
+    config = Config.from_yaml(config_file)
+    assert config.bench.sources[0].source == str((project / "local-tasks").resolve())
+
+    config_file.write_text(
+        "bench:\n  sources:\n    - { type: harbor, source: terminal-bench@2.0 }\n", encoding="utf-8"
+    )
+    assert Config.from_yaml(config_file).bench.sources[0].source == "terminal-bench@2.0"
+
+
 def test_config_prompts_file(tmp_path: Path):
     """Test loading structured prompts from CSV file."""
     prompts_file = tmp_path / "prompts.csv"

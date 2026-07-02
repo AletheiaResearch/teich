@@ -129,13 +129,21 @@ def test_tasks_rejects_langfuse_enabled():
 def test_agent_layer_for_known_providers():
     assert _agent_layer(_cfg("pi")).provider == "pi"
     assert _agent_layer(_cfg("codex")).provider == "codex"
-    # claude alias maps to claude-code
-    assert _agent_layer(_cfg("claude")).provider == "claude-code"
+    # claude alias maps to claude-code (needs an anthropic project, see the guard test below)
+    assert _agent_layer(_cfg("claude", api={"provider": "anthropic"})).provider == "claude-code"
 
 
 def test_agent_layer_rejects_unsupported_provider():
     with pytest.raises(RuntimeError, match="does not support agent provider 'chat'"):
         _agent_layer(_cfg("chat"))
+
+
+def test_agent_layer_rejects_claude_code_without_anthropic_provider():
+    # claude-code runs the Anthropic `claude` CLI; a non-anthropic project has no usable Claude
+    # creds in the container, so fail fast rather than emit empty traces.
+    with pytest.raises(RuntimeError, match="needs an anthropic-provider config"):
+        _agent_layer(_cfg("claude", api={"provider": "openrouter", "api_key": "sk-or"}))
+    assert _agent_layer(_cfg("claude", api={"provider": "anthropic", "api_key": "sk-ant"})).provider == "claude-code"
 
 
 def test_auth_env_openrouter_sets_both_keys():

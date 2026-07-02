@@ -65,17 +65,18 @@ def bench_root(cfg: Config) -> Path:
     dataset); overridable via ``output.bench_dir``. Re-checked here (not just at config
     load) so a ``--output`` override can't leave ``bench_dir`` inside the dataset.
     """
-    if cfg.output.bench_dir is not None:
-        root = Path(cfg.output.bench_dir)
-        traces = cfg.output.traces_dir.resolve()
-        if traces == root.resolve() or traces in root.resolve().parents:
-            raise RuntimeError(
-                f"output.bench_dir ({root}) must be outside output.traces_dir "
-                f"({cfg.output.traces_dir}); raw trials/sessions there would be uploaded "
-                "and misclassified as dataset rows."
-            )
-        return root
-    return cfg.output.traces_dir.parent / "bench"
+    root = Path(cfg.output.bench_dir) if cfg.output.bench_dir is not None else cfg.output.traces_dir.parent / "bench"
+    # Guard both the explicit override and the computed default: a bench root at/under traces_dir
+    # (e.g. output.traces_dir named ``bench``, so the sibling default collides with it) would get
+    # raw trials/sessions uploaded and misclassified as dataset rows.
+    traces = cfg.output.traces_dir.resolve()
+    if traces == root.resolve() or traces in root.resolve().parents:
+        raise RuntimeError(
+            f"bench working dir ({root}) must be outside output.traces_dir "
+            f"({cfg.output.traces_dir}); raw trials/sessions there would be uploaded and "
+            "misclassified as dataset rows. Set output.bench_dir explicitly or rename traces_dir."
+        )
+    return root
 
 
 def slug(value: str) -> str:
@@ -200,6 +201,12 @@ def harvest(cfg: Config, source: BenchSource, task: BenchTask, run: BenchRun) ->
     stem = bench_stem(source, task.id)
 
     trace_path = cfg.output.traces_dir / split / f"{stem}.jsonl"
+    # A re-run (without --resume) whose score crosses a routing boundary would otherwise leave a
+    # stale copy in the old split; the dataset scanners read every split, so a task would appear
+    # twice with contradictory labels. Drop any sibling copy before writing the new one.
+    for other in BENCH_SPLITS:
+        if other != split:
+            (cfg.output.traces_dir / other / f"{stem}.jsonl").unlink(missing_ok=True)
     trace_path.parent.mkdir(parents=True, exist_ok=True)
     trace_path.write_text("\n".join(run.native_lines) + "\n", encoding="utf-8")
 

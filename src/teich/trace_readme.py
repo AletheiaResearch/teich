@@ -419,7 +419,7 @@ def _reward_stats(traces_dir: Path, trace_files: Iterable[Path]) -> dict[str, in
     """
     live_stems = {path.stem for path in trace_files}
     counted: set[str] = set()
-    passed = failed = numeric = 0
+    passed = failed = borderline = numeric = 0
 
     def _numeric(reward: Any) -> bool:
         return isinstance(reward, (int, float)) and not isinstance(reward, bool)
@@ -456,14 +456,17 @@ def _reward_stats(traces_dir: Path, trace_files: Iterable[Path]) -> dict[str, in
                 passed += 1
             elif split == "failed":
                 failed += 1
+            elif split == "borderline":
+                borderline += 1  # a partial score (0<r<1): verified, but neither pass nor fail
             else:
-                continue  # borderline / unknown: verified but neither pass nor fail
+                continue  # unknown split: not a verified outcome
             counted.add(sidecar.stem)
             numeric += 1 if _numeric(data.get("reward")) else 0
 
-    if passed + failed == 0:
+    total = passed + failed + borderline
+    if total == 0:
         return None
-    return {"total": passed + failed, "passed": passed, "failed": failed, "numeric": numeric}
+    return {"total": total, "passed": passed, "failed": failed, "borderline": borderline, "numeric": numeric}
 
 
 def _sanitize_card_extra(card_extra: dict[str, Any] | None) -> dict[str, Any]:

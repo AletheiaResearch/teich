@@ -121,6 +121,17 @@ def _agent_layer(cfg: Config) -> AgentLayer:
             f"The swe-bench backend does not support agent provider {provider!r}; "
             f"use one of: {', '.join(sorted(_LAYERS))}."
         )
+    # The claude-code layer runs the Anthropic ``claude`` CLI, which authenticates via
+    # ``ANTHROPIC_*``; ``_auth_env`` only seeds those for an ``anthropic`` project. With any other
+    # api.provider the container has no usable Claude credentials, so the run would silently
+    # produce empty traces — fail fast instead. (Routing Claude through an OpenRouter/OpenAI proxy
+    # is the larger prompt-mode-parity follow-up.)
+    if layer.provider == "claude-code" and cfg.api.provider != "anthropic":
+        raise RuntimeError(
+            "The swe-bench claude-code agent runs the Anthropic `claude` CLI, which needs an "
+            f"anthropic-provider config; api.provider is {cfg.api.provider!r}. Set api.provider: "
+            "anthropic for swe-bench claude-code runs, or use a different agent provider."
+        )
     return layer
 
 

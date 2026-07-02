@@ -405,6 +405,18 @@ class Config(BaseModel):
                 if not template_path.is_absolute():
                     output_section["readme_template"] = (path.parent / template_path).resolve()
 
+        # Resolve a relative *local* bench source (./tasks, ../x, ~/x) against the config dir, like
+        # prompts_file — otherwise it's tried against the process CWD and falls through to the
+        # remote-download path. A registry spec (name@version, org/name) never starts with those.
+        bench_section = data.get("bench")
+        if isinstance(bench_section, dict):
+            for bench_source in bench_section.get("sources") or []:
+                if not isinstance(bench_source, dict):
+                    continue
+                spec = bench_source.get("source")
+                if isinstance(spec, str) and spec.strip().startswith(("./", "../", "~")):
+                    bench_source["source"] = str((path.parent / Path(spec.strip()).expanduser()).resolve())
+
         # Apply environment variable overrides
         if model_env := _get_env_alias("TEICH_MODEL"):
             data.setdefault("model", {})["model"] = model_env

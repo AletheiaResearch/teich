@@ -46,7 +46,7 @@ This is a verifiable dataset: rows carry the task verifier's outcome so it can b
 - `passed` (bool): whether the task verifier succeeded after the agent's edits
 - `reward` (float): the verifier's own score when it reports one, else the binary `1.0`/`0.0` implied by `passed`
 
-Verified tasks: {{ reward_stats.total }} ({{ reward_stats.passed }} passed / {{ reward_stats.failed }} failed).
+Verified tasks: {{ reward_stats.total }} ({{ reward_stats.passed }} passed / {{ reward_stats.failed }} failed{% if reward_stats.borderline %} / {{ reward_stats.borderline }} borderline{% endif %}).
 Each reward comes from the task verifier run after the agent's attempt.
 {% if reward_stats.numeric %}
 {{ reward_stats.numeric }} of {{ reward_stats.total }} carry an explicit numeric score (the rest are binary pass/fail).

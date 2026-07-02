@@ -151,6 +151,13 @@ def test_bench_root_rejects_in_tree_bench_dir(tmp_path):
         base.bench_root(Config(output={"traces_dir": tmp_path / "out", "bench_dir": tmp_path / "out"}))
 
 
+def test_bench_root_default_rejects_output_named_bench(tmp_path):
+    # --output bench makes the computed default sibling (traces_dir.parent/"bench") collide with
+    # the dataset dir; the default must be guarded too, not just an explicit output.bench_dir.
+    with pytest.raises(RuntimeError, match="must be outside"):
+        base.bench_root(Config(output={"traces_dir": tmp_path / "bench"}))
+
+
 # ------------------------------------------------------------------- base: harvest
 
 def test_harvest_writes_native_trace_and_metadata(tmp_path):
@@ -173,6 +180,26 @@ def test_harvest_writes_native_trace_and_metadata(tmp_path):
     assert meta["rewards"] == {"reward": 0.6, "tests": 0.8}            # full dict, no clamping
     assert meta["source"] == "terminal-bench-2.0" and meta["type"] == "harbor"
     assert meta["agent"] == "pi" and meta["model"] == "z-ai/glm-5.2"
+
+
+def test_harvest_reroute_removes_stale_split_copy(tmp_path):
+    # Re-harvesting a task (no --resume) whose score crosses a routing boundary must not leave a
+    # stale copy in the old split — the dataset scanners read every split.
+    cfg = Config(agent={"provider": "pi"}, output={"traces_dir": tmp_path / "output"})
+    source = BenchSource(type="harbor", source="ds")
+    task = base.BenchTask(id="t")
+    stem = base.bench_stem(source, "t")
+    base.harvest(cfg, source, task, base.BenchRun(native_lines=['{"type":"session"}'], rewards={"reward": 0.0}))
+    assert (tmp_path / "output" / "failed" / f"{stem}.jsonl").is_file()
+
+    paths, split = base.harvest(
+        cfg, source, task, base.BenchRun(native_lines=['{"type":"session"}'], rewards={"reward": 1.0})
+    )
+    assert split == "passed"
+    assert (tmp_path / "output" / "passed" / f"{stem}.jsonl").is_file()
+    assert not (tmp_path / "output" / "failed" / f"{stem}.jsonl").exists()
+    meta = json.loads((tmp_path / "output" / "metadata" / f"{stem}.json").read_text(encoding="utf-8"))
+    assert meta["split"] == "passed"
 
 
 # ------------------------------------------------------------------- harbor backend helpers

@@ -411,6 +411,25 @@ def test_reward_stats_from_bench_metadata_sidecars(tmp_path: Path):
     assert "2 of 2 carry an explicit numeric score" in readme
 
 
+def test_reward_stats_counts_borderline_bench_tasks(tmp_path: Path):
+    # A partial score (0<r<1) routes to borderline with a numeric reward; it must be counted as a
+    # verified task, not dropped (an all-borderline run must still show the reward section).
+    rows = (("passed", "bench-a", 1.0), ("failed", "bench-b", 0.0), ("borderline", "bench-c", 0.6))
+    metadata = tmp_path / "metadata"
+    metadata.mkdir()
+    for split, stem, reward in rows:
+        (tmp_path / split).mkdir(exist_ok=True)
+        _write_structured_row(tmp_path / split / f"{stem}.jsonl")
+        (metadata / f"{stem}.json").write_text(
+            json.dumps({"split": split, "reward": reward}), encoding="utf-8"
+        )
+    readme = write_traces_readme(tmp_path, pretty_name="Bench", tags=["agent-traces"]).read_text(
+        encoding="utf-8"
+    )
+    assert "Verified tasks: 3 (1 passed / 1 failed / 1 borderline)." in readme
+    assert "3 of 3 carry an explicit numeric score" in readme
+
+
 def test_readme_has_no_reward_section_without_verification(tmp_path: Path):
     _write_structured_row(tmp_path / "plain.jsonl")
     readme_path = write_traces_readme(tmp_path, pretty_name="Plain Traces", tags=["agent-traces"])
