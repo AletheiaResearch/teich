@@ -368,6 +368,49 @@ def test_readme_is_reward_aware_from_verification_sidecars(tmp_path: Path):
     assert "bench/sessions/add-bug/pi.jsonl" not in readme
 
 
+def test_card_data_files_reach_nested_extractions(tmp_path: Path):
+    # Cursor extraction writes transcripts under nested project-relative dirs. A bare top-level
+    # `*.jsonl` would advertise an empty dataset while the card still counts these rows, so the
+    # HF data_files config must include a recursive glob for each data-bearing subdir.
+    nested = tmp_path / "c-Users-test-project" / "agent-transcripts" / "session-1"
+    nested.mkdir(parents=True)
+    _write_structured_row(nested / "session-1.jsonl")
+    # a non-data dir (excluded by name) must NOT be advertised
+    (tmp_path / "failures").mkdir()
+    _write_structured_row(tmp_path / "failures" / "oops.jsonl")
+
+    readme = write_traces_readme(tmp_path, pretty_name="Cursor Traces", tags=["agent-traces"]).read_text(
+        encoding="utf-8"
+    )
+    assert "- split: train" in readme
+    assert 'path: "*.jsonl"' in readme  # top-level files still advertised
+    assert 'path: "c-Users-test-project/**/*.jsonl"' in readme  # nested extraction reached
+    assert "failures/" not in readme  # non-data dir not advertised
+    assert "Rows: 1" in readme  # the nested row is counted (and now reachable)
+
+
+def test_reward_stats_from_bench_metadata_sidecars(tmp_path: Path):
+    # Bench harvest writes metadata/<stem>.json (split + numeric reward), not verification/.
+    # The card's reward summary must read those so bench datasets show pass/fail counts.
+    for split, stem in (("passed", "bench-ds-a"), ("failed", "bench-ds-b")):
+        (tmp_path / split).mkdir(exist_ok=True)
+        _write_structured_row(tmp_path / split / f"{stem}.jsonl")
+    metadata = tmp_path / "metadata"
+    metadata.mkdir()
+    (metadata / "bench-ds-a.json").write_text(
+        json.dumps({"task": "a", "split": "passed", "reward": 1.0}), encoding="utf-8"
+    )
+    (metadata / "bench-ds-b.json").write_text(
+        json.dumps({"task": "b", "split": "failed", "reward": 0.0}), encoding="utf-8"
+    )
+    readme = write_traces_readme(tmp_path, pretty_name="Bench", tags=["agent-traces"]).read_text(
+        encoding="utf-8"
+    )
+    assert "## Reward labels" in readme
+    assert "Verified tasks: 2 (1 passed / 1 failed)." in readme
+    assert "2 of 2 carry an explicit numeric score" in readme
+
+
 def test_readme_has_no_reward_section_without_verification(tmp_path: Path):
     _write_structured_row(tmp_path / "plain.jsonl")
     readme_path = write_traces_readme(tmp_path, pretty_name="Plain Traces", tags=["agent-traces"])

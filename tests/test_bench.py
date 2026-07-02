@@ -87,6 +87,46 @@ def test_source_id_distinguishes_by_knobs():
     assert base.source_id(BenchSource(type="swe-bench", source="ds")) == "ds"
 
 
+def test_source_id_bounds_large_instance_list():
+    # A big instances subset must not leak its full comma-joined list into source_id (and thus
+    # into filenames / Docker tags / container names past OS/Docker length limits).
+    many = [f"repo__proj-{i:04d}" for i in range(30)]
+    src = BenchSource(type="swe-bench", source="ds", instances=many)
+    sid = base.source_id(src)
+    assert len(sid) < 60 and "repo__proj-0029" not in sid
+    # order-independent (listing order shouldn't spawn a distinct id / dataset)
+    assert base.source_id(BenchSource(type="swe-bench", source="ds", instances=list(reversed(many)))) == sid
+    # distinct instance sets stay distinct
+    assert base.source_id(BenchSource(type="swe-bench", source="ds", instances=many[:15])) != sid
+    # a single instance stays human-readable
+    assert "django__django-1" in base.source_id(
+        BenchSource(type="swe-bench", source="ds", instances=["django__django-1"])
+    )
+
+
+def test_harbor_source_slug_keys_on_repo():
+    # Same spec/version but different repo must not share a download cache dir (else the second
+    # source silently reuses the first repo's tasks). Absent repo, the key is unchanged.
+    assert hb._source_slug("ds", "1.0") == hb._source_slug("ds", "1.0", None)
+    assert hb._source_slug("ds", "1.0", "orgA/reg") != hb._source_slug("ds", "1.0", "orgB/reg")
+    assert hb._source_slug("ds", "1.0", "orgA/reg") != hb._source_slug("ds", "1.0")
+
+
+def test_run_bench_rejects_codex_host_auth(tmp_path, monkeypatch):
+    # Bench backends don't wire Codex host auth into the task container; fail fast rather than
+    # launch a silently-unauthenticated run when host auth is the only configured credential.
+    for var in ("TEICH_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    cfg = Config(
+        agent={"provider": "codex", "codex": {"use_host_auth": True}},
+        bench={"sources": [{"type": "harbor", "source": "terminal-bench@2.0"}]},
+        output={"traces_dir": tmp_path / "o"},
+    )
+    assert cfg.get_api_key() is None
+    with pytest.raises(RuntimeError, match="does not yet support Codex host auth"):
+        run_bench(cfg)
+
+
 def test_existing_output_across_splits(tmp_path):
     cfg = Config(output={"traces_dir": tmp_path / "output"})
     assert base.existing_output(cfg, "bench-x") is None

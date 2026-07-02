@@ -120,8 +120,13 @@ def _classify_remote_source(source: str, repo: str | None, version: str | None) 
     return "registry", _ref()
 
 
-def _source_slug(source: str, version: str | None) -> str:
+def _source_slug(source: str, version: str | None, repo: str | None = None) -> str:
     raw = source if "@" in source else (f"{source}@{version}" if version else source)
+    # ``repo`` selects the download origin in ``_download_async`` and is a discriminating
+    # knob in ``source_id``; fold it into the cache key too, else two sources with the same
+    # spec/version but different repos share a cache dir and the second reuses the first's tasks.
+    if repo:
+        raw = f"{repo}#{raw}"
     return re.sub(r"[^A-Za-z0-9._-]+", "-", raw).strip("-") or "source"
 
 
@@ -169,7 +174,7 @@ def _resolve_source(cfg: Config, source: BenchSource, *, refresh: bool) -> Path:
     local = Path(spec).expanduser()
     if local.exists():
         return local
-    cache_dir = base.bench_root(cfg) / "sources" / _source_slug(spec, source.version)
+    cache_dir = base.bench_root(cfg) / "sources" / _source_slug(spec, source.version, source.repo)
     root = None if refresh else _task_root(cache_dir)
     if root is None:
         if refresh and cache_dir.exists():

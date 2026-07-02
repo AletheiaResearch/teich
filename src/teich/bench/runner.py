@@ -38,6 +38,15 @@ def run_bench(
             "      - { type: swe-bench, source: SWE-bench/SWE-bench_Verified }"
         )
 
+    # Bench backends don't yet seed the Codex host-auth snapshot / token broker into the task
+    # containers (unlike prompt mode). Fail fast rather than launch a silently-unauthenticated
+    # run when host auth is the only credential configured.
+    if cfg.get_agent_provider() == "codex" and cfg.agent.codex.use_host_auth and not cfg.get_api_key():
+        raise RuntimeError(
+            "bench mode does not yet support Codex host auth (agent.codex.use_host_auth). "
+            "Configure an API key for the run, or disable use_host_auth."
+        )
+
     def out(message: str) -> None:
         if console is not None:
             console.print(message)

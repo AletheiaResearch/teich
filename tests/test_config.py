@@ -162,6 +162,24 @@ def test_config_generates_chat_dataset_tags():
     assert config.get_dataset_tags() == ["conversational", "distillation", "teich", "gpt-4.1-mini"]
 
 
+def test_config_readme_template_resolves_relative_to_config_dir(tmp_path: Path, monkeypatch):
+    """A relative output.readme_template resolves against the config file, like prompts_file —
+    not the process CWD, so `teich -c project/config.yaml` works from another directory."""
+    project = tmp_path / "project"
+    project.mkdir()
+    template = project / "card.md.j2"
+    template.write_text("# {{ pretty_name }}\n", encoding="utf-8")
+    config_file = project / "config.yaml"
+    config_file.write_text("output:\n  readme_template: card.md.j2\n", encoding="utf-8")
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)  # load from a different working directory
+
+    config = Config.from_yaml(config_file)
+    assert config.output.readme_template == template.resolve()
+
+
 def test_config_prompts_file(tmp_path: Path):
     """Test loading structured prompts from CSV file."""
     prompts_file = tmp_path / "prompts.csv"

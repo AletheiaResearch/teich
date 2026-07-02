@@ -219,16 +219,29 @@ def _split_data_files(traces_dir: Path) -> list[tuple[str, str]]:
     """Dataset-card split -> file glob, reflecting the actual routing folders.
 
     When routed split folders (passed/failed/borderline) hold data, expose them as
-    HF splits; otherwise a single ``train`` split over the top-level files only —
-    ``*.jsonl`` (not ``**/*.jsonl``), so the non-data subdirs the body excludes
-    (partials/failures/bench/verification) are never advertised in the card.
+    HF splits. Otherwise a single ``train`` split: the top-level ``*.jsonl`` files
+    plus a recursive ``<dir>/**/*.jsonl`` for each data-bearing subdir that isn't a
+    known non-data dir (partials/failures/bench/verification/...). Nested extractions
+    (e.g. Cursor's project-relative transcripts) live only in subdirs, so a bare
+    top-level ``*.jsonl`` would advertise an empty dataset while the card still counts
+    those rows — HF's ``data_files`` config must reach them.
     """
+    routing = ("passed", "failed", "borderline")
     splits = [
         (name, f"{name}/*.jsonl")
-        for name in ("passed", "failed", "borderline")
+        for name in routing
         if (traces_dir / name).is_dir() and any((traces_dir / name).glob("*.jsonl"))
     ]
-    return splits or [("train", "*.jsonl")]
+    if splits:
+        return splits
+    patterns = ["*.jsonl"]
+    if traces_dir.is_dir():
+        for child in sorted(traces_dir.iterdir()):
+            if not child.is_dir() or child.name in NON_DATA_TRACE_DIR_NAMES or child.name in routing:
+                continue
+            if any(child.rglob("*.jsonl")):
+                patterns.append(f"{child.name}/**/*.jsonl")
+    return [("train", pattern) for pattern in patterns]
 
 
 def _truncate_text(value: str, max_chars: int) -> str:
@@ -394,35 +407,60 @@ def _tools_details_block(tools: list[dict[str, Any]]) -> list[str]:
 
 
 def _reward_stats(traces_dir: Path, trace_files: Iterable[Path]) -> dict[str, int] | None:
-    """Summarize verifier outcomes from the canonical ``verification/`` sidecars.
+    """Summarize verifier outcomes for the dataset card.
 
-    Both reward-labeled paths write a ``verification/<stem>.json`` with a ``passed``
-    bool (bench also writes a numeric ``reward``), so one scan describes a dataset
-    that is all-prompts, all-bench, or a mix. Only sidecars whose stem matches a live
-    dataset row are counted, so a stale/orphaned sidecar can't inflate the count.
+    Two reward-labeled paths write sidecars in different shapes: the prompt-mode seed
+    verifier writes ``verification/<stem>.json`` with a ``passed`` bool, while bench
+    harvest writes ``metadata/<stem>.json`` with a ``split`` (passed/failed/borderline)
+    and a numeric ``reward``. Scan both so the counts describe an all-prompts, all-bench,
+    or mixed dataset. Only sidecars whose stem matches a live dataset row are counted (so
+    a stale/orphaned sidecar can't inflate the count), and each stem is counted once.
     Returns None when nothing is verified.
     """
-    verification_dir = traces_dir / "verification"
-    if not verification_dir.is_dir():
-        return None
     live_stems = {path.stem for path in trace_files}
+    counted: set[str] = set()
     passed = failed = numeric = 0
-    for sidecar in sorted(verification_dir.glob("*.json")):
-        if sidecar.stem not in live_stems:
-            continue
-        try:
-            data = json.loads(sidecar.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if not isinstance(data, dict) or not isinstance(data.get("passed"), bool):
-            continue
-        if data["passed"]:
-            passed += 1
-        else:
-            failed += 1
-        reward = data.get("reward")
-        if isinstance(reward, (int, float)) and not isinstance(reward, bool):
-            numeric += 1
+
+    def _numeric(reward: Any) -> bool:
+        return isinstance(reward, (int, float)) and not isinstance(reward, bool)
+
+    verification_dir = traces_dir / "verification"
+    if verification_dir.is_dir():
+        for sidecar in sorted(verification_dir.glob("*.json")):
+            if sidecar.stem not in live_stems or sidecar.stem in counted:
+                continue
+            try:
+                data = json.loads(sidecar.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(data, dict) or not isinstance(data.get("passed"), bool):
+                continue
+            counted.add(sidecar.stem)
+            passed += 1 if data["passed"] else 0
+            failed += 0 if data["passed"] else 1
+            numeric += 1 if _numeric(data.get("reward")) else 0
+
+    metadata_dir = traces_dir / "metadata"
+    if metadata_dir.is_dir():
+        for sidecar in sorted(metadata_dir.glob("*.json")):
+            if sidecar.stem not in live_stems or sidecar.stem in counted:
+                continue
+            try:
+                data = json.loads(sidecar.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            split = data.get("split")
+            if split == "passed":
+                passed += 1
+            elif split == "failed":
+                failed += 1
+            else:
+                continue  # borderline / unknown: verified but neither pass nor fail
+            counted.add(sidecar.stem)
+            numeric += 1 if _numeric(data.get("reward")) else 0
+
     if passed + failed == 0:
         return None
     return {"total": passed + failed, "passed": passed, "failed": failed, "numeric": numeric}

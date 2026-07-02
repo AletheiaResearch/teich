@@ -11,6 +11,7 @@ in one dataset can never collide; an unfinished task writes nothing and is retri
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
@@ -82,6 +83,23 @@ def slug(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-") or "x"
 
 
+def _instances_key(instances: list[str] | None) -> str | None:
+    """A bounded, order-independent discriminator for an ``instances`` subset.
+
+    The full comma-joined list would otherwise flow through ``source_id`` into per-task
+    filenames, Docker tags, and container/env-file names; a dozen ~22-char SWE-bench IDs
+    blow past the 255-byte path-component and 128-char Docker-tag limits and crash the run
+    before any result is written. Short lists stay readable; longer ones collapse to a
+    stable hash (sorted, so listing order doesn't spawn a distinct id).
+    """
+    if not instances:
+        return None
+    joined = ",".join(sorted(instances))
+    if len(joined) <= 40:
+        return joined
+    return "i" + hashlib.sha1(joined.encode("utf-8")).hexdigest()[:8]
+
+
 def source_id(source: BenchSource) -> str:
     """Stable identifier for a source, used to namespace its output files.
 
@@ -98,7 +116,7 @@ def source_id(source: BenchSource) -> str:
             source.repo,
             source.version,
             source.split,
-            (",".join(source.instances) if source.instances else None),
+            _instances_key(source.instances),
             source.backend if source.backend != "docker" else None,
         )
         if part

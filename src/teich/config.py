@@ -394,6 +394,17 @@ class Config(BaseModel):
                 if not Path(prompts_file_path).is_absolute():
                     data["prompts_file"] = (path.parent / prompts_file_path).resolve()
 
+        # Resolve a relative output.readme_template against the config file, like prompts_file
+        # above — otherwise it's validated against the process CWD and `teich -c project/x.yaml`
+        # from elsewhere fails even when the template sits next to the config.
+        output_section = data.get("output")
+        if isinstance(output_section, dict):
+            template = output_section.get("readme_template")
+            if isinstance(template, str) and template.strip():
+                template_path = Path(template).expanduser()
+                if not template_path.is_absolute():
+                    output_section["readme_template"] = (path.parent / template_path).resolve()
+
         # Apply environment variable overrides
         if model_env := _get_env_alias("TEICH_MODEL"):
             data.setdefault("model", {})["model"] = model_env
