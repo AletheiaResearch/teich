@@ -153,13 +153,38 @@ def test_auth_env_openai_only_sets_openai_key():
     assert "OPENROUTER_API_KEY" not in env
 
 
-def test_auth_env_anthropic_sets_anthropic_key_only():
+def test_auth_env_anthropic_sets_anthropic_key_only(monkeypatch):
     # The anthropic key must not be shadowed under OPENAI_API_KEY (would break OpenAI agents).
+    monkeypatch.delenv("TEICH_CLAUDE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     cfg = _cfg("claude", api={"provider": "anthropic", "api_key": "sk-ant"})
     env = _auth_env(cfg)
     assert env["ANTHROPIC_API_KEY"] == "sk-ant"
     assert "OPENAI_API_KEY" not in env
     assert "OPENROUTER_API_KEY" not in env
+
+
+def test_auth_env_claude_token_wins_over_api_key(monkeypatch):
+    """Subscription auth exports the token and no API key (which would win over it)."""
+    monkeypatch.delenv("TEICH_CLAUDE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-token")
+    cfg = Config(
+        agent={"provider": "claude-code"},
+        api={"provider": "anthropic", "api_key": "sk-ant-should-not-leak"},
+    )
+    env = _auth_env(cfg)
+    assert env == {"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-token"}
+
+
+def test_auth_env_claude_without_token_uses_api_key(monkeypatch):
+    monkeypatch.delenv("TEICH_CLAUDE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    cfg = Config(
+        agent={"provider": "claude-code"},
+        api={"provider": "anthropic", "api_key": "sk-ant"},
+    )
+    env = _auth_env(cfg)
+    assert env == {"ANTHROPIC_API_KEY": "sk-ant"}
 
 
 # --------------------------------------------------------------------------- run command (model)

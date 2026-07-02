@@ -1063,6 +1063,12 @@ class DockerRuntimeRunner:
             self._langfuse_container_base_url() or ""
         )
 
+    def _timezone_docker_args(self) -> list[str]:
+        """`docker run` args that set TZ in the container from `config.timezone`."""
+        if not self.config.timezone:
+            return []
+        return ["-e", f"TZ={self.config.timezone}"]
+
     @staticmethod
     def _prompt_preview(prompt: str, limit: int = 60) -> str:
         normalized = " ".join(prompt.split())
@@ -2480,6 +2486,7 @@ class CodexRunner(DockerRuntimeRunner):
             "-w",
             WORKSPACE_IN_CONTAINER,
         ]
+        cmd.extend(self._timezone_docker_args())
         broker_active = broker is not None
         if (
             proxy_target
@@ -2906,6 +2913,10 @@ class ExternalCliRunner(DockerRuntimeRunner):
     def _langfuse_env_items(self) -> list[tuple[str, str]]:
         return []
 
+    def _agent_env_items(self) -> list[tuple[str, str]]:
+        """Agent-specific container env vars; overridden per runner."""
+        return []
+
     def _prepare_agent_home(self, home_dir: Path) -> None:
         return
 
@@ -2937,6 +2948,7 @@ class ExternalCliRunner(DockerRuntimeRunner):
             "-w",
             WORKSPACE_IN_CONTAINER,
         ]
+        command.extend(self._timezone_docker_args())
         configured_base_url = self.config.get_base_url()
         base_url_is_host_local = bool(
             configured_base_url
@@ -2948,6 +2960,7 @@ class ExternalCliRunner(DockerRuntimeRunner):
             *self._api_env_items(),
             *self._base_url_env_items(),
             *self._langfuse_env_items(),
+            *self._agent_env_items(),
         ]:
             command.extend(["-e", f"{key}={value}"])
         command.append(self.image_name)
@@ -3245,14 +3258,30 @@ class ClaudeCodeRunner(ExternalCliRunner):
             ("LANGFUSE_BASE_URL", self._langfuse_container_base_url() or ""),
         ]
 
+    def _agent_env_items(self) -> list[tuple[str, str]]:
+        # 0 is meaningful (disables thinking on models that allow it), so only
+        # None is "unset".
+        if self.config.agent.claude.max_thinking_tokens is None:
+            return []
+        return [("MAX_THINKING_TOKENS", str(self.config.agent.claude.max_thinking_tokens))]
+
     def _prepare_agent_home(self, home_dir: Path) -> None:
-        if not self.config.agent.langfuse.enabled:
+        settings = self._claude_settings()
+        if not settings:
             return
-        hook = {"hooks": [{"type": "command", "command": CLAUDE_LANGFUSE_HOOK_COMMAND}]}
-        settings = {"hooks": {"Stop": [hook], "SessionEnd": [hook]}}
         settings_path = home_dir / "settings.json"
         settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
         settings_path.chmod(0o666)
+
+    def _claude_settings(self) -> dict[str, object]:
+        """Compose the container's ~/.claude/settings.json from config."""
+        settings: dict[str, object] = {}
+        if self.config.agent.claude.always_thinking is not None:
+            settings["alwaysThinkingEnabled"] = self.config.agent.claude.always_thinking
+        if self.config.agent.langfuse.enabled:
+            hook = {"hooks": [{"type": "command", "command": CLAUDE_LANGFUSE_HOOK_COMMAND}]}
+            settings["hooks"] = {"Stop": [hook], "SessionEnd": [hook]}
+        return settings
 
     @staticmethod
     def _list_native_session_files(home_dir: Path) -> list[Path]:
@@ -3336,6 +3365,12 @@ class ClaudeCodeRunner(ExternalCliRunner):
         ]
 
     def _api_env_items(self) -> list[tuple[str, str]]:
+        token = self.config.get_claude_oauth_token() if self.config.claude_host_auth_active() else None
+        if token:
+            # Subscription auth: pass only the long-lived OAuth token, never an
+            # API key — ANTHROPIC_API_KEY silently takes precedence over
+            # subscription credentials inside Claude Code and would bill the API.
+            return [("CLAUDE_CODE_OAUTH_TOKEN", token)]
         api_key = self.config.get_api_key() or ("none" if self.config.get_base_url() else "")
         if not api_key:
             return []
@@ -3398,6 +3433,11 @@ class ClaudeCodeRunner(ExternalCliRunner):
         permission_mode = self._permission_mode()
         if permission_mode:
             claude_command.extend(["--permission-mode", permission_mode])
+        if self.config.model.reasoning_effort:
+            claude_command.extend(["--effort", self.config.model.reasoning_effort])
+        fallback_model = self.config.get_claude_fallback_model()
+        if fallback_model:
+            claude_command.extend(["--fallback-model", fallback_model])
         if self.config.developer_instructions:
             claude_command.extend(["--append-system-prompt", self.config.developer_instructions])
         if resume_session_id:
@@ -5489,6 +5529,7 @@ class PiRunner(DockerRuntimeRunner):
             "-w",
             WORKSPACE_IN_CONTAINER,
         ]
+        command.extend(self._timezone_docker_args())
         configured_base_url = self.config.get_base_url()
         if configured_base_url and self._container_base_url(configured_base_url) != configured_base_url:
             command.extend(["--add-host", "host.docker.internal:host-gateway"])
@@ -5559,6 +5600,7 @@ class PiRunner(DockerRuntimeRunner):
             "-w",
             WORKSPACE_IN_CONTAINER,
         ]
+        command.extend(self._timezone_docker_args())
         configured_base_url = self.config.get_base_url()
         if configured_base_url and self._container_base_url(configured_base_url) != configured_base_url:
             command.extend(["--add-host", "host.docker.internal:host-gateway"])
