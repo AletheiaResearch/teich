@@ -600,6 +600,13 @@ def test_timezone_rejects_unknown_zone():
         Config(timezone="Europ/Ljubljana")
 
 
+def test_timezone_rejects_structurally_invalid_keys():
+    """ZoneInfo raises plain ValueError for these; they must not escape as tracebacks."""
+    for value in ("", "/", "../UTC"):
+        with pytest.raises(ValueError, match="Unknown IANA timezone"):
+            Config(timezone=value)
+
+
 def test_claude_settings_from_yaml(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("TEICH_MODEL", raising=False)
     config_file = tmp_path / "config.yaml"

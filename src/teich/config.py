@@ -17,6 +17,12 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 GITHUB_REPO_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 PLACEHOLDER_API_KEYS = {"", "none", "null", "dummy", "placeholder", "example", "local"}
 CLAUDE_PROVIDER_ALIASES = frozenset({"claude", "claude-code", "claude_code"})
+# Resolution order for the Claude OAuth token env fallback; also drives the
+# source reporting in the CLI notice, so keep it the single source of truth.
+CLAUDE_OAUTH_TOKEN_ENV_ALIASES: tuple[str, ...] = (
+    "TEICH_CLAUDE_OAUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+)
 
 
 def _api_key_env_aliases(provider: str | None) -> list[str]:
@@ -427,9 +433,11 @@ class Config(BaseModel):
             return None
         from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+        # ZoneInfo raises ValueError (not ZoneInfoNotFoundError) for structurally
+        # invalid keys like "" or "../UTC"; normalize both to the config error.
         try:
             ZoneInfo(value)
-        except ZoneInfoNotFoundError as exc:
+        except (ValueError, ZoneInfoNotFoundError) as exc:
             raise ValueError(f"Unknown IANA timezone: {value!r}") from exc
         return value
 
@@ -524,14 +532,14 @@ class Config(BaseModel):
         token = self.agent.claude.oauth_token
         if isinstance(token, str) and token.strip():
             return token.strip()
-        return _get_env_alias("TEICH_CLAUDE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+        return _get_env_alias(*CLAUDE_OAUTH_TOKEN_ENV_ALIASES)
 
     def get_claude_oauth_token_source(self) -> str | None:
         """Name the source ``get_claude_oauth_token`` resolves from (for CLI messaging)."""
         token = self.agent.claude.oauth_token
         if isinstance(token, str) and token.strip():
             return "agent.claude.oauth_token"
-        for name in ("TEICH_CLAUDE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
+        for name in CLAUDE_OAUTH_TOKEN_ENV_ALIASES:
             if _get_env_alias(name):
                 return name
         return None
