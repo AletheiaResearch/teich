@@ -311,6 +311,10 @@ class BenchSource(BaseModel):
     a Hugging Face dataset id (or a local json/jsonl path). ``version``/``repo`` are harbor
     knobs; ``split``/``instances`` select swe-bench rows; ``backend`` is harbor's
     EnvironmentType. Remote data is fetched into ``<output.bench_dir>/`` and run locally.
+
+    ``namespace`` (swe-bench only) is the Docker image namespace for instance images: the
+    default ``"swebench"`` pulls the published ``swebench/...`` images; set it to ``null`` to
+    build instance images locally, which is required for custom/unpublished instances.
     """
     type: str = "harbor"
     source: str
@@ -319,6 +323,7 @@ class BenchSource(BaseModel):
     split: str | None = None
     instances: list[str] | None = None
     backend: str = "docker"
+    namespace: str | None = "swebench"
 
 
 class BenchConfig(BaseModel):

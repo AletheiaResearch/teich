@@ -35,9 +35,9 @@ SWE_INSTALL_HINT = (
     "`pip install 'teich[swe]'` (requires Python 3.10+)."
 )
 
-# SWE-bench publishes prebuilt instance images under this Docker namespace; using them
-# means we pull one image and add a thin agent layer instead of rebuilding base+env+instance.
-DEFAULT_NAMESPACE = "swebench"
+# SWE-bench publishes prebuilt instance images under the "swebench" Docker namespace (the
+# per-source default): we pull one image and add a thin agent layer instead of rebuilding
+# base+env+instance. A source with ``namespace: null`` builds instance images locally instead.
 TESTBED = "/testbed"  # swebench DOCKER_WORKDIR: the repo @ base_commit lives here
 CAPTURE = "/teich-out"  # mounted host dir for the prompt, the agent session, and the diff
 
@@ -446,7 +446,9 @@ class SweBenchBackend:
 
         instance = task.raw
         layer = _agent_layer(cfg)  # fail fast on an unsupported provider, before any Docker work
-        namespace = DEFAULT_NAMESPACE
+        # Default "swebench" pulls the published instance image; namespace=None builds it locally
+        # (make_test_spec + _ensure_instance_image both honor it), needed for custom instances.
+        namespace = source.namespace
         spec = make_test_spec(instance, namespace=namespace)
         timeout = cfg.timeout_seconds if cfg.timeout_seconds and cfg.timeout_seconds > 0 else None
         _ensure_instance_image(spec, namespace=namespace, timeout=timeout)

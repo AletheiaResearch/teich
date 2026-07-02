@@ -104,6 +104,42 @@ def test_source_id_bounds_large_instance_list():
     )
 
 
+def test_bench_source_namespace_field():
+    # swe-bench image namespace: default "swebench" pulls published images; null builds custom
+    # instances locally. (The pull/build execution itself is Docker/integration-only.)
+    assert BenchSource(type="swe-bench", source="ds").namespace == "swebench"
+    assert BenchSource(type="swe-bench", source="ds", namespace=None).namespace is None
+
+
+def test_bench_progress_tracks_counts_when_disabled():
+    # No terminal -> no live bar, but the pass/fail/borderline/error tally is still tracked.
+    p = bench_runner._BenchProgress(console=None)
+    assert not p.enabled
+    with p:
+        bar = p.add_source("swe: ds", 4)
+        assert bar is None
+        p.advance(bar, split="passed")
+        p.advance(bar, split="borderline")
+        p.advance(bar, split="failed")
+        p.advance(bar, errored=True)
+    assert (p.passed, p.failed, p.borderline, p.errored) == (1, 1, 1, 1)
+
+
+def test_bench_progress_renders_with_terminal_console():
+    # A forced-terminal console builds the rich Progress; exercises the column/field wiring
+    # (e.g. the `tally` field must be supplied to add_task) without asserting rendered output.
+    from rich.console import Console
+
+    p = bench_runner._BenchProgress(Console(force_terminal=True))
+    assert p.enabled
+    with p:
+        bar = p.add_source("swe: ds", 2)
+        assert bar is not None
+        p.advance(bar, split="passed")
+        p.advance(bar, errored=True)
+    assert (p.passed, p.errored) == (1, 1)
+
+
 def test_harbor_source_slug_keys_on_repo():
     # Same spec/version but different repo must not share a download cache dir (else the second
     # source silently reuses the first repo's tasks). Absent repo, the key is unchanged.
