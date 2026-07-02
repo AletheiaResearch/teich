@@ -383,6 +383,39 @@ def test_harbor_run_keeps_prebuilt_image_shared_across_tasks(monkeypatch, tmp_pa
     assert "example/solo:v1" in purged  # unique to t3 -> purged
 
 
+def test_harbor_run_purges_image_duplicated_within_one_task(monkeypatch, tmp_path):
+    """One task declaring the same image for both its agent and verifier environments is
+    NOT sharing across tasks: the image is still unique to the task and must be purged."""
+    pytest.importorskip("tomllib")
+    root = tmp_path / "tasks"
+    d1, d2 = root / "t1", root / "t2"
+    d1.mkdir(parents=True)
+    (d1 / "task.toml").write_text(
+        '[environment]\ndocker_image = "example/both:v1"\n'
+        '[verifier.environment]\ndocker_image = "example/both:v1"\n',
+        encoding="utf-8",
+    )
+    d2.mkdir()
+    (d2 / "task.toml").write_text('[environment]\ndocker_image = "example/other:v1"\n', encoding="utf-8")
+    monkeypatch.setattr(hb, "_build_trial_config", lambda *_a, **_k: object())
+
+    def _explode(_config):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(hb, "_create_and_run", _explode)
+    purged: list[str] = []
+    monkeypatch.setattr(hb, "_purge_images", purged.extend)
+
+    cfg = Config(output={"traces_dir": tmp_path / "o"})
+    src = BenchSource(type="harbor", source=str(root))
+    backend = hb.HarborBackend()
+    tasks = {t.id: t for t in backend.tasks(cfg, src)}
+
+    with pytest.raises(RuntimeError):
+        backend.run(cfg, src, tasks["t1"])
+    assert "example/both:v1" in purged  # duplicated within t1 only -> still unique -> purged
+
+
 def test_harbor_resolve_task_dirs(tmp_path):
     single = tmp_path / "one"
     single.mkdir()

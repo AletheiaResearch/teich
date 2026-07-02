@@ -422,7 +422,8 @@ class HarborBackend:
         root = _resolve_source(cfg, source, refresh=refresh)
         task_dirs = _resolve_task_dirs(root)
         # Computed once, before any run() is dispatched (runner threads only call run()).
-        counts = Counter(image for task_dir in task_dirs for image in _task_prebuilt_images(task_dir))
+        # Deduped per task: one task using the same image for agent + verifier isn't sharing.
+        counts = Counter(image for task_dir in task_dirs for image in set(_task_prebuilt_images(task_dir)))
         self._shared_prebuilt = frozenset(image for image, n in counts.items() if n > 1)
         return [base.BenchTask(id=task_dir.name, raw=task_dir) for task_dir in task_dirs]
 
