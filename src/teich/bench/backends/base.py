@@ -57,6 +57,11 @@ class BenchBackend(Protocol):
         """Run the agent on one task in its environment and return its trace + rewards."""
 
 
+def timezone_env(cfg: Config) -> dict[str, str]:
+    """TZ for bench task containers, mirroring the prompt-mode Docker runners."""
+    return {"TZ": cfg.timezone} if cfg.timezone else {}
+
+
 def bench_root(cfg: Config) -> Path:
     """Working dir for backends' intermediates (downloads, sessions, trials).
 
