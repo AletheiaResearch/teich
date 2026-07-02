@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -332,13 +333,41 @@ def _sanitize_hb_image(name: str) -> str:
     return re.sub(r"[^a-z0-9._-]", "-", name)
 
 
-def _harbor_image_names(trial: Any, task_id: str) -> list[str]:
-    """Per-task image name(s) harbor built. harbor's teardown runs ``compose down --rmi local``,
-    which leaves the custom-tagged ``hb__<task>`` image behind, so we remove it ourselves.
+def _task_prebuilt_images(task_dir: Path | None) -> list[str]:
+    """The task's prebuilt image name(s) from task.toml: ``[environment].docker_image``
+    plus a separate ``[verifier.environment].docker_image`` when declared.
+
+    A task that declares one runs in harbor's prebuilt mode: compose pulls that image and
+    runs it directly — no ``hb__<task>`` image is ever built — and harbor's teardown
+    (``down --rmi local``) never removes a pulled tagged image. All terminal-bench 2.0
+    tasks are prebuilt, so without these names the purge is a no-op and each task leaks
+    its (often multi-GB) image.
+    """
+    if task_dir is None:
+        return []
+    try:
+        import tomllib  # py3.11+; the harbor backend already requires 3.12
+
+        with (Path(task_dir) / "task.toml").open("rb") as fh:
+            data = tomllib.load(fh)
+        candidates = [
+            data.get("environment", {}).get("docker_image"),
+            data.get("verifier", {}).get("environment", {}).get("docker_image"),
+        ]
+    except Exception:  # missing/unparseable task.toml — stay best-effort like the purge itself
+        return []
+    return [image for image in candidates if isinstance(image, str) and image.strip()]
+
+
+def _harbor_image_names(trial: Any, task_id: str, task_dir: Path | None = None) -> list[str]:
+    """Per-task image name(s) harbor leaves behind after ``compose down --rmi local``:
+    the custom-tagged ``hb__<task>`` image (built mode) and/or the pulled prebuilt
+    image(s) declared in task.toml, so we remove them ourselves.
 
     Prefers the actual name off the trial's environments; always includes the deterministic
-    ``sanitize("hb__" + short_name)`` (short_name == the task dir name == task_id), which also
-    covers the error path where the trial object was never returned.
+    ``sanitize("hb__" + short_name)`` (short_name == the task dir name == task_id) and the
+    task.toml prebuilt names, which also cover the error/interrupt path where the trial
+    object was never returned.
     """
     names: set[str] = set()
     for attr in ("agent_environment", "verifier_environment"):
@@ -351,6 +380,7 @@ def _harbor_image_names(trial: Any, task_id: str) -> list[str]:
             names.add(value)
     short = getattr(getattr(trial, "task", None), "short_name", None) if trial is not None else None
     names.add(_sanitize_hb_image(f"hb__{short or task_id}"))
+    names.update(_task_prebuilt_images(task_dir))
     return sorted(names)
 
 
@@ -370,6 +400,13 @@ class HarborBackend:
 
     type = "harbor"
 
+    def __init__(self) -> None:
+        # Prebuilt images declared by more than one task of this source (see tasks()).
+        # rmi'ing a shared image after one task can race a concurrent sibling's
+        # `compose up` (No such image -> that task fails) and forces a re-pull per task,
+        # so those are kept; only images unique to a task are purged after it.
+        self._shared_prebuilt: frozenset[str] = frozenset()
+
     def require(self) -> None:
         if sys.version_info < (3, 12):
             raise RuntimeError(
@@ -383,7 +420,12 @@ class HarborBackend:
 
     def tasks(self, cfg: Config, source: BenchSource, *, refresh: bool = False) -> list[base.BenchTask]:
         root = _resolve_source(cfg, source, refresh=refresh)
-        return [base.BenchTask(id=task_dir.name, raw=task_dir) for task_dir in _resolve_task_dirs(root)]
+        task_dirs = _resolve_task_dirs(root)
+        # Computed once, before any run() is dispatched (runner threads only call run()).
+        # Deduped per task: one task using the same image for agent + verifier isn't sharing.
+        counts = Counter(image for task_dir in task_dirs for image in set(_task_prebuilt_images(task_dir)))
+        self._shared_prebuilt = frozenset(image for image, n in counts.items() if n > 1)
+        return [base.BenchTask(id=task_dir.name, raw=task_dir) for task_dir in task_dirs]
 
     def run(self, cfg: Config, source: BenchSource, task: base.BenchTask) -> base.BenchRun:
         trials_dir = base.bench_root(cfg) / "trials"
@@ -413,7 +455,10 @@ class HarborBackend:
             metadata = {"exception": exception, **base.trace_metadata(native_dir)}
             return base.BenchRun(native_lines=lines, rewards=rewards, metadata=metadata)
         finally:
-            # harbor's `down --rmi local` leaves the `hb__<task>` image; remove it on every
-            # outcome (passed/failed/error) so per-task images don't pile up and fill the disk.
+            # harbor's `down --rmi local` leaves the `hb__<task>` image (built mode) and the
+            # pulled task image(s) (prebuilt mode); remove them on every outcome
+            # (passed/failed/error/Ctrl-C) so per-task images don't pile up and fill the
+            # disk. Images shared with sibling tasks are kept (see __init__).
             if not cfg.output.keep_bench_images:
-                _purge_images(_harbor_image_names(trial, task.id))
+                names = _harbor_image_names(trial, task.id, task.raw)
+                _purge_images([name for name in names if name not in self._shared_prebuilt])
