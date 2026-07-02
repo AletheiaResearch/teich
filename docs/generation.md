@@ -274,6 +274,16 @@ developer_instructions: |
 
 This produces reasoning *narration* in the assistant messages — not the model's hidden raw chain-of-thought, which providers don't expose. (The `chat` provider is text-only distillation and uses per-prompt `system` instead.)
 
+### Container timezone (all agents)
+
+The top-level `timezone` config sets `TZ` in every agent Docker container (codex, claude-code, pi, hermes), so timestamps the agent observes — shell `date`, file mtimes it formats, "today is" reasoning — match a local timezone instead of the image default (UTC):
+
+```yaml
+timezone: Europe/Ljubljana
+```
+
+Use an IANA zone name. It affects only the container environment, not the timestamps Teich itself writes to traces and metadata (those stay UTC).
+
 ### `pi`
 
 Copies native Pi session JSONL from mounted `/home/codex/pi-sessions`, then normalizes and validates tool-call structure before writing output.
@@ -300,6 +310,50 @@ During conversion, Teich:
 - emits schemas for advertised native Claude Code / Claude Desktop tools even if they were only declared through deferred-tool context
 
 With OpenRouter non-Claude models, Teich runs a local in-container proxy: Claude Code sees a Claude surrogate model name, while the proxy rewrites outbound requests back to the configured model. Native assistant/result events keep provider-returned model and usage fields when Claude Code records them.
+
+#### Using your Claude subscription (host auth)
+
+By default Claude Code runs on an API key (`ANTHROPIC_API_KEY` via `api.api_key` / env). To run it on your Claude subscription (Pro/Max) instead:
+
+```yaml
+agent:
+  provider: claude-code
+  claude:
+    use_host_auth: true
+    # oauth_token: null   # prefer CLAUDE_CODE_OAUTH_TOKEN in the env
+```
+
+Create a long-lived OAuth token with `claude setup-token` on the host (valid for a year, purpose-built for headless use) and export it as `CLAUDE_CODE_OAUTH_TOKEN` (`TEICH_CLAUDE_OAUTH_TOKEN` also works, or set `agent.claude.oauth_token` in the config). When enabled, Teich passes the token into each container as `CLAUDE_CODE_OAUTH_TOKEN` and passes **no** `ANTHROPIC_API_KEY`, because Claude Code silently prefers an API key over subscription credentials when both are present — which would bill the API instead of the subscription.
+
+Compared to Codex host auth this is much simpler, by design:
+
+- **No broker, no rotation.** The setup-token credential is a durable token, so containers can share it at any `max_concurrency`, and it does not disturb your interactive host login (no re-login needed afterward).
+- **Billing goes to the plan.** Usage counts against your subscription's rate-limit windows (5-hour/weekly), not pay-per-token API credits. Hitting the plan limit behaves like hitting it interactively.
+- **Works from any host.** The token is just an env var — no credentials file to find (macOS keeps the interactive login in the Keychain, which containers can't read anyway).
+- **No custom base URL.** Subscription auth talks to the first-party Anthropic API; Teich rejects `use_host_auth` combined with `api.base_url` (which includes the OpenRouter proxy path).
+- **Bench mode works too.** `generate --mode bench` exports the token into each task container instead of an API key (for both the harbor and swe-bench backends), and the CLI fails fast in either mode when the token is missing.
+
+#### Effort, fallback models, and extended thinking
+
+```yaml
+model:
+  model: claude-opus-4-8
+  reasoning_effort: xhigh      # --effort: low | medium | high | xhigh | max (model-dependent)
+  fallback_model: [sonnet, haiku]  # --fallback-model chain, tried in order on overload
+  always_thinking: true        # alwaysThinkingEnabled in the container's settings.json
+  max_thinking_tokens: 31999   # MAX_THINKING_TOKENS env; 0 disables thinking where allowed
+```
+
+How each setting reaches Claude Code:
+
+| Setting | Mechanism |
+|---------|-----------|
+| `reasoning_effort` | `--effort` CLI flag (shared field: Codex forwards it as `model_reasoning_effort`, Pi normalizes it) |
+| `fallback_model` | `--fallback-model` CLI flag; a list is joined to Claude Code's comma-separated form, and Claude Code keeps up to 3 models after dedup |
+| `always_thinking` | `alwaysThinkingEnabled` in the seeded `~/.claude/settings.json` (merged with the Langfuse hooks when tracing is on) |
+| `max_thinking_tokens` | `MAX_THINKING_TOKENS` container env var |
+
+All four are optional free-form passthroughs; leave them unset to use Claude Code's defaults. Note that models with adaptive reasoning treat effort as the primary control and thinking budgets as advisory.
 
 ### `hermes`
 

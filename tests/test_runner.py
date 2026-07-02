@@ -1725,6 +1725,225 @@ def test_claude_omits_system_prompt_without_developer_instructions(tmp_path: Pat
     assert "--append-system-prompt" not in runner._build_shell_command()
 
 
+def _claude_runner(tmp_path: Path, **config_kwargs: object) -> ClaudeCodeRunner:
+    config_kwargs.setdefault("agent", {"provider": "claude-code"})
+    config_kwargs.setdefault(
+        "output", {"traces_dir": tmp_path / "output", "sandbox_dir": tmp_path / "sandbox"}
+    )
+    with patch.object(ClaudeCodeRunner, "_ensure_image"):
+        return ClaudeCodeRunner(Config(**config_kwargs))
+
+
+def test_claude_forwards_reasoning_effort_as_effort_flag(tmp_path: Path):
+    runner = _claude_runner(tmp_path, model={"model": "claude-opus-4-8", "reasoning_effort": "xhigh"})
+    assert "--effort xhigh" in runner._build_shell_command()
+
+
+def test_claude_forwards_fallback_model_chain(tmp_path: Path):
+    runner = _claude_runner(
+        tmp_path,
+        model={"model": "claude-opus-4-8", "fallback_model": ["sonnet", "haiku"]},
+    )
+    assert "--fallback-model sonnet,haiku" in runner._build_shell_command()
+
+
+def test_claude_omits_effort_and_fallback_flags_when_unset(tmp_path: Path):
+    runner = _claude_runner(tmp_path, model={"model": "claude-opus-4-8"})
+    command = runner._build_shell_command()
+    assert "--effort" not in command
+    assert "--fallback-model" not in command
+
+
+def test_claude_prepare_agent_home_writes_always_thinking(tmp_path: Path):
+    runner = _claude_runner(
+        tmp_path,
+        model={"model": "claude-opus-4-8", "always_thinking": True},
+    )
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    runner._prepare_agent_home(home_dir)
+    settings = json.loads((home_dir / "settings.json").read_text(encoding="utf-8"))
+    assert settings == {"alwaysThinkingEnabled": True}
+
+
+def test_claude_prepare_agent_home_merges_thinking_with_langfuse_hooks(tmp_path: Path):
+    runner = _claude_runner(
+        tmp_path,
+        agent={
+            "provider": "claude-code",
+            "langfuse": {
+                "enabled": True,
+                "public_key": "pk-lf-x",
+                "secret_key": "sk-lf-x",
+                "base_url": "https://cloud.langfuse.com",
+            },
+        },
+        model={"model": "claude-opus-4-8", "always_thinking": False},
+    )
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    runner._prepare_agent_home(home_dir)
+    settings = json.loads((home_dir / "settings.json").read_text(encoding="utf-8"))
+    assert settings["alwaysThinkingEnabled"] is False
+    assert "Stop" in settings["hooks"]
+    assert "SessionEnd" in settings["hooks"]
+
+
+def test_claude_prepare_agent_home_writes_no_settings_by_default(tmp_path: Path):
+    runner = _claude_runner(tmp_path, model={"model": "claude-opus-4-8"})
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    runner._prepare_agent_home(home_dir)
+    assert not (home_dir / "settings.json").exists()
+
+
+def test_claude_max_thinking_tokens_env_in_docker_command(tmp_path: Path):
+    runner = _claude_runner(
+        tmp_path,
+        model={"model": "claude-opus-4-8", "max_thinking_tokens": 31999},
+        api={"provider": "anthropic", "api_key": "sk-ant-test"},
+    )
+    command = runner._build_external_docker_base_command(
+        tmp_path / "ws", tmp_path / "home", "teich-claude-x"
+    )
+    assert "MAX_THINKING_TOKENS=31999" in command
+
+
+def test_claude_max_thinking_tokens_zero_is_forwarded(tmp_path: Path):
+    """0 disables thinking, so it must not be treated as unset."""
+    runner = _claude_runner(
+        tmp_path,
+        model={"model": "claude-opus-4-8", "max_thinking_tokens": 0},
+    )
+    command = runner._build_external_docker_base_command(
+        tmp_path / "ws", tmp_path / "home", "teich-claude-x"
+    )
+    assert "MAX_THINKING_TOKENS=0" in command
+
+
+def test_claude_max_thinking_tokens_absent_when_unset(tmp_path: Path):
+    runner = _claude_runner(tmp_path, model={"model": "claude-opus-4-8"})
+    command = runner._build_external_docker_base_command(
+        tmp_path / "ws", tmp_path / "home", "teich-claude-x"
+    )
+    assert not any(part.startswith("MAX_THINKING_TOKENS=") for part in command)
+
+
+def test_claude_host_auth_passes_oauth_token_and_no_api_key(tmp_path: Path, monkeypatch):
+    """With host auth on, only the subscription token enters the container —
+    an API key would silently win over it inside Claude Code."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-ambient-should-not-leak")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-token")
+    monkeypatch.delenv("TEICH_CLAUDE_OAUTH_TOKEN", raising=False)
+    runner = _claude_runner(
+        tmp_path,
+        agent={"provider": "claude-code", "claude": {"use_host_auth": True}},
+        api={"provider": "anthropic", "api_key": "sk-ant-configured"},
+    )
+    command = runner._build_external_docker_base_command(
+        tmp_path / "ws", tmp_path / "home", "teich-claude-x"
+    )
+    assert "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-token" in command
+    assert not any(part.startswith("ANTHROPIC_API_KEY=") for part in command)
+    assert not any(part.startswith("ANTHROPIC_AUTH_TOKEN=") for part in command)
+    assert not any(part.startswith("TEICH_API_KEY=") for part in command)
+
+
+def test_claude_host_auth_errors_without_token(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("TEICH_CLAUDE_OAUTH_TOKEN", raising=False)
+    runner = _claude_runner(
+        tmp_path,
+        agent={"provider": "claude-code", "claude": {"use_host_auth": True}},
+    )
+    with pytest.raises(RuntimeError, match="setup-token"):
+        runner._api_env_items()
+
+
+def test_claude_without_host_auth_still_passes_api_key(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-token")
+    runner = _claude_runner(
+        tmp_path,
+        api={"provider": "anthropic", "api_key": "sk-ant-test"},
+    )
+    command = runner._build_external_docker_base_command(
+        tmp_path / "ws", tmp_path / "home", "teich-claude-x"
+    )
+    assert "ANTHROPIC_API_KEY=sk-ant-test" in command
+    assert not any(part.startswith("CLAUDE_CODE_OAUTH_TOKEN=") for part in command)
+
+
+def test_external_docker_command_sets_timezone(tmp_path: Path):
+    runner = _claude_runner(tmp_path, timezone="Europe/Ljubljana")
+    command = runner._build_external_docker_base_command(
+        tmp_path / "ws", tmp_path / "home", "teich-claude-x"
+    )
+    tz_index = command.index("TZ=Europe/Ljubljana")
+    assert command[tz_index - 1] == "-e"
+
+
+def test_external_docker_command_omits_timezone_by_default(tmp_path: Path):
+    runner = _claude_runner(tmp_path)
+    command = runner._build_external_docker_base_command(
+        tmp_path / "ws", tmp_path / "home", "teich-claude-x"
+    )
+    assert not any(part.startswith("TZ=") for part in command)
+
+
+def test_codex_docker_command_sets_timezone(tmp_path: Path):
+    config = Config(model=ModelConfig(model="o4-mini"), openai_api_key="sk-test123", timezone="UTC")
+    with patch.object(CodexRunner, "_ensure_image"):
+        runner = CodexRunner(config)
+    cmd = runner._build_codex_command(
+        "Build app",
+        workspace=tmp_path / "ws",
+        codex_home=tmp_path / "ch",
+        container_name="teich-codex-x",
+    )
+    tz_index = cmd.index("TZ=UTC")
+    assert cmd[tz_index - 1] == "-e"
+
+
+def test_pi_docker_command_sets_timezone(tmp_path: Path):
+    config = Config(
+        agent={"provider": "pi"},
+        output={"traces_dir": tmp_path / "output", "sandbox_dir": tmp_path / "sandbox"},
+        timezone="Europe/Ljubljana",
+    )
+    with patch.object(PiRunner, "_ensure_image"):
+        runner = PiRunner(config)
+    cmd = runner._build_pi_command(
+        "Build app",
+        workspace=tmp_path / "ws",
+        agent_dir=tmp_path / "agent",
+        session_dir=tmp_path / "sessions",
+        container_name="teich-pi-x",
+    )
+    tz_index = cmd.index("TZ=Europe/Ljubljana")
+    assert cmd[tz_index - 1] == "-e"
+    persistent = runner._build_pi_persistent_container_command(
+        tmp_path / "ws", tmp_path / "agent", tmp_path / "sessions", "teich-pi-x"
+    )
+    assert "TZ=Europe/Ljubljana" in persistent
+
+
+def test_pi_docker_command_omits_timezone_by_default(tmp_path: Path):
+    config = Config(
+        agent={"provider": "pi"},
+        output={"traces_dir": tmp_path / "output", "sandbox_dir": tmp_path / "sandbox"},
+    )
+    with patch.object(PiRunner, "_ensure_image"):
+        runner = PiRunner(config)
+    cmd = runner._build_pi_command(
+        "Build app",
+        workspace=tmp_path / "ws",
+        agent_dir=tmp_path / "agent",
+        session_dir=tmp_path / "sessions",
+        container_name="teich-pi-x",
+    )
+    assert not any(part.startswith("TZ=") for part in cmd)
+
+
 def test_pi_appends_developer_instructions_as_system_prompt(tmp_path: Path):
     with patch.object(PiRunner, "_ensure_image"):
         runner = PiRunner(_dev_instructions_config("pi", tmp_path))

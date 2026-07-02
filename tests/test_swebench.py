@@ -162,6 +162,26 @@ def test_auth_env_anthropic_sets_anthropic_key_only():
     assert "OPENROUTER_API_KEY" not in env
 
 
+def test_auth_env_claude_host_auth_uses_token_only(monkeypatch):
+    """Host auth exports the subscription token and no API key (which would win over it)."""
+    monkeypatch.delenv("TEICH_CLAUDE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-token")
+    cfg = Config(
+        agent={"provider": "claude-code", "claude": {"use_host_auth": True}},
+        api={"provider": "anthropic", "api_key": "sk-ant-should-not-leak"},
+    )
+    env = _auth_env(cfg)
+    assert env == {"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-token"}
+
+
+def test_auth_env_claude_host_auth_requires_token(monkeypatch):
+    monkeypatch.delenv("TEICH_CLAUDE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    cfg = Config(agent={"provider": "claude-code", "claude": {"use_host_auth": True}})
+    with pytest.raises(RuntimeError, match="setup-token"):
+        _auth_env(cfg)
+
+
 # --------------------------------------------------------------------------- run command (model)
 
 

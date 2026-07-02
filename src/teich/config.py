@@ -148,12 +148,31 @@ class CodexAuthConfig(BaseModel):
     broker_port: int = Field(default=0, ge=0, le=65535)
 
 
+class ClaudeAuthConfig(BaseModel):
+    """Claude Code subscription auth handling.
+
+    When ``use_host_auth`` is enabled, Teich authenticates Claude Code with your
+    Claude subscription (Pro/Max) instead of an API key, via a long-lived OAuth
+    token — ``oauth_token`` here, or the ``TEICH_CLAUDE_OAUTH_TOKEN`` /
+    ``CLAUDE_CODE_OAUTH_TOKEN`` env vars (create one with ``claude
+    setup-token``). The token is passed into each container as
+    ``CLAUDE_CODE_OAUTH_TOKEN`` and no ``ANTHROPIC_API_KEY`` is passed, because
+    an API key silently takes precedence over subscription auth inside Claude
+    Code. Usage counts against the subscription's rate-limit windows, not
+    pay-per-token API credits, and the token is safe to share across any
+    ``max_concurrency`` (no rotation, unlike Codex).
+    """
+    use_host_auth: bool = False
+    oauth_token: str | None = None
+
+
 class AgentConfig(BaseModel):
     """Agent runtime selection."""
     provider: str = "codex"
     # Langfuse tracing, applied to every agent that supports it (Codex, Claude).
     langfuse: LangfuseConfig = Field(default_factory=LangfuseConfig)
     codex: CodexAuthConfig = Field(default_factory=CodexAuthConfig)
+    claude: ClaudeAuthConfig = Field(default_factory=ClaudeAuthConfig)
 
 
 class ModelConfig(BaseModel):
@@ -164,6 +183,15 @@ class ModelConfig(BaseModel):
     reasoning_effort: str | None = None
     reasoning_summary: str | None = None
     service_tier: str | None = None
+    # Claude Code fallback model chain, forwarded as --fallback-model. A single
+    # model/alias or a list (Claude Code uses up to 3 after dedup).
+    fallback_model: str | list[str] | None = None
+    # Claude Code extended-thinking (CoT) controls. always_thinking writes
+    # alwaysThinkingEnabled into the container's ~/.claude/settings.json;
+    # max_thinking_tokens sets MAX_THINKING_TOKENS in the container env
+    # (0 disables thinking on models that allow it).
+    always_thinking: bool | None = None
+    max_thinking_tokens: int | None = Field(default=None, ge=0)
     context_length: int | None = None
     approval_mode: str | None = "none"
     pi_model_overrides: dict[str, object] = Field(default_factory=lambda: {"maxTokens": 131072})
@@ -338,6 +366,9 @@ class Config(BaseModel):
     bench: BenchConfig = Field(default_factory=BenchConfig)
     max_concurrency: int = Field(default=1, ge=1)
     timeout_seconds: int = 600
+    # IANA timezone (e.g. "Europe/Ljubljana") set as TZ in every agent Docker
+    # container. None keeps the image default (UTC).
+    timezone: str | None = None
     openai_api_key: str | None = None
     developer_instructions: str | None = None
 
@@ -366,6 +397,21 @@ class Config(BaseModel):
                     f"output.{label} ({output_dir}); it holds your Codex credentials "
                     "and output directories are uploaded to Hugging Face."
                 )
+        return self
+
+    @model_validator(mode="after")
+    def validate_claude_host_auth(self) -> Config:
+        """Subscription auth talks to the first-party Anthropic API only."""
+        if (
+            self.agent.claude.use_host_auth
+            and self.get_agent_provider() in {"claude", "claude-code", "claude_code"}
+            and self.api.base_url
+        ):
+            raise ValueError(
+                "agent.claude.use_host_auth runs Claude Code on your Claude "
+                f"subscription and cannot be combined with api.base_url ({self.api.base_url}); "
+                "unset one of them."
+            )
         return self
 
     @classmethod
@@ -449,6 +495,44 @@ class Config(BaseModel):
         codex_home = os.environ.get("CODEX_HOME")
         base = Path(codex_home).expanduser() if codex_home else Path.home() / ".codex"
         return base / "auth.json"
+
+    def get_claude_oauth_token(self) -> str | None:
+        """Resolve the long-lived Claude Code OAuth token for host auth.
+
+        Honors an explicit ``agent.claude.oauth_token``, then the
+        ``TEICH_CLAUDE_OAUTH_TOKEN`` and ``CLAUDE_CODE_OAUTH_TOKEN`` env vars.
+        """
+        token = self.agent.claude.oauth_token
+        if isinstance(token, str) and token.strip():
+            return token.strip()
+        return _get_env_alias("TEICH_CLAUDE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+
+    def require_claude_oauth_token(self) -> str:
+        """Return the host-auth OAuth token, or raise with setup guidance."""
+        token = self.get_claude_oauth_token()
+        if not token:
+            raise RuntimeError(
+                "Claude host auth is enabled but no OAuth token was found. Run "
+                "`claude setup-token` on the host and export CLAUDE_CODE_OAUTH_TOKEN "
+                "(or set agent.claude.oauth_token), or disable agent.claude.use_host_auth."
+            )
+        return token
+
+    def claude_host_auth_active(self) -> bool:
+        """True when the active provider is Claude Code with host auth enabled."""
+        return (
+            self.agent.claude.use_host_auth
+            and self.get_agent_provider() in {"claude", "claude-code", "claude_code"}
+        )
+
+    def get_claude_fallback_model(self) -> str | None:
+        """Normalize ``model.fallback_model`` to Claude Code's comma-separated form."""
+        fallback = self.model.fallback_model
+        if fallback is None:
+            return None
+        parts = fallback.split(",") if isinstance(fallback, str) else fallback
+        names = [str(part).strip() for part in parts]
+        return ",".join(name for name in names if name) or None
 
     def get_dataset_tags(self) -> list[str]:
         """Get auto-generated dataset tags for README frontmatter and uploads."""

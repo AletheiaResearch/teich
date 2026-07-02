@@ -157,6 +157,29 @@ def test_harbor_auth_env():
     assert env2["OPENAI_API_KEY"] == "sk-o" and "OPENROUTER_API_KEY" not in env2
 
 
+def test_harbor_auth_env_claude_host_auth_uses_token_only(monkeypatch):
+    """Host auth exports the subscription token (plus the harbor OAuth pin) and no API key."""
+    monkeypatch.delenv("TEICH_CLAUDE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-token")
+    cfg = Config(
+        agent={"provider": "claude-code", "claude": {"use_host_auth": True}},
+        api={"provider": "anthropic", "api_key": "sk-ant-should-not-leak"},
+    )
+    env = hb._agent_auth_env(cfg)
+    assert env == {
+        "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-token",
+        "CLAUDE_FORCE_OAUTH": "1",
+    }
+
+
+def test_harbor_auth_env_claude_host_auth_requires_token(monkeypatch):
+    monkeypatch.delenv("TEICH_CLAUDE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    cfg = Config(agent={"provider": "claude-code", "claude": {"use_host_auth": True}})
+    with pytest.raises(RuntimeError, match="setup-token"):
+        hb._agent_auth_env(cfg)
+
+
 def test_harbor_model_prefix():
     pi_or = Config(agent={"provider": "pi"}, model={"model": "z-ai/glm-5.2"}, api={"provider": "openrouter"})
     assert hb._bench_model_name(pi_or) == "openrouter/z-ai/glm-5.2"

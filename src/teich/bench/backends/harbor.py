@@ -56,8 +56,16 @@ def _agent_auth_env(cfg: Config) -> dict[str, str]:
     it; it must not be shadowed under ``OPENAI_API_KEY``). Otherwise the key goes to
     ``OPENAI_API_KEY``, plus ``OPENROUTER_API_KEY`` for an OpenRouter project (pi/hermes read
     that name while codex/claude-code use ``OPENAI_API_KEY`` against the OpenRouter base_url).
+
+    Claude host auth (``agent.claude.use_host_auth``) exports the subscription OAuth token
+    instead of any API key, plus ``CLAUDE_FORCE_OAUTH=1`` so harbor's claude-code agent
+    doesn't fall back to an ambient host ``ANTHROPIC_API_KEY``.
     """
     env: dict[str, str] = {}
+    if cfg.claude_host_auth_active():
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = cfg.require_claude_oauth_token()
+        env["CLAUDE_FORCE_OAUTH"] = "1"
+        return env
     api_key = cfg.get_api_key()
     if api_key:
         if cfg.api.provider == "anthropic":

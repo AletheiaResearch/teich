@@ -228,6 +228,8 @@ publish:
 
 To run Codex on your ChatGPT subscription instead of an API key, set `agent.codex.use_host_auth: true` (Teich shares your host `codex login` across containers), and enable Codex fast mode with `model.service_tier: fast`. See [Generation](docs/generation.md#using-your-chatgpt-subscription-host-auth).
 
+To run Claude Code on your Claude subscription (Pro/Max), set `agent.claude.use_host_auth: true` and provide a `claude setup-token` token via `CLAUDE_CODE_OAUTH_TOKEN` (billed to your plan's rate limits, not API credits). Claude Code runs also support `model.reasoning_effort` (`--effort`), `model.fallback_model` (`--fallback-model`), `model.always_thinking` / `model.max_thinking_tokens` (extended thinking), and a container `timezone`. See [Generation](docs/generation.md#using-your-claude-subscription-host-auth).
+
 ## Python Entry Points
 
 ```python

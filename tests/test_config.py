@@ -476,6 +476,120 @@ def test_codex_host_auth_source_defaults_to_home(monkeypatch):
     assert config.get_codex_host_auth_source() == Path.home() / ".codex" / "auth.json"
 
 
+def test_claude_auth_config_defaults():
+    """Claude host-auth is off by default with no configured token."""
+    claude = Config().agent.claude
+    assert claude.use_host_auth is False
+    assert claude.oauth_token is None
+
+
+def test_claude_oauth_token_prefers_explicit_config(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "env-token")
+    config = Config(agent={"claude": {"oauth_token": "config-token"}})
+    assert config.get_claude_oauth_token() == "config-token"
+
+
+def test_claude_oauth_token_falls_back_to_env(monkeypatch):
+    monkeypatch.delenv("TEICH_CLAUDE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "env-token")
+    config = Config(agent={"claude": {"use_host_auth": True}})
+    assert config.get_claude_oauth_token() == "env-token"
+
+
+def test_claude_oauth_token_teich_env_wins_over_claude_env(monkeypatch):
+    monkeypatch.setenv("TEICH_CLAUDE_OAUTH_TOKEN", "teich-token")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "claude-token")
+    assert Config().get_claude_oauth_token() == "teich-token"
+
+
+def test_claude_oauth_token_absent_when_unset(monkeypatch):
+    monkeypatch.delenv("TEICH_CLAUDE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    assert Config().get_claude_oauth_token() is None
+
+
+def test_claude_host_auth_rejects_base_url():
+    """Subscription auth talks to the first-party Anthropic API only."""
+    with pytest.raises(ValueError, match="use_host_auth"):
+        Config(
+            agent={"provider": "claude-code", "claude": {"use_host_auth": True}},
+            api={"provider": "openrouter", "base_url": "https://openrouter.ai/api/v1"},
+        )
+
+
+def test_claude_host_auth_base_url_allowed_for_other_providers():
+    """A leftover agent.claude block must not break codex + base_url configs."""
+    config = Config(
+        agent={"provider": "codex", "claude": {"use_host_auth": True}},
+        api={"provider": "openrouter", "base_url": "https://openrouter.ai/api/v1"},
+    )
+    assert config.agent.claude.use_host_auth is True
+
+
+def test_claude_fallback_model_defaults_to_none():
+    assert Config().model.fallback_model is None
+    assert Config().get_claude_fallback_model() is None
+
+
+def test_claude_fallback_model_accepts_string_and_list():
+    assert Config(model={"fallback_model": "sonnet"}).get_claude_fallback_model() == "sonnet"
+    assert (
+        Config(model={"fallback_model": "sonnet, haiku"}).get_claude_fallback_model()
+        == "sonnet,haiku"
+    )
+    assert (
+        Config(model={"fallback_model": ["sonnet", "haiku"]}).get_claude_fallback_model()
+        == "sonnet,haiku"
+    )
+
+
+def test_claude_fallback_model_blank_entries_are_dropped():
+    assert Config(model={"fallback_model": [" ", ""]}).get_claude_fallback_model() is None
+    assert Config(model={"fallback_model": ",,"}).get_claude_fallback_model() is None
+
+
+def test_claude_thinking_settings_default_to_none():
+    config = Config()
+    assert config.model.always_thinking is None
+    assert config.model.max_thinking_tokens is None
+
+
+def test_claude_max_thinking_tokens_rejects_negative():
+    with pytest.raises(ValueError):
+        Config(model={"max_thinking_tokens": -1})
+
+
+def test_timezone_defaults_to_none():
+    assert Config().timezone is None
+
+
+def test_claude_settings_from_yaml(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("TEICH_MODEL", raising=False)
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        """
+agent:
+  provider: claude-code
+  claude:
+    use_host_auth: true
+model:
+  model: claude-opus-4-8
+  reasoning_effort: xhigh
+  fallback_model: [sonnet, haiku]
+  always_thinking: true
+  max_thinking_tokens: 31999
+timezone: Europe/Ljubljana
+"""
+    )
+    config = Config.from_yaml(config_file)
+    assert config.agent.claude.use_host_auth is True
+    assert config.model.reasoning_effort == "xhigh"
+    assert config.get_claude_fallback_model() == "sonnet,haiku"
+    assert config.model.always_thinking is True
+    assert config.model.max_thinking_tokens == 31999
+    assert config.timezone == "Europe/Ljubljana"
+
+
 def test_mcp_config():
     """Test MCP server configuration."""
     mcp = MCPConfig(

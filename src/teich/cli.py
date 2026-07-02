@@ -716,6 +716,16 @@ def generate(
             "with its own output.traces_dir and publish.repo_id.[/yellow]"
         )
         raise typer.Exit(1)
+    # Fail fast for both prompts and bench mode: without a token every session
+    # (or bench task) would fail late, after workspaces/images are prepared.
+    if cfg.claude_host_auth_active() and not cfg.get_claude_oauth_token():
+        console.print(
+            "[red]Claude host-auth is enabled but no OAuth token was found. Run "
+            "`claude setup-token` on the host and export CLAUDE_CODE_OAUTH_TOKEN "
+            "(or set agent.claude.oauth_token), or disable agent.claude.use_host_auth.[/red]"
+        )
+        raise typer.Exit(1)
+
     if mode == "bench":
         from .bench import run_bench  # lazy: harbor is an optional extra
 
@@ -802,6 +812,12 @@ def generate(
             runner = PiRunner(cfg)
         elif agent_provider in {"claude", "claude-code", "claude_code"}:
             runner = ClaudeCodeRunner(cfg)
+            if cfg.agent.claude.use_host_auth:
+                console.print(
+                    "[yellow]Claude host-auth enabled: running on your Claude subscription "
+                    "via a long-lived OAuth token (usage counts against your plan's "
+                    "rate limits, not API credits).[/yellow]"
+                )
             if cfg.agent.langfuse.enabled:
                 console.print(
                     "[cyan]Claude Code Langfuse tracing enabled: uploading each session to "
@@ -1122,6 +1138,18 @@ agent:
   #   host_auth_file: null            # default: $CODEX_HOME/auth.json or ~/.codex/auth.json
   #   auth_dir: ./.teich/codex-auth
 
+  # Claude Code-only: use your Claude subscription (Pro/Max) instead of an API
+  # key. Create a long-lived token with `claude setup-token` on the host and
+  # export CLAUDE_CODE_OAUTH_TOKEN (or set oauth_token below); Teich passes it
+  # into each container and withholds ANTHROPIC_API_KEY (an API key silently
+  # wins over subscription auth inside Claude Code and would bill the API).
+  # Usage counts against your plan's rate limits, not API credits, and the
+  # token is safe at any max_concurrency. Incompatible with api.base_url:
+  # subscription auth talks to the first-party Anthropic API only.
+  # claude:
+  #   use_host_auth: true
+  #   oauth_token: null               # prefer CLAUDE_CODE_OAUTH_TOKEN in the env
+
   # Trace each agent session to Langfuse (https://langfuse.com). Works for Codex
   # and Claude Code -- each uses its own native integration (Codex plugin, Claude
   # Code Stop hook) and Teich passes the credentials into the container. Side-
@@ -1148,7 +1176,9 @@ model:
   # Optional reasoning / thinking level.
   # - Codex: forwarded as model_reasoning_effort
   # - Pi: normalized to low / medium / high when supported
-  # - Claude Code / Hermes: model/provider specific
+  # - Claude Code: forwarded as --effort (low | medium | high | xhigh | max on
+  #   supported models)
+  # - Hermes: model/provider specific
   # Hermes also enables built-in toolsets:
   # safe,terminal,file,skills,memory,session_search,delegation
   reasoning_effort: medium
@@ -1164,6 +1194,21 @@ model:
   # auth (agent.codex.use_host_auth) plus a supported model such as gpt-5.5 or
   # gpt-5.4. Leave null for the standard tier.
   service_tier: null
+
+  # Optional Claude Code fallback model chain, forwarded as --fallback-model.
+  # A single model or a list (Claude Code uses up to 3 after dedup); entries
+  # are aliases (sonnet, haiku) or full model names, tried in order when the
+  # primary model is overloaded or unavailable.
+  # fallback_model: [sonnet, haiku]
+  fallback_model: null
+
+  # Optional Claude Code extended-thinking (CoT) controls.
+  # always_thinking writes alwaysThinkingEnabled into the container's
+  # ~/.claude/settings.json so every turn gets extended thinking;
+  # max_thinking_tokens sets MAX_THINKING_TOKENS in the container (0 disables
+  # thinking on models that allow it). Leave null to use Claude Code defaults.
+  always_thinking: null
+  max_thinking_tokens: null
 
   # Optional context length override for providers that support it.
   # Useful for Hermes custom endpoints when /v1/models reports a served
@@ -1274,6 +1319,11 @@ max_concurrency: 1
 
 # Per-session timeout in seconds.
 timeout_seconds: 600
+
+# Optional IANA timezone for the agent Docker containers, set as TZ (e.g.
+# "Europe/Ljubljana"). Applies to codex, claude-code, pi, and hermes runtimes;
+# leave null for the image default (UTC).
+timezone: null
 
 # Legacy global API key field.
 # Prefer env vars or api.api_key above for new configs.
