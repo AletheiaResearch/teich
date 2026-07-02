@@ -201,7 +201,7 @@ def _build_trial_config(cfg: Config, source: BenchSource, task_dir: Path, trials
     model = _bench_model_name(cfg)
     if model:
         config.agent.model_name = model
-    config.agent.env.update(_agent_auth_env(cfg))
+    config.agent.env.update({**_agent_auth_env(cfg), **base.timezone_env(cfg)})
     try:
         config.environment.type = EnvironmentType(source.backend)
     except ValueError as exc:

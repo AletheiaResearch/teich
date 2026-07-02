@@ -157,6 +157,12 @@ def test_harbor_auth_env():
     assert env2["OPENAI_API_KEY"] == "sk-o" and "OPENROUTER_API_KEY" not in env2
 
 
+def test_timezone_env_for_bench_containers():
+    """Bench task containers get the same TZ the prompt-mode runners inject."""
+    assert base.timezone_env(Config()) == {}
+    assert base.timezone_env(Config(timezone="Europe/Ljubljana")) == {"TZ": "Europe/Ljubljana"}
+
+
 def test_harbor_auth_env_claude_token_wins_over_api_key(monkeypatch):
     """Subscription auth exports the token (plus the harbor OAuth pin) and no API key."""
     monkeypatch.delenv("TEICH_CLAUDE_OAUTH_TOKEN", raising=False)

@@ -1309,8 +1309,8 @@ max_concurrency: 1
 timeout_seconds: 600
 
 # Optional IANA timezone for the agent Docker containers, set as TZ (e.g.
-# "Europe/Ljubljana"). Applies to codex, claude-code, pi, and hermes runtimes;
-# leave null for the image default (UTC).
+# "Europe/Ljubljana"). Applies to codex, claude-code, pi, and hermes runtimes,
+# and to bench-mode task containers; leave null for the image default (UTC).
 timezone: null
 
 # Legacy global API key field.

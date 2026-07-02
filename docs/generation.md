@@ -276,7 +276,7 @@ This produces reasoning *narration* in the assistant messages — not the model'
 
 ### Container timezone (all agents)
 
-The top-level `timezone` config sets `TZ` in every agent Docker container (codex, claude-code, pi, hermes), so timestamps the agent observes — shell `date`, file mtimes it formats, "today is" reasoning — match a local timezone instead of the image default (UTC):
+The top-level `timezone` config sets `TZ` in every agent Docker container (codex, claude-code, pi, hermes) — including bench-mode task containers (harbor, swe-bench) — so timestamps the agent observes — shell `date`, file mtimes it formats, "today is" reasoning — match a local timezone instead of the image default (UTC):
 
 ```yaml
 timezone: Europe/Ljubljana

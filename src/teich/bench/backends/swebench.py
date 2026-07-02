@@ -317,7 +317,7 @@ def _run_agent(
     # than `-e KEY=VALUE`, so keys aren't visible in the host process list. Note: they still
     # become container env vars (readable via `docker inspect` / inside the container), so this
     # guards the host's `ps`, not a hostile Docker-socket user.
-    env = {**layer.env, **_auth_env(cfg)}
+    env = {**layer.env, **_auth_env(cfg), **base.timezone_env(cfg)}
     env_file = capture_dir.parent / f"{key}.env"
     fd = os.open(env_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     os.fchmod(fd, 0o600)  # O_CREAT's mode only applies on create (and is umask-masked); enforce 0600 either way
