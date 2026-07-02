@@ -189,8 +189,9 @@ class OutputConfig(BaseModel):
     # dir next to traces_dir, parallel to sandbox/failures (never inside the dataset).
     bench_dir: Path | None = None
     # Remove each task's per-task Docker image after the bench run (harbor's ``hb__<task>``
-    # image, the swe-bench agent layer) so they don't accumulate and fill the disk. Set True
-    # to keep them (e.g. for debugging, or to avoid rebuilds across runs).
+    # image or the pulled prebuilt task image, the swe-bench agent layer) so they don't
+    # accumulate and fill the disk. Set True to keep them (e.g. for debugging, or to avoid
+    # rebuilds/re-pulls across runs).
     keep_bench_images: bool = False
     pretty_name: str = "Agentic Training Traces"
     # Dataset-card customization (all optional; the default card is unchanged when unset).
