@@ -1063,6 +1063,12 @@ class DockerRuntimeRunner:
             self._langfuse_container_base_url() or ""
         )
 
+    def _timezone_docker_args(self) -> list[str]:
+        """`docker run` args that set TZ in the container from `config.timezone`."""
+        if not self.config.timezone:
+            return []
+        return ["-e", f"TZ={self.config.timezone}"]
+
     @staticmethod
     def _prompt_preview(prompt: str, limit: int = 60) -> str:
         normalized = " ".join(prompt.split())
@@ -2480,8 +2486,7 @@ class CodexRunner(DockerRuntimeRunner):
             "-w",
             WORKSPACE_IN_CONTAINER,
         ]
-        if self.config.timezone:
-            cmd.extend(["-e", f"TZ={self.config.timezone}"])
+        cmd.extend(self._timezone_docker_args())
         broker_active = broker is not None
         if (
             proxy_target
@@ -2943,8 +2948,7 @@ class ExternalCliRunner(DockerRuntimeRunner):
             "-w",
             WORKSPACE_IN_CONTAINER,
         ]
-        if self.config.timezone:
-            command.extend(["-e", f"TZ={self.config.timezone}"])
+        command.extend(self._timezone_docker_args())
         configured_base_url = self.config.get_base_url()
         base_url_is_host_local = bool(
             configured_base_url
@@ -5525,8 +5529,7 @@ class PiRunner(DockerRuntimeRunner):
             "-w",
             WORKSPACE_IN_CONTAINER,
         ]
-        if self.config.timezone:
-            command.extend(["-e", f"TZ={self.config.timezone}"])
+        command.extend(self._timezone_docker_args())
         configured_base_url = self.config.get_base_url()
         if configured_base_url and self._container_base_url(configured_base_url) != configured_base_url:
             command.extend(["--add-host", "host.docker.internal:host-gateway"])
@@ -5597,8 +5600,7 @@ class PiRunner(DockerRuntimeRunner):
             "-w",
             WORKSPACE_IN_CONTAINER,
         ]
-        if self.config.timezone:
-            command.extend(["-e", f"TZ={self.config.timezone}"])
+        command.extend(self._timezone_docker_args())
         configured_base_url = self.config.get_base_url()
         if configured_base_url and self._container_base_url(configured_base_url) != configured_base_url:
             command.extend(["--add-host", "host.docker.internal:host-gateway"])

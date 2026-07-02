@@ -509,6 +509,19 @@ def test_claude_oauth_token_absent_when_unset(monkeypatch):
     assert Config().get_claude_oauth_token() is None
 
 
+def test_claude_oauth_token_source_names_the_resolving_source(monkeypatch):
+    """The CLI notice reports the source; it must track the getter's resolution order."""
+    monkeypatch.delenv("TEICH_CLAUDE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    assert Config().get_claude_oauth_token_source() is None
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "env-token")
+    assert Config().get_claude_oauth_token_source() == "CLAUDE_CODE_OAUTH_TOKEN"
+    monkeypatch.setenv("TEICH_CLAUDE_OAUTH_TOKEN", "teich-token")
+    assert Config().get_claude_oauth_token_source() == "TEICH_CLAUDE_OAUTH_TOKEN"
+    config = Config(agent={"claude": {"oauth_token": "config-token"}})
+    assert config.get_claude_oauth_token_source() == "agent.claude.oauth_token"
+
+
 def test_claude_host_auth_active_with_token(monkeypatch):
     monkeypatch.delenv("TEICH_CLAUDE_OAUTH_TOKEN", raising=False)
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "env-token")

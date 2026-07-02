@@ -526,6 +526,16 @@ class Config(BaseModel):
             return token.strip()
         return _get_env_alias("TEICH_CLAUDE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
 
+    def get_claude_oauth_token_source(self) -> str | None:
+        """Name the source ``get_claude_oauth_token`` resolves from (for CLI messaging)."""
+        token = self.agent.claude.oauth_token
+        if isinstance(token, str) and token.strip():
+            return "agent.claude.oauth_token"
+        for name in ("TEICH_CLAUDE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
+            if _get_env_alias(name):
+                return name
+        return None
+
     def claude_host_auth_active(self) -> bool:
         """True when Claude Code runs on subscription auth.
 

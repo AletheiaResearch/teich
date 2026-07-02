@@ -804,9 +804,10 @@ def generate(
             runner = ClaudeCodeRunner(cfg)
             if cfg.claude_host_auth_active():
                 console.print(
-                    "[yellow]Claude OAuth token found: running on your Claude subscription "
-                    "(usage counts against your plan's rate limits, not API credits). "
-                    "Unset CLAUDE_CODE_OAUTH_TOKEN to use an API key instead.[/yellow]"
+                    f"[yellow]Claude OAuth token found ({cfg.get_claude_oauth_token_source()}): "
+                    "running on your Claude subscription (usage counts against your plan's "
+                    "rate limits, not API credits). Remove the token to use an API key "
+                    "instead.[/yellow]"
                 )
             elif cfg.get_claude_oauth_token() and cfg.get_base_url():
                 console.print(

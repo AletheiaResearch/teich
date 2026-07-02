@@ -373,6 +373,7 @@ def test_generate_claude_token_prints_subscription_notice(tmp_path: Path, monkey
         result = runner.invoke(app, ["generate", "-c", str(config_file)])
 
     assert "Claude OAuth token found" in result.output
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in result.output
     assert "subscription" in result.output
     assert result.exit_code == 0
 
