@@ -153,12 +153,13 @@ def _auth_env(cfg: Config) -> dict[str, str]:
 
     An ``anthropic`` project sets ``ANTHROPIC_API_KEY`` only (not shadowed under
     ``OPENAI_API_KEY``); otherwise the key goes to ``OPENAI_API_KEY`` plus
-    ``OPENROUTER_API_KEY`` for an OpenRouter project. Claude host auth exports the
-    subscription OAuth token instead of any API key.
+    ``OPENROUTER_API_KEY`` for an OpenRouter project. Claude subscription auth (a
+    resolvable Claude OAuth token) exports the token instead of any API key.
     """
     env: dict[str, str] = {}
-    if cfg.claude_host_auth_active():
-        env["CLAUDE_CODE_OAUTH_TOKEN"] = cfg.require_claude_oauth_token()
+    token = cfg.get_claude_oauth_token() if cfg.claude_host_auth_active() else None
+    if token:
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = token
         return env
     api_key = cfg.get_api_key()
     if api_key:

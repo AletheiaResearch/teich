@@ -3257,9 +3257,9 @@ class ClaudeCodeRunner(ExternalCliRunner):
     def _agent_env_items(self) -> list[tuple[str, str]]:
         # 0 is meaningful (disables thinking on models that allow it), so only
         # None is "unset".
-        if self.config.model.max_thinking_tokens is None:
+        if self.config.agent.claude.max_thinking_tokens is None:
             return []
-        return [("MAX_THINKING_TOKENS", str(self.config.model.max_thinking_tokens))]
+        return [("MAX_THINKING_TOKENS", str(self.config.agent.claude.max_thinking_tokens))]
 
     def _prepare_agent_home(self, home_dir: Path) -> None:
         settings = self._claude_settings()
@@ -3272,8 +3272,8 @@ class ClaudeCodeRunner(ExternalCliRunner):
     def _claude_settings(self) -> dict[str, object]:
         """Compose the container's ~/.claude/settings.json from config."""
         settings: dict[str, object] = {}
-        if self.config.model.always_thinking is not None:
-            settings["alwaysThinkingEnabled"] = self.config.model.always_thinking
+        if self.config.agent.claude.always_thinking is not None:
+            settings["alwaysThinkingEnabled"] = self.config.agent.claude.always_thinking
         if self.config.agent.langfuse.enabled:
             hook = {"hooks": [{"type": "command", "command": CLAUDE_LANGFUSE_HOOK_COMMAND}]}
             settings["hooks"] = {"Stop": [hook], "SessionEnd": [hook]}
@@ -3361,11 +3361,12 @@ class ClaudeCodeRunner(ExternalCliRunner):
         ]
 
     def _api_env_items(self) -> list[tuple[str, str]]:
-        if self.config.agent.claude.use_host_auth:
+        token = self.config.get_claude_oauth_token() if self.config.claude_host_auth_active() else None
+        if token:
             # Subscription auth: pass only the long-lived OAuth token, never an
             # API key — ANTHROPIC_API_KEY silently takes precedence over
             # subscription credentials inside Claude Code and would bill the API.
-            return [("CLAUDE_CODE_OAUTH_TOKEN", self.config.require_claude_oauth_token())]
+            return [("CLAUDE_CODE_OAUTH_TOKEN", token)]
         api_key = self.config.get_api_key() or ("none" if self.config.get_base_url() else "")
         if not api_key:
             return []

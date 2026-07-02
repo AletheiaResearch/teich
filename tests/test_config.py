@@ -476,11 +476,13 @@ def test_codex_host_auth_source_defaults_to_home(monkeypatch):
     assert config.get_codex_host_auth_source() == Path.home() / ".codex" / "auth.json"
 
 
-def test_claude_auth_config_defaults():
-    """Claude host-auth is off by default with no configured token."""
+def test_claude_config_defaults():
+    """No token, no passthroughs: everything under agent.claude is opt-in."""
     claude = Config().agent.claude
-    assert claude.use_host_auth is False
     assert claude.oauth_token is None
+    assert claude.fallback_model is None
+    assert claude.always_thinking is None
+    assert claude.max_thinking_tokens is None
 
 
 def test_claude_oauth_token_prefers_explicit_config(monkeypatch):
@@ -492,8 +494,7 @@ def test_claude_oauth_token_prefers_explicit_config(monkeypatch):
 def test_claude_oauth_token_falls_back_to_env(monkeypatch):
     monkeypatch.delenv("TEICH_CLAUDE_OAUTH_TOKEN", raising=False)
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "env-token")
-    config = Config(agent={"claude": {"use_host_auth": True}})
-    assert config.get_claude_oauth_token() == "env-token"
+    assert Config().get_claude_oauth_token() == "env-token"
 
 
 def test_claude_oauth_token_teich_env_wins_over_claude_env(monkeypatch):
@@ -508,59 +509,82 @@ def test_claude_oauth_token_absent_when_unset(monkeypatch):
     assert Config().get_claude_oauth_token() is None
 
 
-def test_claude_host_auth_rejects_base_url():
-    """Subscription auth talks to the first-party Anthropic API only."""
-    with pytest.raises(ValueError, match="use_host_auth"):
+def test_claude_host_auth_active_with_token(monkeypatch):
+    monkeypatch.delenv("TEICH_CLAUDE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "env-token")
+    assert Config(agent={"provider": "claude-code"}).claude_host_auth_active() is True
+
+
+def test_claude_host_auth_inactive_without_token(monkeypatch):
+    monkeypatch.delenv("TEICH_CLAUDE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    assert Config(agent={"provider": "claude-code"}).claude_host_auth_active() is False
+
+
+def test_claude_host_auth_inactive_for_other_providers(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "env-token")
+    assert Config(agent={"provider": "codex"}).claude_host_auth_active() is False
+
+
+def test_claude_ambient_token_yields_to_base_url(monkeypatch):
+    """An ambient env token must not override an explicit base_url config (no error either)."""
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "env-token")
+    config = Config(
+        agent={"provider": "claude-code"},
+        api={"provider": "openrouter", "base_url": "https://openrouter.ai/api/v1"},
+    )
+    assert config.claude_host_auth_active() is False
+
+
+def test_claude_configured_token_rejects_base_url():
+    """An explicit config token + base_url is a contradiction, not a silent fallback."""
+    with pytest.raises(ValueError, match="oauth_token"):
         Config(
-            agent={"provider": "claude-code", "claude": {"use_host_auth": True}},
+            agent={"provider": "claude-code", "claude": {"oauth_token": "config-token"}},
             api={"provider": "openrouter", "base_url": "https://openrouter.ai/api/v1"},
         )
 
 
-def test_claude_host_auth_base_url_allowed_for_other_providers():
+def test_claude_configured_token_base_url_allowed_for_other_providers():
     """A leftover agent.claude block must not break codex + base_url configs."""
     config = Config(
-        agent={"provider": "codex", "claude": {"use_host_auth": True}},
+        agent={"provider": "codex", "claude": {"oauth_token": "config-token"}},
         api={"provider": "openrouter", "base_url": "https://openrouter.ai/api/v1"},
     )
-    assert config.agent.claude.use_host_auth is True
+    assert config.agent.claude.oauth_token == "config-token"
 
 
 def test_claude_fallback_model_defaults_to_none():
-    assert Config().model.fallback_model is None
+    assert Config().agent.claude.fallback_model is None
     assert Config().get_claude_fallback_model() is None
 
 
 def test_claude_fallback_model_accepts_string_and_list():
-    assert Config(model={"fallback_model": "sonnet"}).get_claude_fallback_model() == "sonnet"
-    assert (
-        Config(model={"fallback_model": "sonnet, haiku"}).get_claude_fallback_model()
-        == "sonnet,haiku"
-    )
-    assert (
-        Config(model={"fallback_model": ["sonnet", "haiku"]}).get_claude_fallback_model()
-        == "sonnet,haiku"
-    )
+    def cfg(fallback: object) -> Config:
+        return Config(agent={"claude": {"fallback_model": fallback}})
+
+    assert cfg("sonnet").get_claude_fallback_model() == "sonnet"
+    assert cfg("sonnet, haiku").get_claude_fallback_model() == "sonnet,haiku"
+    assert cfg(["sonnet", "haiku"]).get_claude_fallback_model() == "sonnet,haiku"
 
 
 def test_claude_fallback_model_blank_entries_are_dropped():
-    assert Config(model={"fallback_model": [" ", ""]}).get_claude_fallback_model() is None
-    assert Config(model={"fallback_model": ",,"}).get_claude_fallback_model() is None
-
-
-def test_claude_thinking_settings_default_to_none():
-    config = Config()
-    assert config.model.always_thinking is None
-    assert config.model.max_thinking_tokens is None
+    assert Config(agent={"claude": {"fallback_model": [" ", ""]}}).get_claude_fallback_model() is None
+    assert Config(agent={"claude": {"fallback_model": ",,"}}).get_claude_fallback_model() is None
 
 
 def test_claude_max_thinking_tokens_rejects_negative():
     with pytest.raises(ValueError):
-        Config(model={"max_thinking_tokens": -1})
+        Config(agent={"claude": {"max_thinking_tokens": -1}})
 
 
 def test_timezone_defaults_to_none():
     assert Config().timezone is None
+
+
+def test_timezone_rejects_unknown_zone():
+    with pytest.raises(ValueError, match="Unknown IANA timezone"):
+        Config(timezone="Europ/Ljubljana")
 
 
 def test_claude_settings_from_yaml(tmp_path: Path, monkeypatch):
@@ -571,22 +595,22 @@ def test_claude_settings_from_yaml(tmp_path: Path, monkeypatch):
 agent:
   provider: claude-code
   claude:
-    use_host_auth: true
+    oauth_token: sk-ant-oat01-test
+    fallback_model: [sonnet, haiku]
+    always_thinking: true
+    max_thinking_tokens: 31999
 model:
   model: claude-opus-4-8
   reasoning_effort: xhigh
-  fallback_model: [sonnet, haiku]
-  always_thinking: true
-  max_thinking_tokens: 31999
 timezone: Europe/Ljubljana
 """
     )
     config = Config.from_yaml(config_file)
-    assert config.agent.claude.use_host_auth is True
+    assert config.claude_host_auth_active() is True
     assert config.model.reasoning_effort == "xhigh"
     assert config.get_claude_fallback_model() == "sonnet,haiku"
-    assert config.model.always_thinking is True
-    assert config.model.max_thinking_tokens == 31999
+    assert config.agent.claude.always_thinking is True
+    assert config.agent.claude.max_thinking_tokens == 31999
     assert config.timezone == "Europe/Ljubljana"
 
 

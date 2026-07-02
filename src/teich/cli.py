@@ -18,7 +18,7 @@ from rich.table import Table
 from typer.core import TyperCommand, TyperGroup
 
 from .anonymize import anonymize_path
-from .config import Config
+from .config import CLAUDE_PROVIDER_ALIASES, Config
 from .converter import NON_DATA_TRACE_DIR_NAMES, convert_traces_to_training_data
 from .extract import CURSOR_EXTRACTION_NOTICE, ExtractProvider, extract_local_sessions
 from .runner import (
@@ -716,16 +716,6 @@ def generate(
             "with its own output.traces_dir and publish.repo_id.[/yellow]"
         )
         raise typer.Exit(1)
-    # Fail fast for both prompts and bench mode: without a token every session
-    # (or bench task) would fail late, after workspaces/images are prepared.
-    if cfg.claude_host_auth_active() and not cfg.get_claude_oauth_token():
-        console.print(
-            "[red]Claude host-auth is enabled but no OAuth token was found. Run "
-            "`claude setup-token` on the host and export CLAUDE_CODE_OAUTH_TOKEN "
-            "(or set agent.claude.oauth_token), or disable agent.claude.use_host_auth.[/red]"
-        )
-        raise typer.Exit(1)
-
     if mode == "bench":
         from .bench import run_bench  # lazy: harbor is an optional extra
 
@@ -810,13 +800,19 @@ def generate(
                 )
         elif agent_provider == "pi":
             runner = PiRunner(cfg)
-        elif agent_provider in {"claude", "claude-code", "claude_code"}:
+        elif agent_provider in CLAUDE_PROVIDER_ALIASES:
             runner = ClaudeCodeRunner(cfg)
-            if cfg.agent.claude.use_host_auth:
+            if cfg.claude_host_auth_active():
                 console.print(
-                    "[yellow]Claude host-auth enabled: running on your Claude subscription "
-                    "via a long-lived OAuth token (usage counts against your plan's "
-                    "rate limits, not API credits).[/yellow]"
+                    "[yellow]Claude OAuth token found: running on your Claude subscription "
+                    "(usage counts against your plan's rate limits, not API credits). "
+                    "Unset CLAUDE_CODE_OAUTH_TOKEN to use an API key instead.[/yellow]"
+                )
+            elif cfg.get_claude_oauth_token() and cfg.get_base_url():
+                console.print(
+                    "[yellow]Claude OAuth token found but api.base_url is set; using the "
+                    "API/proxy path (subscription auth talks to the first-party Anthropic "
+                    "API only).[/yellow]"
                 )
             if cfg.agent.langfuse.enabled:
                 console.print(
@@ -1138,17 +1134,23 @@ agent:
   #   host_auth_file: null            # default: $CODEX_HOME/auth.json or ~/.codex/auth.json
   #   auth_dir: ./.teich/codex-auth
 
-  # Claude Code-only: use your Claude subscription (Pro/Max) instead of an API
-  # key. Create a long-lived token with `claude setup-token` on the host and
-  # export CLAUDE_CODE_OAUTH_TOKEN (or set oauth_token below); Teich passes it
-  # into each container and withholds ANTHROPIC_API_KEY (an API key silently
-  # wins over subscription auth inside Claude Code and would bill the API).
-  # Usage counts against your plan's rate limits, not API credits, and the
-  # token is safe at any max_concurrency. Incompatible with api.base_url:
-  # subscription auth talks to the first-party Anthropic API only.
+  # Claude Code-only settings.
+  # Subscription auth (Pro/Max): create a long-lived token with `claude
+  # setup-token` on the host and export CLAUDE_CODE_OAUTH_TOKEN (or set
+  # oauth_token below). When a token is available and api.base_url is unset,
+  # Teich passes it into each container and withholds ANTHROPIC_API_KEY (an API
+  # key silently wins over subscription auth inside Claude Code and would bill
+  # the API). Usage counts against your plan's rate limits, not API credits,
+  # and the token is safe at any max_concurrency.
+  # fallback_model forwards as --fallback-model (a model or list, tried in
+  # order on overload); always_thinking writes alwaysThinkingEnabled into the
+  # container's ~/.claude/settings.json; max_thinking_tokens sets
+  # MAX_THINKING_TOKENS in the container (0 disables thinking where allowed).
   # claude:
-  #   use_host_auth: true
   #   oauth_token: null               # prefer CLAUDE_CODE_OAUTH_TOKEN in the env
+  #   fallback_model: [sonnet, haiku]
+  #   always_thinking: true
+  #   max_thinking_tokens: null
 
   # Trace each agent session to Langfuse (https://langfuse.com). Works for Codex
   # and Claude Code -- each uses its own native integration (Codex plugin, Claude
@@ -1194,21 +1196,6 @@ model:
   # auth (agent.codex.use_host_auth) plus a supported model such as gpt-5.5 or
   # gpt-5.4. Leave null for the standard tier.
   service_tier: null
-
-  # Optional Claude Code fallback model chain, forwarded as --fallback-model.
-  # A single model or a list (Claude Code uses up to 3 after dedup); entries
-  # are aliases (sonnet, haiku) or full model names, tried in order when the
-  # primary model is overloaded or unavailable.
-  # fallback_model: [sonnet, haiku]
-  fallback_model: null
-
-  # Optional Claude Code extended-thinking (CoT) controls.
-  # always_thinking writes alwaysThinkingEnabled into the container's
-  # ~/.claude/settings.json so every turn gets extended thinking;
-  # max_thinking_tokens sets MAX_THINKING_TOKENS in the container (0 disables
-  # thinking on models that allow it). Leave null to use Claude Code defaults.
-  always_thinking: null
-  max_thinking_tokens: null
 
   # Optional context length override for providers that support it.
   # Useful for Hermes custom endpoints when /v1/models reports a served

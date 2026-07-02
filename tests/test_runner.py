@@ -842,7 +842,9 @@ def test_external_runner_chmods_workspace_before_snapshot():
     assert "chmod -R a+rwX /home/codex/.hermes /workspace" in command
 
 
-def test_claude_code_runner_uses_stream_json_and_prompt_file(tmp_path: Path):
+def test_claude_code_runner_uses_stream_json_and_prompt_file(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("TEICH_CLAUDE_OAUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     long_prompt = "x" * 40000
     config = Config(
         agent={"provider": "claude-code"},
@@ -1742,7 +1744,8 @@ def test_claude_forwards_reasoning_effort_as_effort_flag(tmp_path: Path):
 def test_claude_forwards_fallback_model_chain(tmp_path: Path):
     runner = _claude_runner(
         tmp_path,
-        model={"model": "claude-opus-4-8", "fallback_model": ["sonnet", "haiku"]},
+        agent={"provider": "claude-code", "claude": {"fallback_model": ["sonnet", "haiku"]}},
+        model={"model": "claude-opus-4-8"},
     )
     assert "--fallback-model sonnet,haiku" in runner._build_shell_command()
 
@@ -1757,7 +1760,8 @@ def test_claude_omits_effort_and_fallback_flags_when_unset(tmp_path: Path):
 def test_claude_prepare_agent_home_writes_always_thinking(tmp_path: Path):
     runner = _claude_runner(
         tmp_path,
-        model={"model": "claude-opus-4-8", "always_thinking": True},
+        agent={"provider": "claude-code", "claude": {"always_thinking": True}},
+        model={"model": "claude-opus-4-8"},
     )
     home_dir = tmp_path / "home"
     home_dir.mkdir()
@@ -1771,6 +1775,7 @@ def test_claude_prepare_agent_home_merges_thinking_with_langfuse_hooks(tmp_path:
         tmp_path,
         agent={
             "provider": "claude-code",
+            "claude": {"always_thinking": False},
             "langfuse": {
                 "enabled": True,
                 "public_key": "pk-lf-x",
@@ -1778,7 +1783,7 @@ def test_claude_prepare_agent_home_merges_thinking_with_langfuse_hooks(tmp_path:
                 "base_url": "https://cloud.langfuse.com",
             },
         },
-        model={"model": "claude-opus-4-8", "always_thinking": False},
+        model={"model": "claude-opus-4-8"},
     )
     home_dir = tmp_path / "home"
     home_dir.mkdir()
@@ -1800,7 +1805,7 @@ def test_claude_prepare_agent_home_writes_no_settings_by_default(tmp_path: Path)
 def test_claude_max_thinking_tokens_env_in_docker_command(tmp_path: Path):
     runner = _claude_runner(
         tmp_path,
-        model={"model": "claude-opus-4-8", "max_thinking_tokens": 31999},
+        agent={"provider": "claude-code", "claude": {"max_thinking_tokens": 31999}},
         api={"provider": "anthropic", "api_key": "sk-ant-test"},
     )
     command = runner._build_external_docker_base_command(
@@ -1813,7 +1818,7 @@ def test_claude_max_thinking_tokens_zero_is_forwarded(tmp_path: Path):
     """0 disables thinking, so it must not be treated as unset."""
     runner = _claude_runner(
         tmp_path,
-        model={"model": "claude-opus-4-8", "max_thinking_tokens": 0},
+        agent={"provider": "claude-code", "claude": {"max_thinking_tokens": 0}},
     )
     command = runner._build_external_docker_base_command(
         tmp_path / "ws", tmp_path / "home", "teich-claude-x"
@@ -1829,15 +1834,14 @@ def test_claude_max_thinking_tokens_absent_when_unset(tmp_path: Path):
     assert not any(part.startswith("MAX_THINKING_TOKENS=") for part in command)
 
 
-def test_claude_host_auth_passes_oauth_token_and_no_api_key(tmp_path: Path, monkeypatch):
-    """With host auth on, only the subscription token enters the container —
+def test_claude_token_activates_subscription_auth_and_hides_api_key(tmp_path: Path, monkeypatch):
+    """With a token resolvable, only the subscription token enters the container —
     an API key would silently win over it inside Claude Code."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-ambient-should-not-leak")
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-token")
     monkeypatch.delenv("TEICH_CLAUDE_OAUTH_TOKEN", raising=False)
     runner = _claude_runner(
         tmp_path,
-        agent={"provider": "claude-code", "claude": {"use_host_auth": True}},
         api={"provider": "anthropic", "api_key": "sk-ant-configured"},
     )
     command = runner._build_external_docker_base_command(
@@ -1849,19 +1853,9 @@ def test_claude_host_auth_passes_oauth_token_and_no_api_key(tmp_path: Path, monk
     assert not any(part.startswith("TEICH_API_KEY=") for part in command)
 
 
-def test_claude_host_auth_errors_without_token(tmp_path: Path, monkeypatch):
+def test_claude_without_token_passes_api_key(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     monkeypatch.delenv("TEICH_CLAUDE_OAUTH_TOKEN", raising=False)
-    runner = _claude_runner(
-        tmp_path,
-        agent={"provider": "claude-code", "claude": {"use_host_auth": True}},
-    )
-    with pytest.raises(RuntimeError, match="setup-token"):
-        runner._api_env_items()
-
-
-def test_claude_without_host_auth_still_passes_api_key(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-token")
     runner = _claude_runner(
         tmp_path,
         api={"provider": "anthropic", "api_key": "sk-ant-test"},
@@ -1871,6 +1865,25 @@ def test_claude_without_host_auth_still_passes_api_key(tmp_path: Path, monkeypat
     )
     assert "ANTHROPIC_API_KEY=sk-ant-test" in command
     assert not any(part.startswith("CLAUDE_CODE_OAUTH_TOKEN=") for part in command)
+
+
+def test_claude_base_url_wins_over_ambient_token(tmp_path: Path, monkeypatch):
+    """An explicit base_url keeps the API/proxy path even with an ambient token."""
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-token")
+    runner = _claude_runner(
+        tmp_path,
+        api={
+            "provider": "openrouter",
+            "api_key": "sk-or-test",
+            "base_url": "https://openrouter.ai/api/v1",
+        },
+        model={"model": "minimax/minimax-m2.5:free"},
+    )
+    command = runner._build_external_docker_base_command(
+        tmp_path / "ws", tmp_path / "home", "teich-claude-x"
+    )
+    assert not any(part.startswith("CLAUDE_CODE_OAUTH_TOKEN=") for part in command)
+    assert "ANTHROPIC_AUTH_TOKEN=sk-or-test" in command
 
 
 def test_external_docker_command_sets_timezone(tmp_path: Path):
